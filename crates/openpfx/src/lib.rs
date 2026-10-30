@@ -8,7 +8,9 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use memory_file::{obj as rps_obj, MemoryFileWriter};
-pub use rps::{encode_rps, parse_rps, pse_header_to_rps_preamble, read_rps, RpsHeader, RpsValue};
+pub use rps::{
+    encode_rps, parse_rps, pse_header_to_rps_preamble, read_rps, roundtrip_rps, RpsHeader, RpsValue,
+};
 
 #[derive(Debug, Error)]
 pub enum PfxError {

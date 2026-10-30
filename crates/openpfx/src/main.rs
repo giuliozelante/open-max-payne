@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use openpfx::{pse_header_to_rps_preamble, read_pse, read_rps, RpsValue};
+use openpfx::{pse_header_to_rps_preamble, read_pse, read_rps, roundtrip_rps, RpsValue};
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -24,6 +24,12 @@ enum Cmd {
     /// Write PSE flat-header fields as an RPS tagged preamble (graphs not included)
     ExportPreamble {
         pse: PathBuf,
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+    },
+    /// Parse a retail `.rps` and write it back (encode parity check; BYOD local use)
+    Repack {
+        input: PathBuf,
         #[arg(short = 'o', long)]
         output: PathBuf,
     },
@@ -94,6 +100,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 "Wrote {} bytes preamble → {} (particle graphs NOT exported yet)",
                 bytes.len(),
                 output.display()
+            );
+        }
+        Cmd::Repack { input, output } => {
+            let data = fs::read(&input)?;
+            let out = roundtrip_rps(&data)?;
+            fs::write(&output, &out)?;
+            println!(
+                "Repacked {} → {} ({} bytes, identical={})",
+                input.display(),
+                output.display(),
+                out.len(),
+                out == data
             );
         }
     }

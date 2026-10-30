@@ -123,6 +123,24 @@ pub fn parse_rps(data: &[u8]) -> Result<RpsHeader, PfxError> {
     })
 }
 
+/// Parse then re-encode; errors if the walker hit an unknown tag before EOF.
+pub fn roundtrip_rps(data: &[u8]) -> Result<Vec<u8>, PfxError> {
+    let h = parse_rps(data)?;
+    if let Some(RpsValue::Unknown { tag, at }) = h.values.last() {
+        return Err(PfxError::Msg(format!(
+            "unknown tag 0x{tag:02x} at {at}; cannot roundtrip"
+        )));
+    }
+    if h.bytes_consumed != data.len() {
+        return Err(PfxError::Msg(format!(
+            "walker stopped at {} of {} bytes",
+            h.bytes_consumed,
+            data.len()
+        )));
+    }
+    encode_rps(&h.values)
+}
+
 /// Encode known tagged values back to bytes (stops at `Unknown`).
 pub fn encode_rps(values: &[RpsValue]) -> Result<Vec<u8>, PfxError> {
     let mut out = Vec::new();
@@ -297,6 +315,33 @@ mod tests {
                 value: 35
             }
         ));
+    }
+
+    #[test]
+    fn roundtrip_rps_rejects_trailing_unknown() {
+        let buf = vec![0x14, 1, 0xff];
+        assert!(roundtrip_rps(&buf).is_err());
+    }
+
+    #[test]
+    fn roundtrip_rps_full_synthetic() {
+        let values = vec![
+            RpsValue::U8 {
+                tag: TAG_U8_A,
+                value: 96,
+            },
+            RpsValue::U8 {
+                tag: TAG_U8_A,
+                value: 5,
+            },
+            RpsValue::Vec3 {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+            },
+        ];
+        let bytes = encode_rps(&values).unwrap();
+        assert_eq!(roundtrip_rps(&bytes).unwrap(), bytes);
     }
 
     #[test]
