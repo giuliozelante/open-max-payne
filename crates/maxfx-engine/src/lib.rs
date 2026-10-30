@@ -175,22 +175,15 @@ pub fn count_ras_ldb_leading_vec3(data: &[u8]) -> usize {
 }
 
 /// One face-like record from a kind-`0x13` MemoryFile body (BYOD Startup).
+///
+/// Vertex indices are compressed ints (`0x14`/`0x13`/…) — not fixed u8 — so
+/// they can address the full `0x12` vertex cloud past 255.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RasLdbFace {
-    pub indices: [u8; 3],
+    pub indices: [i32; 3],
     pub attr: i32,
     pub normal: [f32; 3],
     pub point: [f32; 3],
-}
-
-fn read_mf_u8_int(data: &[u8], i: &mut usize) -> Option<u8> {
-    if *i + 2 > data.len() || data[*i] != 0x14 {
-        return None;
-    }
-    *i += 1;
-    let v = data[*i];
-    *i += 1;
-    Some(v)
 }
 
 fn read_mf_i32(data: &[u8], i: &mut usize) -> Option<i32> {
@@ -258,13 +251,13 @@ pub fn parse_ras_ldb_faces(body: &[u8], max: usize) -> Vec<RasLdbFace> {
     let mut i = 0;
     while out.len() < max && i < body.len() {
         let start = i;
-        let Some(i0) = read_mf_u8_int(body, &mut i) else {
+        let Some(i0) = read_mf_i32(body, &mut i) else {
             break;
         };
-        let Some(i1) = read_mf_u8_int(body, &mut i) else {
+        let Some(i1) = read_mf_i32(body, &mut i) else {
             break;
         };
-        let Some(i2) = read_mf_u8_int(body, &mut i) else {
+        let Some(i2) = read_mf_i32(body, &mut i) else {
             break;
         };
         let Some(attr) = read_mf_i32(body, &mut i) else {
@@ -700,6 +693,24 @@ mod tests {
         assert_eq!(faces.len(), 1);
         assert_eq!(faces[0].indices, [0, 3, 0]);
         assert_eq!(faces[0].attr, 804);
+        // index ≥ 256 uses 0x13 compressed int
+        let mut body2 = Vec::new();
+        body2.push(0x13);
+        body2.extend_from_slice(&300u16.to_le_bytes());
+        body2.extend_from_slice(&[0x14, 1, 0x14, 2]);
+        body2.push(0x13);
+        body2.extend_from_slice(&10u16.to_le_bytes());
+        body2.push(0x16);
+        for v in [0.0f32, 1.0, 0.0] {
+            body2.extend_from_slice(&v.to_le_bytes());
+        }
+        body2.push(0x16);
+        for v in [1.0f32, 2.0, 3.0] {
+            body2.extend_from_slice(&v.to_le_bytes());
+        }
+        let f2 = parse_ras_ldb_faces(&body2, 1);
+        assert_eq!(f2[0].indices, [300, 1, 2]);
+        assert_eq!(f2[0].attr, 10);
         assert!((faces[0].normal[2] - 1.0).abs() < 1e-5);
         assert!((faces[0].point[0] + 1.5).abs() < 1e-5);
     }

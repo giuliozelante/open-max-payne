@@ -99,17 +99,17 @@ Top-level sections share tag byte **`0x1c`** + kind byte + LE `u16` count:
 `LDB_RAS_MAGIC` = LE u16 for `1c 12`. Helpers: `parse_ras_ldb_section_at`,
 `parse_ras_ldb_header`, `count_ras_ldb_leading_vec3`, `ras_ldb_count_section_end`.
 
-Kind `0x13` body (Startup): openpfx MemoryFile walk of the first 64 KiB has no
-unknown tags. Repeating face-like groups:
+Kind `0x13` body (Startup): repeating face records; `count` equals the number
+of faces (19149). `parse_ras_ldb_faces` consumes the whole section:
 
 ```
-14 <i0>  14 <i1>  14 <i2>   # vertex indices into the 0x12 cloud?
-13 <u16>                    # compressed int (e.g. 804)
-16 <vec3>  16 <vec3>        # normal + point
+<compressed int> × 3   # vertex indices into the 0x12 cloud (0x14 / 0x13 / …)
+<compressed int>       # attr (often 804/805)
+0x16 vec3 × 2          # normal + point
 ```
 
-`count` ≈ group count (Startup 19149; ~47 B/group toward the next `1c 12`).
-ImportLevel `0x20` gate not yet located in this stream.
+After the last face, another `1c 13 …` section begins. ImportLevel `0x20` gate
+not yet located.
 
 ### Retail RAS `.ai`
 
