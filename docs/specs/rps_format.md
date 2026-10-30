@@ -1,6 +1,7 @@
 # ParticleFX RPS / PSE — Working Spec (Phase 4)
 
-**Status:** Draft. Rust `crates/openpfx`: `dump-pse`, `dump-rps`, `export-preamble` (header only).
+**Status:** Draft. Rust `crates/openpfx`: `dump-pse`, `dump-rps`, `export-preamble`,
+`MemoryFileWriter` (RLMFC tag parity). Full graph encode still WIP.
 
 **REA artifacts:**
 - `ParticleFX.exe` sha256 `3ce05189…69c7`
@@ -24,15 +25,52 @@ psysedit [-h] [-y] [-r] [-e filename(s)] [-d directory]
   -d   Export destination directory (must exist)
 ```
 
-Export implementation likely continues in `EditorDoc` / `E2MFC` / `RLMFC` (not fully decompiled yet).
+## Export write path (REA, issue #11)
 
-RPS load errors (from ParticleFX.exe strings):
+`ParticleFX.exe` `-e` lands in `FUN_0040d1d0`:
+
+1. File dialog filter `Runtime Particle Sets (*.rps)|*.rps||` (+ overwrite/`-y`/`-r` gates)
+2. `R_MemoryFile::R_MemoryFile(buf, 0x2000)`
+3. `FUN_0041ab00(mf, particleSystem*)` — serialize root + graphs
+4. `R_MemoryFile::save(mf, path)`
+
+### Object writers (callee chain)
+
+| Addr | Role | Header pair (`operator<<(mf,int*)` ×2) |
+|------|------|----------------------------------------|
+| `FUN_0041ab00` | Particle system root | type `0x60`, ver `5` then uint/float fields |
+| `FUN_00419be0` | Graph section | type `0x31`, count |
+| `FUN_00414d20` | Shared param block | type `0x20`, ver `3` |
+| `FUN_00417570` | Emitter / node | type `0x30`, ver `4` (+ paths, curves) |
+| `FUN_00418fe0` | Companion block | type `0x40`, ver `2` |
+| `FUN_00432fd0` | Sampled curve | type `0x71`, ver `3` then f32 samples |
+
+`RLMFC.DLL::operator<<` overload → on-disk tags:
+
+| C++ arg | Tag | Payload |
+|---------|-----|---------|
+| `int*` | `0x14` | u8 |
+| `uint*` | `0x11` | u8 |
+| `float*` | `0x09` | LE f32 |
+| `M_Vector3Template<float>*` | `0x16` | 3 × LE f32 |
+| string (BYOD) | `0x0d` | `14 <len>` + bytes |
+| blob (BYOD JPEG) | `0x13` | u16_le len + bytes |
+
+Mirrored in Rust: `openpfx::MemoryFileWriter` + `openpfx::rps_obj::*`.
+
+### Version / structure gate (load)
+
+`FUN_00422050` (`operator>>` pair):
 
 ```
-PS_ParticleSystem: Invalid File Version in %s
-Current: %8x  Expected: %8x
-PS_ParticleSystem: Invalid File Structure in %s
+read int → must be 0x60   else Invalid File Structure
+read int → must be 5      else Invalid File Version (format uses %8x)
 ```
+
+Strings: `PS_ParticleSystem: Invalid File Version in %s\nCurrent: %8x  Expected: %8x`
+and `T_Graph: Invalid File Version…` (graph object gate).
+
+**Expected root magic = type `0x60`, version `5`.** Same values PSE flat header word0/word1.
 
 ## PSE flat header
 
@@ -54,24 +92,27 @@ Observed tags (consistent across multiple `x_data.ras` samples):
 
 | Tag | Payload | Role |
 |-----|---------|------|
-| `0x14` | 1 × u8 | uint8 channel A |
-| `0x11` | 1 × u8 | uint8 channel B |
+| `0x14` | 1 × u8 | int channel (`operator<<(int*)`) |
+| `0x11` | 1 × u8 | uint channel |
 | `0x09` | 4 × LE f32 | float |
-| `0x0d` | `14 <len>` + bytes | relative path string (e.g. `fire\candleflame2\pflame.JPG`) |
-| `0x13` | u16_le length + bytes | embedded blob (often JPEG starting `FFD8`) |
-| `0x16` | 3 × LE f32 | vec3 (very common: `(0,0,0)`, `(0,1,0)`, …) |
+| `0x0d` | `14 <len>` + bytes | relative path string |
+| `0x13` | u16_le length + bytes | embedded blob (often JPEG `FFD8`) |
+| `0x16` | 3 × LE f32 | vec3 |
 
-Common prefix (candle / light examples):
+Common prefix (candle):
 
 ```
 14 60 | 14 05 | 11 NN | 09 00 00 20 40 | 11 0a | 09 00 00 20 40 | …
 ```
 
-i.e. u8(96), u8(5), u8(N), f32(2.5), u8(10), f32(2.5) — same *ideas* as the PSE header, packed as tags.
-`openpfx dump-rps` walks until an unknown tag; `export-preamble` writes that six-value header from a PSE (graphs omitted).
+BYOD `fire_candle_flame_large_1.rps` (2347 bytes): walker consumes **entire** file
+(312 values); `encode_rps` round-trips byte-identical (local probe, not in git).
+
+`openpfx dump-rps` walks until unknown tag; `export-preamble` writes the six-value
+header from a PSE (graphs omitted). Full `-e` parity = stream the object writers above.
 
 ## Next
 
-1. REA: `-e` / `EditorDoc` export → full graph encode + version `%8x`
-2. `openpfx export` parity with `psysedit -e` once version magic known
-3. Retire Python `tools/openpfx`
+1. Encode emitter/curve/string/blob bodies to match candle (finish `FUN_00417570`)
+2. `openpfx export` end-to-end vs BYOD fixture
+3. Retire Python `tools/openpfx` if any remains

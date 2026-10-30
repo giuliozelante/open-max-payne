@@ -59,6 +59,112 @@ pub fn looks_like_ldb_or_ai(data: &[u8]) -> bool {
     data.len() >= LDB_PREAMBLE.len() && data.starts_with(LDB_PREAMBLE)
 }
 
+/// One level entry from `\data\database\levels\levels.txt` (SharedDB catalog).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelsTxtEntry {
+    /// Block name, e.g. `part0_level1`.
+    pub id: String,
+    /// `Directory` property (e.g. `part1`, `front_end`).
+    pub directory: String,
+    /// `Level` property basename (e.g. `part0_level1.ldb`).
+    pub level_file: String,
+}
+
+impl LevelsTxtEntry {
+    /// In-archive win path: `\data\database\levels\{Directory}\{Level}`.
+    pub fn ldb_archive_path(&self) -> String {
+        format!(
+            "\\data\\database\\levels\\{}\\{}",
+            self.directory, self.level_file
+        )
+    }
+
+    /// Sibling `.ai` path (same basename); may be absent in the RAS.
+    pub fn ai_archive_path(&self) -> String {
+        let base = self
+            .level_file
+            .trim_end_matches(".ldb")
+            .trim_end_matches(".LDB");
+        format!("\\data\\database\\levels\\{}\\{base}.ai", self.directory)
+    }
+}
+
+/// Parse `levels.txt` SharedDB catalog into archive-relative `.ldb` paths.
+///
+/// Path construction (BYOD + exe strings `Levels.txt`,
+/// `Level "%s" not found from the database`):
+/// `\data\database\levels\` + `Directory` + `\` + `Level`.
+pub fn parse_levels_txt(text: &str) -> Vec<LevelsTxtEntry> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Find `[id]`
+        let Some(rel) = text[i..].find('[') else {
+            break;
+        };
+        let start = i + rel;
+        let Some(end_rel) = text[start + 1..].find(']') else {
+            break;
+        };
+        let id = text[start + 1..start + 1 + end_rel].trim();
+        let after = start + 1 + end_rel + 1;
+        // Skip nested property section headers like [Properties] — only top-level
+        // blocks that own Directory+Level count. Look ahead for `{`.
+        let rest = text[after..].trim_start();
+        if !rest.starts_with('{') {
+            i = after;
+            continue;
+        }
+        let body_start = after + (text[after..].len() - rest.len()) + 1;
+        let Some(body_end_rel) = text[body_start..].find('}') else {
+            break;
+        };
+        let body = &text[body_start..body_start + body_end_rel];
+        i = body_start + body_end_rel + 1;
+
+        // Nested `[Properties]` etc. appear inside body; still fine for field scan.
+        let directory = prop_value(body, "Directory");
+        let level_file = prop_value(body, "Level");
+        let (Some(directory), Some(level_file)) = (directory, level_file) else {
+            continue;
+        };
+        if id.eq_ignore_ascii_case("Properties")
+            || id.eq_ignore_ascii_case("Difficulty")
+            || id.eq_ignore_ascii_case("Timedmode")
+        {
+            continue;
+        }
+        out.push(LevelsTxtEntry {
+            id: id.to_string(),
+            directory,
+            level_file,
+        });
+    }
+    out
+}
+
+fn prop_value(body: &str, key: &str) -> Option<String> {
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("//") || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if !k.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let v = v.trim().trim_end_matches(';').trim();
+        let v = v.trim_matches('"').trim().to_string();
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    None
+}
+
 /// Pair `.ldb` / `.ai` basenames under `\\data\\database\\levels\\` (BYOD probe helper).
 pub fn list_level_packages(arc: &RasArchive) -> Vec<LevelPackage> {
     let mut ldbs: Vec<String> = Vec::new();
@@ -203,6 +309,35 @@ mod tests {
         assert_eq!(pkgs.len(), 1);
         assert!(pkgs[0].ldb.ends_with("Part1_Level1.ldb"));
         assert!(pkgs[0].ai.as_ref().unwrap().ends_with("Part1_Level1.ai"));
+    }
+
+    #[test]
+    fn parse_levels_txt_builds_archive_paths() {
+        let txt = r#"
+[startup_level]
+{
+	[Properties]
+	Directory 		= front_end;
+	Level 			= startup_level.ldb;
+}
+[part0_level1]
+{
+	[Properties]
+	Directory 		= part1;
+	Level 			= part0_level1.ldb;
+}
+"#;
+        let entries = parse_levels_txt(txt);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, "startup_level");
+        assert_eq!(
+            entries[0].ldb_archive_path(),
+            "\\data\\database\\levels\\front_end\\startup_level.ldb"
+        );
+        assert_eq!(
+            entries[1].ai_archive_path(),
+            "\\data\\database\\levels\\part1\\part0_level1.ai"
+        );
     }
 
     #[test]

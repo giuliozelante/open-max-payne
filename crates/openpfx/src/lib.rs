@@ -1,11 +1,13 @@
 //! ParticleFX editor project (`.pse`) + runtime (`.rps`) tooling — draft.
 //! Spec: docs/specs/rps_format.md
 
+pub mod memory_file;
 pub mod rps;
 
 use std::path::Path;
 use thiserror::Error;
 
+pub use memory_file::{MemoryFileWriter, obj as rps_obj};
 pub use rps::{encode_rps, parse_rps, pse_header_to_rps_preamble, read_rps, RpsHeader, RpsValue};
 
 #[derive(Debug, Error)]

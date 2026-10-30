@@ -1,4 +1,6 @@
-use maxfx_engine::{discover_ras_files, list_level_packages, open_archive};
+use maxfx_engine::{
+    discover_ras_files, list_level_packages, open_archive, parse_levels_txt,
+};
 use openras::RasArchive;
 use std::env;
 use std::path::Path;
@@ -57,6 +59,16 @@ fn main() -> ExitCode {
                     }
                 }
             }
+            if let Some(txt) = extract_levels_txt(&arc) {
+                let entries = parse_levels_txt(&txt);
+                println!("levels.txt entries ({}):", entries.len());
+                for e in entries.iter().take(12) {
+                    println!("  {} → {}", e.id, e.ldb_archive_path());
+                }
+                if entries.len() > 12 {
+                    println!("  … {} more", entries.len() - 12);
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -64,4 +76,20 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn extract_levels_txt(arc: &RasArchive) -> Option<String> {
+    const WANT: &str = "\\data\\database\\levels\\levels.txt";
+    for f in &arc.files {
+        let dname = arc
+            .directories
+            .get(f.dir_index as usize)
+            .map(|d| d.name.as_str())
+            .unwrap_or("\\");
+        let full = format!("{dname}{}", f.name);
+        if full.eq_ignore_ascii_case(WANT) {
+            return Some(String::from_utf8_lossy(&f.data).into_owned());
+        }
+    }
+    None
 }
