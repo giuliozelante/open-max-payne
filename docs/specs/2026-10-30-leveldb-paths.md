@@ -153,10 +153,11 @@ members (name, one or two paths, two bools). BYOD: Startup 9 cats @ `0x5b8d8d`
 after categories, `count`, `0`, u8 `0`, prefix `0x12` + u32 `size`
 (`256*256*3+18` on BYOD) + three u32s (`512,0,0`) + `01 00 01` + mark
 `18 20`, then `count` payloads with sep `00 00 00 01 00 01 18 20` between
-blobs. Startup 45 @ `0x5bb95f` → `0xe2be05`; Tutorial 9 → `0x95ad8d`.
-Next MF: room AABB (u8 corner count + `0x16` vec3s), `0x1a` 3×3 matrix, pos,
-then exit/room names (`::start::Exit0`, …) — soft-harvest via
-`ras_ldb_import_exit_names_at`. Full ImportRoom/Exit/`0x1c` nesting still open.
+non-last blobs (full `size` incl. 18-byte trailer). **Last blob is RGB only**
+(`size-18`) — exits/rooms resume immediately. Startup 45 → `0xe2bdf3`;
+Tutorial 9 → `0x95ad7b`. Next: ints + `::…::…` names, then room AABB
+(`11 <n>` + `0x16` corners, `0x1a` mat3, pos). Full ImportRoom/Exit/`0x1c`
+still open (`ras_ldb_import_exit_names_at` soft-harvest).
 
 ### Retail RAS `.ai`
 

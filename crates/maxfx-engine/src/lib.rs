@@ -742,7 +742,14 @@ pub fn parse_ras_ldb_import_lightmaps_at(data: &[u8], offset: usize) -> Option<(
         return None;
     }
     i += 2;
-    let need = size as usize;
+    // Declared `size` is RGB plane + 18-byte trailer between SEP-framed blobs.
+    // The last blob has no trailer — next MF (exits/rooms) begins at RGB end.
+    let rgb = if size == LDB_IMPORT_LIGHTMAP_RGB_SIZE {
+        (size - 18) as usize
+    } else {
+        size as usize
+    };
+    let framed = size as usize;
     for n in 0..count {
         if n > 0 {
             if i + 8 > data.len() || data[i..i + 8] != LDB_IMPORT_LIGHTMAP_SEP {
@@ -750,6 +757,7 @@ pub fn parse_ras_ldb_import_lightmaps_at(data: &[u8], offset: usize) -> Option<(
             }
             i += 8;
         }
+        let need = if n + 1 == count { rgb } else { framed };
         if i + need > data.len() {
             return None;
         }
@@ -1431,6 +1439,25 @@ mod tests {
         assert_eq!(n, 2);
         assert_eq!(end, body.len() - 1);
         assert_eq!(body[end], 0xff);
+    }
+
+    #[test]
+    fn last_lightmap_omits_18_byte_trailer() {
+        let rgb = (256 * 256 * 3) as usize;
+        let size = LDB_IMPORT_LIGHTMAP_RGB_SIZE;
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x14, 1, 0x14, 0, 0x11, 0, 0x12]);
+        body.extend_from_slice(&size.to_le_bytes());
+        body.extend_from_slice(&512u32.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&[0x01, 0x00, 0x01, 0x18, 0x20]);
+        body.extend_from_slice(&vec![0x80; rgb]);
+        body.extend_from_slice(&[0x14, 0x04]); // next MF after RGB
+        let (n, end) = parse_ras_ldb_import_lightmaps_at(&body, 0).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(end, body.len() - 2);
+        assert_eq!(&body[end..], &[0x14, 0x04]);
     }
 
     #[test]
