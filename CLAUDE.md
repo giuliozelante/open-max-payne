@@ -8,7 +8,8 @@ Standalone project: Max Payne 1 play + MAX-FX tools. **Baseline:** Linux Play + 
 - Spec + REA before claiming format details (`docs/specs/`)
 - Never commit `vendor/`, game installs, `*.exe`/`*.dll`/`*.ras`/`*.mpm`, or proprietary SDKs
 - Prefer Studio (`./openmaxfx`) as the “for dummies” path
-- Prefer `crates/openras` (Rust); no Python front door
+- Prefer Rust crates (`openras`, `maxfx-patcher`, `maxfx-play`); no Python front door
+- Studio Play/patch must call Rust crates — do not add Windows-required `.sh` paths
 
 ## Don’t
 

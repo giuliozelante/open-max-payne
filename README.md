@@ -7,12 +7,13 @@ You need your own retail CD / install. This project does **not** redistribute th
 
 | Area | Status |
 |------|--------|
-| **Linux Play** | Working lab path (Wine + d3d8to9 + DXVK; localized-safe stack) |
+| **Play (Rust)** | `maxfx-play` — Wine win32 `pfx/` on Unix; native EXE on Windows; localized-safe stack |
+| **1.05 patcher** | `maxfx-patcher` — HTTPS + SHA-256 allowlist; refuses SFX installers |
 | **`openras` (Rust)** | **Alpha** — list / extract / pack RAS/MPM; synthetic CI tests |
-| **Studio (Tauri)** | Linux GUI front door for Play + archives |
-| **Windows / macOS Play** | Planned |
+| **Studio (Tauri)** | GUI front door (Launch/Stop process tracking) |
+| **`.sh` runtime** | Linux convenience only — not required on Windows |
 | **`openpfx` / particles** | Draft specification |
-| **Blender KF2** | Specification / early architecture |
+| **Blender KF2** | Specification / early architecture (stub add-on) |
 
 ## Quick start (Linux)
 

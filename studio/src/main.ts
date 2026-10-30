@@ -294,14 +294,41 @@ window.addEventListener("DOMContentLoaded", async () => {
     });
   };
 
-  $("#btn-launch").onclick = async () => {
+  const launchBtn = $("#btn-launch") as HTMLButtonElement;
+  const stopBtn = $("#btn-stop") as HTMLButtonElement;
+
+  const syncRunning = async () => {
+    try {
+      const running = await invoke<boolean>("game_running");
+      launchBtn.disabled = running;
+      stopBtn.disabled = !running;
+    } catch {
+      /* ignore */
+    }
+  };
+
+  launchBtn.onclick = async () => {
     try {
       const st = await refreshStatus();
       if (st.safedisc) {
-        stamp("Blocked: SafeDisc stub still present. Apply 1.05 + FixPack CD exe first.");
+        stamp("Blocked: SafeDisc stub still present. Apply 1.05 first.");
+        return;
+      }
+      if (!st.graphics_stack_ok) {
+        stamp("Graphics stack not OK — apply localized-safe stack first.");
         return;
       }
       stamp(await invoke<string>("launch_game", { dest: input("#game-dir").value }));
+      await syncRunning();
+    } catch (e) {
+      stamp(`ERROR: ${e}`);
+    }
+  };
+
+  stopBtn.onclick = async () => {
+    try {
+      stamp(await invoke<string>("stop_game"));
+      await syncRunning();
     } catch (e) {
       stamp(`ERROR: ${e}`);
     }
@@ -317,6 +344,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   try {
     await refreshStatus();
+    await syncRunning();
   } catch (e) {
     stamp(`Status: ${e}`);
   }

@@ -1,6 +1,14 @@
+use maxfx_patcher::{
+    apply_dropin_105, classify_patch_file, sha256_file, PatchKind, PATCH_105_SHA256,
+    PATCH_105_URL_HTTPS,
+};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use tauri::State;
+
+struct GameProc(Mutex<Option<Child>>);
 
 #[derive(Clone, Serialize)]
 struct Paths {
@@ -36,8 +44,6 @@ struct GameStatus {
 
 const FIXPACK_GUIDE_URL: &str =
     "https://steamcommunity.com/sharedfiles/filedetails/?id=1633394421";
-const PATCH_105_URL: &str =
-    "http://updates.rockstargames.com/patches/maxpayne/maxpayne1-05patch.exe";
 
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
@@ -65,7 +71,6 @@ fn discover_root() -> Result<PathBuf, String> {
         manifest.join("../.."),
         manifest.join("../../.."),
         std::env::current_dir().unwrap_or_default(),
-        home_dir().join("Lavoro/personale/open-max-payne"),
     ] {
         if let Ok(c) = cand.canonicalize() {
             if looks_like_root(&c) {
@@ -98,79 +103,27 @@ fn paths_now() -> Result<Paths, String> {
             .display()
             .to_string(),
         fixpack_guide_url: FIXPACK_GUIDE_URL.to_string(),
-        patch_105_url: PATCH_105_URL.to_string(),
+        patch_105_url: PATCH_105_URL_HTTPS.to_string(),
     })
 }
 
-/// PE section names include SafeDisc-style `stxt*` stubs (REA: entry in stxt371).
 fn pe_has_safedisc_stub(exe: &Path) -> bool {
-    let Ok(data) = std::fs::read(exe) else {
-        return false;
-    };
-    if data.len() < 0x40 || &data[0..2] != b"MZ" {
-        return false;
-    }
-    let e_lfanew = u32::from_le_bytes(data[0x3c..0x40].try_into().unwrap_or([0; 4])) as usize;
-    if e_lfanew + 24 >= data.len() || &data[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
-        return false;
-    }
-    let nsec = u16::from_le_bytes(data[e_lfanew + 6..e_lfanew + 8].try_into().unwrap_or([0; 2]))
-        as usize;
-    let opt = u16::from_le_bytes(data[e_lfanew + 20..e_lfanew + 22].try_into().unwrap_or([0; 2]))
-        as usize;
-    let mut off = e_lfanew + 24 + opt;
-    for _ in 0..nsec {
-        if off + 8 > data.len() {
-            break;
-        }
-        let name = String::from_utf8_lossy(&data[off..off + 8])
-            .trim_matches(char::from(0))
-            .to_ascii_lowercase();
-        if name.starts_with("stxt") {
-            return true;
-        }
-        off += 40;
-    }
-    false
+    std::fs::read(exe)
+        .map(|d| maxfx_patcher::has_safedisc_stub(&d))
+        .unwrap_or(false)
 }
 
 fn d3d9_looks_like_thirteenag(path: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
-    // ThirteenAG wrapper ~90KB; DXVK x32 is multi-MB
     meta.len() < 200_000
-}
-
-/// Non-English `x_<lang>.ras` (french, german, italian, spanish, …).
-/// Ignores `x_english`, `x_data`, `x_music`, `x_level*`.
-fn detect_localized_lang(dest: &Path) -> Option<String> {
-    let Ok(rd) = std::fs::read_dir(dest) else {
-        return None;
-    };
-    for ent in rd.flatten() {
-        let name = ent.file_name();
-        let name = name.to_string_lossy();
-        let lower = name.to_ascii_lowercase();
-        if !lower.starts_with("x_") || !lower.ends_with(".ras") {
-            continue;
-        }
-        let stem = &lower[2..lower.len() - 4];
-        match stem {
-            "english" | "data" | "music" | "level" => continue,
-            s if s.starts_with("level") && s[5..].chars().all(|c| c.is_ascii_digit()) => {
-                continue;
-            }
-            s => return Some(s.to_string()),
-        }
-    }
-    None
 }
 
 fn game_status_inner(dest: &Path) -> GameStatus {
     let exe = dest.join("MaxPayne.exe");
     let has_exe = exe.is_file();
-    let localized_lang = detect_localized_lang(dest);
+    let localized_lang = maxfx_play::detect_localized_lang(dest);
     let localized = localized_lang.is_some();
     let safedisc = has_exe && pe_has_safedisc_stub(&exe);
     let has_patch_105_installer = dest.join("maxpayne1-05patch.exe").is_file();
@@ -448,75 +401,63 @@ fn game_status(dest: String) -> Result<GameStatus, String> {
     Ok(game_status_inner(&dir))
 }
 
-/// Rockstar's current `maxpayne1-05patch.exe` is a **drop-in game EXE** (no `stxt*`
-/// SafeDisc sections, contains rlmfc / startup-dialog strings) — running it *is*
-/// launching Max Payne. Older mirrors were real installers; detect both.
-fn looks_like_maxpayne_game_exe(path: &Path) -> bool {
-    let Ok(data) = std::fs::read(path) else {
-        return false;
-    };
-    if data.len() < 0x100 || &data[0..2] != b"MZ" {
-        return false;
-    }
-    let has_rlmfc = data.windows(9).any(|w| w == b"rlmfc.dll");
-    let has_startup = data
-        .windows(20)
-        .any(|w| w == b"Max Payne startup di" || w.starts_with(b"MaxPayne_HUD"));
-    has_rlmfc && has_startup && !pe_has_safedisc_stub(path)
-}
-
 #[tauri::command]
 fn ensure_patch_105(dest: String) -> Result<String, String> {
     let dir = PathBuf::from(&dest);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let patch = dir.join("maxpayne1-05patch.exe");
-    if patch.is_file() && patch.metadata().map(|m| m.len() > 1_000_000).unwrap_or(false) {
-        return Ok(format!("Already present: {}", patch.display()));
+    if patch.is_file() {
+        match classify_patch_file(&patch) {
+            Ok(PatchKind::DropIn105) => {
+                return Ok(format!(
+                    "Already present + SHA-256 OK: {} ({PATCH_105_SHA256})",
+                    patch.display()
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Existing {} rejected: {e}. Delete it and retry, or place a known drop-in (sha256={PATCH_105_SHA256}).",
+                    patch.display()
+                ));
+            }
+        }
     }
     if !command_exists("curl") {
-        return Err("curl missing — cannot download 1.05 patch".into());
+        return Err(format!(
+            "curl missing — place maxpayne1-05patch.exe manually (sha256={PATCH_105_SHA256})"
+        ));
+    }
+    // HTTPS only
+    if !PATCH_105_URL_HTTPS.starts_with("https://") {
+        return Err("Refusing non-HTTPS patch URL".into());
     }
     let status = Command::new("curl")
         .args(["-fL", "--retry", "3", "-o"])
         .arg(&patch)
-        .arg(PATCH_105_URL)
+        .arg(PATCH_105_URL_HTTPS)
         .status()
         .map_err(|e| e.to_string())?;
     if !status.success() {
         let _ = std::fs::remove_file(&patch);
-        return Err(format!("Download failed (exit {:?})", status.code()));
+        return Err(format!("HTTPS download failed (exit {:?})", status.code()));
     }
-    Ok(format!("Downloaded {}", patch.display()))
+    let got = sha256_file(&patch).map_err(|e| e.to_string())?;
+    if got != PATCH_105_SHA256 {
+        let _ = std::fs::remove_file(&patch);
+        return Err(format!(
+            "Downloaded file SHA-256 mismatch (got {got}, expected {PATCH_105_SHA256})"
+        ));
+    }
+    classify_patch_file(&patch).map_err(|e| e.to_string())?;
+    Ok(format!("Downloaded + verified {}", patch.display()))
 }
 
 #[tauri::command]
 fn run_patch_105(dest: String) -> Result<String, String> {
     let dir = PathBuf::from(&dest);
-    ensure_patch_105(dest.clone())?;
+    ensure_patch_105(dest)?;
     let patch = dir.join("maxpayne1-05patch.exe");
-    let exe = dir.join("MaxPayne.exe");
-
-    if looks_like_maxpayne_game_exe(&patch) {
-        // Apply as replacement EXE (what Rockstar currently hosts).
-        if exe.is_file() {
-            let bak = dir.join("MaxPayne.exe.safedisc.bak");
-            if !bak.is_file() {
-                std::fs::copy(&exe, &bak).map_err(|e| e.to_string())?;
-            }
-        }
-        std::fs::copy(&patch, &exe).map_err(|e| e.to_string())?;
-        // keep patch file as reference copy
-        let applied = dir.join("MaxPayne.exe");
-        let safedisc_gone = !pe_has_safedisc_stub(&applied);
-        return Ok(format!(
-            "Applied 1.05 as MaxPayne.exe (Rockstar file is a drop-in EXE, not an installer). \
-             Backup: MaxPayne.exe.safedisc.bak. SafeDisc stub removed: {safedisc_gone}. \
-             Next: FixPack (Startup fix + d3d8to9), then Launch — do not “run” the patch file."
-        ));
-    }
-
-    // Legacy installer-shaped patch
-    spawn_wine_desktop(&dir, "MP105", "1024x768", &patch)
+    apply_dropin_105(&dir, &patch).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -526,7 +467,20 @@ fn run_fixpack_installer(dest: String, installer: String) -> Result<String, Stri
     if !inst.is_file() {
         return Err(format!("Installer not found: {installer}"));
     }
-    // Copy into game dir if outside (Wine path simplicity)
+    // Never launch a Max Payne drop-in / game EXE as “FixPack”
+    if classify_patch_file(&inst).is_ok() || pe_has_safedisc_stub(&inst) {
+        return Err(
+            "Refusing: that file looks like MaxPayne.exe / 1.05 drop-in, not FixPack".into(),
+        );
+    }
+    let name = inst
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if name == "maxpayne.exe" || name.contains("1-05") || name.contains("105") {
+        return Err("Refusing game/patch-shaped filename for FixPack runner".into());
+    }
     let local = dir.join(inst.file_name().unwrap_or_default());
     if local != inst {
         let _ = std::fs::copy(&inst, &local);
@@ -555,70 +509,97 @@ fn open_url(url: String) -> Result<(), String> {
 #[tauri::command]
 fn apply_localized_safe_stack(dest: String) -> Result<String, String> {
     let root = discover_root()?;
-    let script = root.join("runtime/localized-safe-stack.sh");
-    let mut cmd = Command::new("bash");
-    cmd.arg(&script).arg(&dest);
-    run_capture(cmd)
+    let overlays = root.join("runtime/overlays");
+    maxfx_play::apply_localized_safe_stack(Path::new(&dest), &overlays)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn launch_game(dest: String) -> Result<String, String> {
+fn launch_game(dest: String, state: State<'_, GameProc>) -> Result<String, String> {
     let dir = PathBuf::from(&dest);
-    // Auto-heal localized CD crash stack before launch
-    if detect_localized_lang(&dir).is_some() {
-        let st = game_status_inner(&dir);
-        if !st.graphics_stack_ok {
-            let _ = apply_localized_safe_stack(dest.clone());
+    {
+        let mut slot = state.0.lock().map_err(|e| e.to_string())?;
+        if let Some(child) = slot.as_mut() {
+            match child.try_wait() {
+                Ok(None) => {
+                    return Err("Game already running — use Stop first".into());
+                }
+                Ok(Some(_)) => {
+                    *slot = None;
+                }
+                Err(_) => {
+                    *slot = None;
+                }
+            }
         }
     }
-    let launcher = dir.join("launch-openmaxfx.sh");
-    let exe = dir.join("MaxPayne.exe");
-    let log = dir.join("openmaxfx-launch.log");
-    let log_hint = format!("Watch {}", log.display());
 
-    if launcher.is_file() {
-        Command::new("bash")
-            .arg(&launcher)
-            .current_dir(&dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(format!(
-            "Launched {}. {}",
-            launcher.display(),
-            log_hint
-        ));
+    if maxfx_play::detect_localized_lang(&dir).is_some() {
+        let st = game_status_inner(&dir);
+        if !st.graphics_stack_ok {
+            apply_localized_safe_stack(dest.clone())?;
+        }
     }
-    if exe.is_file() {
-        let mut cmd = Command::new("wine");
-        cmd.arg(&exe)
-            .current_dir(&dir)
-            .env("WINEPREFIX", dir.join(".wine"))
-            .stdin(Stdio::null());
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log)
-            .map_err(|e| e.to_string())?;
-        let log_err = log_file
-            .try_clone()
-            .map_err(|e| e.to_string())?;
-        cmd.stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(log_err))
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(format!("Launched {}. {}", exe.display(), log_hint));
+    maxfx_play::graphics_dlls_ok(&dir).map_err(|e| e.to_string())?;
+
+    let child = maxfx_play::spawn_game(&dir).map_err(|e| e.to_string())?;
+    let log = dir.join("openmaxfx-launch.log");
+    let mut slot = state.0.lock().map_err(|e| e.to_string())?;
+    *slot = Some(child);
+    Ok(format!(
+        "Launched MaxPayne (Wine win32 prefix pfx/ or native). Watch {}",
+        log.display()
+    ))
+}
+
+#[tauri::command]
+fn stop_game(state: State<'_, GameProc>) -> Result<String, String> {
+    let mut slot = state.0.lock().map_err(|e| e.to_string())?;
+    match slot.take() {
+        Some(mut child) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Ok("Stopped game process".into())
+        }
+        None => Ok("No tracked game process".into()),
     }
-    Err(format!("Nothing to launch in {dest}"))
+}
+
+#[tauri::command]
+fn game_running(state: State<'_, GameProc>) -> Result<bool, String> {
+    let mut slot = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(child) = slot.as_mut() {
+        match child.try_wait() {
+            Ok(None) => Ok(true),
+            Ok(Some(_)) => {
+                *slot = None;
+                Ok(false)
+            }
+            Err(_) => {
+                *slot = None;
+                Ok(false)
+            }
+        }
+    } else {
+        Ok(false)
+    }
 }
 
 #[tauri::command]
 fn run_tests() -> Result<String, String> {
     let root = discover_root()?;
     let mut cmd = Command::new("cargo");
-    cmd.args(["test", "-p", "openras", "--", "--quiet"]);
+    cmd.args([
+        "test",
+        "-p",
+        "openras",
+        "-p",
+        "maxfx-patcher",
+        "-p",
+        "maxfx-play",
+        "--",
+        "--quiet",
+    ]);
     cmd.current_dir(&root);
     run_capture(cmd)
 }
@@ -653,6 +634,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
+        .manage(GameProc(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_paths,
             list_archive,
@@ -668,6 +650,8 @@ pub fn run() {
             apply_localized_safe_stack,
             open_url,
             launch_game,
+            stop_game,
+            game_running,
             run_tests,
             open_in_file_manager,
         ])

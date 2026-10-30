@@ -18,5 +18,5 @@ Done when:
   - [x] Linux CD install → ~/Games/MaxPayne1 (exe + .ras + launcher)
   - [x] Native Tauri Studio binary + `./openmaxfx` front door
   - [x] Rust `crates/openras` + synthetic CI tests (Inc 1–2)
-  - [ ] Blender KF2 path documented/stubbed (deferred)
-  - [ ] Inc 3: patcher HTTPS/hash + Wine32 fail-closed (deferred)
+  - [x] Blender KF2 path documented/stubbed (`tools/blender_io_kf2`, kf2_format.md)
+  - [x] Inc 3: `maxfx-patcher` HTTPS+SHA256, refuse SFX; `maxfx-play` Wine32/fail-closed; Studio process manager

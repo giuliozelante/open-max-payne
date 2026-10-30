@@ -52,8 +52,19 @@ Example (dodgeleft anim): bone names `Pelvis`, `Toe-R`, `Foot-R`, `UpLeg-L`, …
 3. Keyframe track encoding inside `0C 13` (times + quat/pos).
 4. Differences between static prop KF2 vs skeletal anim KF2 vs KFS.
 
+## Clean-room struct sketch (working)
+
+```text
+KF2 stream := { Chunk | TaggedString }*
+Chunk      := 0x0C <u16 kind> <u16 flags?> <payload...>
+TaggedString := 0x0D 0x14 <u8 len> <latin1[len]>
+```
+
+Exact `createChunk` size words still TBD (REA). Vertex buffers likely follow material
+string chunks; skeletal tracks live under `0C 12` / `0C 13`.
+
 ## Implementation plan
 
-1. `tools/blender_io_kf2` — Blender 4.x addon: import strings + bone hierarchy first, then meshes.
-2. Round-trip tests on `medipack_small.kf2` and `dodgeleft.KF2`.
-3. Cross-check writer against `KFExport.dle` decompilation of export path.
+1. `tools/blender_io_kf2` — Blender 4.x addon (stub registered); import strings + bones first.
+2. Synthetic unit tests once chunk header layout is locked (no retail `.kf2` in git).
+3. Cross-check writer against `KFExport.dle` REA (local vendor only).

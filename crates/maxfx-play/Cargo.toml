@@ -1,0 +1,10 @@
+[package]
+name = "maxfx-play"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform Max Payne 1 launch + localized Wine-safe stack (Rust; no bash required)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+maxfx-patcher = { path = "../maxfx-patcher" }
+thiserror = "2"

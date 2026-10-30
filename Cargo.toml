@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/openras", "studio/src-tauri"]
+members = [
+  "crates/openras",
+  "crates/maxfx-patcher",
+  "crates/maxfx-play",
+  "studio/src-tauri",
+]
 
 [workspace.package]
 edition = "2021"

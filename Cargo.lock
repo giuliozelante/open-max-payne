@@ -2087,6 +2087,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "maxfx-patcher"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "maxfx-play"
+version = "0.1.0"
+dependencies = [
+ "maxfx-patcher",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2456,6 +2473,8 @@ dependencies = [
 name = "open-max-payne-studio"
 version = "0.1.0"
 dependencies = [
+ "maxfx-patcher",
+ "maxfx-play",
  "openras",
  "serde",
  "serde_json",
