@@ -149,8 +149,12 @@ texture name, path, path2, two `0x0e` bools, then `member_count - 1` child
 members (name, one or two paths, two bools). BYOD: Startup 9 cats @ `0x5b8d8d`
 → `0x5bb95f`; Tutorial 25 cats @ `0x7a7026` → `0x7aac8f`.
 
-After categories a binary-ish header begins (`14 <n> 14 00 11 00` then raw —
-likely ImportBSP/Room/…). Still open.
+**`X_LevelDBImportLightmap`** (skip-walker `parse_ras_ldb_import_lightmaps_at`):
+after categories, `count`, `0`, u8 `0`, prefix `0x12` + u32 `size`
+(`256*256*3+18` on BYOD) + three u32s (`512,0,0`) + `01 00 01` + mark
+`18 20`, then `count` payloads with sep `00 00 00 01 00 01 18 20` between
+blobs. Startup 45 @ `0x5bb95f` → `0xe2be05`; Tutorial 9 → `0x95ad8d`.
+Next MF strings include `::start::Exit0` / `::StartRoom::Exit0` (ImportRoom/Exit).
 
 ### Retail RAS `.ai`
 

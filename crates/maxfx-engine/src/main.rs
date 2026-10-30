@@ -2,8 +2,9 @@ use maxfx_engine::{
     classify_ldb_lead, count_ras_ldb_leading_vec3, discover_ras_files, list_level_packages,
     looks_like_ldb_or_ai, looks_like_memory_file_ai, looks_like_memory_file_ldb,
     looks_like_ras_ldb, open_archive, parse_levels_txt, parse_ras_ldb_faces,
-    parse_ras_ldb_header, parse_ras_ldb_import_material_categories_at,
-    parse_ras_ldb_import_materials_at, parse_ras_ldb_import_textures, parse_ras_ldb_section_at,
+    parse_ras_ldb_header, parse_ras_ldb_import_lightmaps_at,
+    parse_ras_ldb_import_material_categories_at, parse_ras_ldb_import_materials_at,
+    parse_ras_ldb_import_textures, parse_ras_ldb_section_at,
     ras_ldb_after_geometry, ras_ldb_after_import_materials, ras_ldb_count_section_end,
     ras_ldb_first_mf_section_body, ras_ldb_import_paths, ras_ldb_import_stats,
     ras_ldb_vec3_section_end, split_ldb_records, walk_ras_ldb_known_sections,
@@ -153,6 +154,13 @@ fn main() -> ExitCode {
                                                     c.texture,
                                                     c.flag_a,
                                                     c.flag_b
+                                                );
+                                            }
+                                            if let Some((lc, lend)) =
+                                                parse_ras_ldb_import_lightmaps_at(&data, cend)
+                                            {
+                                                println!(
+                                                    "  import lightmaps @{cend:#x}: count={lc} end={lend:#x}"
                                                 );
                                             }
                                         }

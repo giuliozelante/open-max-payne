@@ -686,6 +686,78 @@ pub fn ras_ldb_after_import_materials(data: &[u8]) -> Option<usize> {
     }
 }
 
+/// Separator between ImportLightmap blobs after the first (`00 00 00 01 00 01 18 20`).
+pub const LDB_IMPORT_LIGHTMAP_SEP: [u8; 8] =
+    [0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x18, 0x20];
+
+/// Blob marker immediately before each lightmap payload (`0x18 0x20`).
+pub const LDB_IMPORT_LIGHTMAP_MARK: [u8; 2] = [0x18, 0x20];
+
+/// Retail BYOD blob size: `256*256*3 + 18` (RGB plane + 18 trailing/leading bytes).
+pub const LDB_IMPORT_LIGHTMAP_RGB_SIZE: u32 = 256 * 256 * 3 + 18;
+
+/// Skip `X_LevelDBImportLightmap` blob list after material categories.
+///
+/// Layout (BYOD Startup/Tutorial): count int, `0`, u8 `0`, then shared prefix
+/// (`0x12`, u32 size, three u32s often `512,0,0`, bytes `01 00 01`, mark
+/// `18 20`), then `count` payloads of `size` bytes with
+/// [`LDB_IMPORT_LIGHTMAP_SEP`] before each blob after the first.
+///
+/// Returns `(count, offset_after_list)`.
+pub fn parse_ras_ldb_import_lightmaps_at(data: &[u8], offset: usize) -> Option<(u32, usize)> {
+    if offset >= data.len() {
+        return None;
+    }
+    let mut i = offset;
+    let count = read_mf_i32(data, &mut i)? as u32;
+    let z = read_mf_i32(data, &mut i)?;
+    if z != 0 {
+        return None;
+    }
+    let u = read_mf_uint_u8(data, &mut i)?;
+    if u != 0 {
+        return None;
+    }
+    if i >= data.len() || data[i] != 0x12 {
+        return None;
+    }
+    i += 1;
+    if i + 4 > data.len() {
+        return None;
+    }
+    let size = u32::from_le_bytes(data[i..i + 4].try_into().ok()?);
+    i += 4;
+    if size == 0 || i + 12 + 3 + 2 > data.len() {
+        return None;
+    }
+    let _f1 = u32::from_le_bytes(data[i..i + 4].try_into().ok()?);
+    let _f2 = u32::from_le_bytes(data[i + 4..i + 8].try_into().ok()?);
+    let _f3 = u32::from_le_bytes(data[i + 8..i + 12].try_into().ok()?);
+    i += 12;
+    if data[i..i + 3] != [0x01, 0x00, 0x01] {
+        return None;
+    }
+    i += 3;
+    if data[i..i + 2] != LDB_IMPORT_LIGHTMAP_MARK {
+        return None;
+    }
+    i += 2;
+    let need = size as usize;
+    for n in 0..count {
+        if n > 0 {
+            if i + 8 > data.len() || data[i..i + 8] != LDB_IMPORT_LIGHTMAP_SEP {
+                return None;
+            }
+            i += 8;
+        }
+        if i + need > data.len() {
+            return None;
+        }
+        i += need;
+    }
+    Some((count, i))
+}
+
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
     let mut out = Vec::new();
     let mut off = 0;
@@ -1292,6 +1364,29 @@ mod tests {
         assert_eq!(mats[0].name, "mat");
         assert_eq!(mats[0].texture, "t.JPG");
         assert_eq!(mats[0].index, 7);
+    }
+
+    #[test]
+    fn skips_import_lightmap_blobs() {
+        // count=2, shared hdr, two RGB-sized blobs with separator
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x14, 2, 0x14, 0, 0x11, 0]);
+        body.push(0x12); // mystery
+        let size = 32u32; // tiny stand-in (retail uses 196626)
+        body.extend_from_slice(&size.to_le_bytes());
+        body.extend_from_slice(&512u32.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&[0x01, 0x00, 0x01]);
+        body.extend_from_slice(&[0x18, 0x20]);
+        body.extend_from_slice(&vec![0xab; size as usize]);
+        body.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x18, 0x20]);
+        body.extend_from_slice(&vec![0xcd; size as usize]);
+        body.push(0xff); // sentinel after
+        let (n, end) = parse_ras_ldb_import_lightmaps_at(&body, 0).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(end, body.len() - 1);
+        assert_eq!(body[end], 0xff);
     }
 
     #[test]
