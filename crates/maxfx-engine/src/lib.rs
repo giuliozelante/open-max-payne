@@ -92,6 +92,9 @@ pub struct AiC7Record {
     pub tail: Vec<u8>,
 }
 
+/// BYOD `.ai` probe: dense payloads starting `89 6a 93 7a` (common lead family).
+pub const AI_89_MAGIC: &[u8] = &[0x89, 0x6a, 0x93, 0x7a];
+
 impl LdbRecord {
     /// Parse as `c7` opcode record if the dense payload matches.
     pub fn as_ai_c7(&self) -> Option<AiC7Record> {
@@ -103,6 +106,11 @@ impl LdbRecord {
             sub: s[1],
             tail: s[2..].to_vec(),
         })
+    }
+
+    /// True when space-stripped payload begins with [`AI_89_MAGIC`].
+    pub fn is_ai_89_magic(&self) -> bool {
+        self.space_stripped().starts_with(AI_89_MAGIC)
     }
 }
 
@@ -371,6 +379,10 @@ mod tests {
         assert!(!looks_like_memory_file_ldb(LDB_PREAMBLE));
         assert_eq!(classify_ldb_lead(0x14), "mf-tag");
         assert_eq!(classify_ldb_lead(0xc7), "ai-c7");
+        let mut magic = Vec::from(LDB_PREAMBLE);
+        magic.extend_from_slice(b"\x89\x6a\x93\x7a\x00>");
+        let recs = split_ldb_records(&magic).unwrap();
+        assert!(recs[0].is_ai_89_magic());
     }
 
     #[test]

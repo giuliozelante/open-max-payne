@@ -113,7 +113,7 @@ Payloads are densely padded with `0x20`. Helpers:
 
 | Lead | Approx count | Notes |
 |------|--------------|-------|
-| `0x89` | ~110 | dominant; opcode TBD |
+| `0x89` | ~110 | often `89 6a 93 7a` magic then mixed/`14`/`16` tags (`is_ai_89_magic`) |
 | `0x14` | ~72 | MemoryFile int tag as first dense byte |
 | `0xc7` | ~6 | `c7 <sub> <tail…>`; helper `LdbRecord::as_ai_c7` |
 | `0x80` | singleton rows | often 1-byte records |
