@@ -108,8 +108,10 @@ of faces (19149). `parse_ras_ldb_faces` consumes the whole section:
 0x16 vec3 × 2          # normal + point
 ```
 
-After the last face, another `1c 13 …` section begins. ImportLevel `0x20` gate
-not yet located.
+After the last face, another `1c 13 …` section begins (Startup @1543898,
+count=7748) whose body opens with tagged vec3s then more MF ints — **not** the
+same face record layout. Treat kind `0x13` as “MemoryFile payload” with
+per-section schemas still WIP. ImportLevel `0x20` gate not yet located.
 
 ### Retail RAS `.ai`
 
