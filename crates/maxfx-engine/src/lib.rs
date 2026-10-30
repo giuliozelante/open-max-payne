@@ -307,6 +307,28 @@ pub fn looks_like_memory_file_ai(data: &[u8]) -> bool {
     data.len() >= 2 && data[0] == 0x14 && data[1] != LDB_IMPORT_VERSION as u8
 }
 
+/// First four compressed ints from a retail RAS `.ai` head (BYOD Tutorial:
+/// 123, 10, 0, 0). Full schema still WIP — walker dies early on later tags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RasAiHeader {
+    pub a: i32,
+    pub b: i32,
+    pub c: i32,
+    pub d: i32,
+}
+
+pub fn parse_ras_ai_header(data: &[u8]) -> Option<RasAiHeader> {
+    if !looks_like_memory_file_ai(data) {
+        return None;
+    }
+    let mut i = 0;
+    let a = read_mf_i32(data, &mut i)?;
+    let b = read_mf_i32(data, &mut i)?;
+    let c = read_mf_i32(data, &mut i)?;
+    let d = read_mf_i32(data, &mut i)?;
+    Some(RasAiHeader { a, b, c, d })
+}
+
 /// Best-effort label for a space-stripped record lead byte (BYOD `.ai` histogram).
 pub fn classify_ldb_lead(lead: u8) -> &'static str {
     match lead {

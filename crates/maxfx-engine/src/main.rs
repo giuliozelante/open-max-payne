@@ -81,12 +81,17 @@ fn main() -> ExitCode {
                         return ExitCode::SUCCESS;
                     }
                     if looks_like_memory_file_ai(&data) {
-                        println!(
+                        print!(
                             "{}: {} bytes, MemoryFile-tagged .ai (head 0x14 {:#x})",
                             p.display(),
                             data.len(),
                             data[1]
                         );
+                        if let Some(h) = maxfx_engine::parse_ras_ai_header(&data) {
+                            println!(" ints=[{},{},{},{}]", h.a, h.b, h.c, h.d);
+                        } else {
+                            println!();
+                        }
                         return ExitCode::SUCCESS;
                     }
                     if !looks_like_ldb_or_ai(&data) {
