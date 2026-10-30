@@ -417,6 +417,15 @@ pub fn ras_ldb_import_paths(data: &[u8], max: usize) -> Vec<String> {
     out
 }
 
+/// Counts printable paths + JPEG SOI markers in the ImportLevel stream.
+pub fn ras_ldb_import_stats(data: &[u8]) -> Option<(usize, usize)> {
+    let at = ras_ldb_after_geometry(data)?;
+    let slice = &data[at..];
+    let paths = ras_ldb_import_paths(data, usize::MAX).len();
+    let jpegs = slice.windows(2).filter(|w| w == b"\xff\xd8").count();
+    Some((paths, jpegs))
+}
+
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
     let mut out = Vec::new();
     let mut off = 0;
