@@ -4,8 +4,8 @@ use maxfx_engine::{
     looks_like_ras_ldb, open_archive, parse_levels_txt, parse_ras_ldb_faces,
     parse_ras_ldb_header, parse_ras_ldb_import_exits_at, parse_ras_ldb_import_lightmaps_at,
     parse_ras_ldb_import_material_categories_at, parse_ras_ldb_import_materials_at,
-    parse_ras_ldb_import_point_stream_at, parse_ras_ldb_import_static_mesh_at,
-    parse_ras_ldb_import_textures, parse_ras_ldb_section_at,
+    parse_ras_ldb_import_mesh_polys_at, parse_ras_ldb_import_point_stream_at,
+    parse_ras_ldb_import_static_mesh_at, parse_ras_ldb_import_textures, parse_ras_ldb_section_at,
     ras_ldb_after_geometry,
     ras_ldb_after_import_materials, ras_ldb_count_section_end, ras_ldb_first_mf_section_body,
     ras_ldb_import_paths, ras_ldb_import_stats, ras_ldb_vec3_section_end, split_ldb_records,
@@ -203,6 +203,16 @@ fn main() -> ExitCode {
                                                                 "  import static mesh @{pend:#x}: a={} b={} points={} pos=({x:.1},{y:.1},{z:.1}) end={mend:#x}",
                                                                 mesh.a, mesh.b, mesh.point_count
                                                             );
+                                                            if let Some((h0, polys, pend2)) =
+                                                                parse_ras_ldb_import_mesh_polys_at(
+                                                                    &data, mend,
+                                                                )
+                                                            {
+                                                                println!(
+                                                                    "  import mesh polys @{mend:#x}: hdr={h0} shown={} end={pend2:#x}",
+                                                                    polys.len()
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                 }

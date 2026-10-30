@@ -766,6 +766,73 @@ pub fn parse_ras_ldb_import_lightmaps_at(data: &[u8], offset: usize) -> Option<(
     Some((count, i))
 }
 
+/// Polygon/surf-like record after a static mesh (normal + attrs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RasLdbImportMeshPoly {
+    pub point_ref: i32,
+    pub normal: [f32; 3],
+    pub flag: u8,
+    pub attr: i32,
+    pub index: i32,
+}
+
+/// Parse mesh-poly list after a static mesh: `hdr0`, `hdr1`, then records
+/// `point_ref, 3, vec3, u8, 0, attr, f32, f32, 0, index` until the pattern breaks.
+pub fn parse_ras_ldb_import_mesh_polys_at(
+    data: &[u8],
+    offset: usize,
+) -> Option<(i32, Vec<RasLdbImportMeshPoly>, usize)> {
+    let mut i = offset;
+    let hdr0 = read_mf_i32(data, &mut i)?;
+    let _hdr1 = read_mf_i32(data, &mut i)?;
+    let mut out = Vec::new();
+    loop {
+        let mark = i;
+        let Some(poly) = read_mesh_poly(data, &mut i) else {
+            i = mark;
+            break;
+        };
+        out.push(poly);
+        if out.len() > 100_000 {
+            break;
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some((hdr0, out, i))
+    }
+}
+
+fn read_mesh_poly(data: &[u8], i: &mut usize) -> Option<RasLdbImportMeshPoly> {
+    let point_ref = read_mf_i32(data, i)?;
+    let three = read_mf_i32(data, i)?;
+    if three != 3 {
+        return None;
+    }
+    let normal = read_mf_vec3(data, i)?;
+    let flag = read_mf_uint_u8(data, i)?;
+    let _z0 = read_mf_i32(data, i)?;
+    let attr = read_mf_i32(data, i)?;
+    if data.get(*i) != Some(&0x09) || *i + 5 > data.len() {
+        return None;
+    }
+    *i += 5; // f32
+    if data.get(*i) != Some(&0x09) || *i + 5 > data.len() {
+        return None;
+    }
+    *i += 5;
+    let _z1 = read_mf_i32(data, i)?;
+    let index = read_mf_i32(data, i)?;
+    Some(RasLdbImportMeshPoly {
+        point_ref,
+        normal,
+        flag,
+        attr,
+        index,
+    })
+}
+
 /// One dual-vec3-cloud object after the point stream (likely ImportStaticMesh).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RasLdbImportStaticMesh {
@@ -1746,6 +1813,32 @@ mod tests {
             ras_ldb_import_exit_names_at(&body2, 0, 8),
             vec!["::start::Exit0", "::help::Exit1"]
         );
+    }
+
+    #[test]
+    fn parses_import_mesh_polys_after_static_mesh() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x14, 2, 0x14, 0]); // hdr
+        for idx in [0u8, 1u8] {
+            body.extend_from_slice(&[0x14, 10 + idx]); // pref
+            body.extend_from_slice(&[0x14, 3]);
+            body.push(0x16);
+            for v in [0.0f32, 0.0, 1.0] {
+                body.extend_from_slice(&v.to_le_bytes());
+            }
+            body.extend_from_slice(&[0x11, 1, 0x14, 0, 0x14, 44]);
+            body.push(0x09);
+            body.extend_from_slice(&0.0f32.to_le_bytes());
+            body.push(0x09);
+            body.extend_from_slice(&0.0f32.to_le_bytes());
+            body.extend_from_slice(&[0x14, 0, 0x14, idx]);
+        }
+        body.push(0x1f); // next section
+        let (hdr0, polys, end) = parse_ras_ldb_import_mesh_polys_at(&body, 0).unwrap();
+        assert_eq!(hdr0, 2);
+        assert_eq!(polys.len(), 2);
+        assert_eq!(polys[1].index, 1);
+        assert_eq!(body[end], 0x1f);
     }
 
     #[test]
