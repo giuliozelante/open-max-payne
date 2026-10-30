@@ -181,8 +181,11 @@ count + dual name + dual `0x1a` + subtype + empty str + `0x19` mat3 + 10×`0x09`
 ### Retail RAS `.ai`
 
 Starts as a MemoryFile tag stream (`0x14 …`), e.g. Tutorial.ai:
-`14 7b 14 0a 14 00 14 00 09 …` (ints 123 / 10 / 0 / 0, then floats).
-Helper: `looks_like_memory_file_ai`. **Not** the ImportLevel `0x14 0x20` gate.
+`14 7b 14 0a 14 00 14 00 09 …` (ints 123 / 10 / 0 / 0).
+`parse_ras_ai_preamble`: 4×f32, gravity vec3 `(0,-20,0)`, 3×f32, ints, first
+`0x1a` xform; then `soft_walk_mf_tags` for coverage. No `0d 14` strings in
+Tutorial.ai (binary FSM). Helper: `looks_like_memory_file_ai`. **Not** the
+ImportLevel `0x14 0x20` gate.
 
 Caveat: a naïve `>` split mis-fires on float bytes (`…99 99 3e` = 0.3f).
 

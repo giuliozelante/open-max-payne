@@ -1500,6 +1500,98 @@ pub fn parse_ras_ai_header(data: &[u8]) -> Option<RasAiHeader> {
     Some(RasAiHeader { a, b, c, d })
 }
 
+/// BYOD Tutorial.ai preamble after the four-int header: 4×f32, vec3, 3×f32,
+/// then ints + first `0x1a` xform. Returns `(end_offset, gravity_like_vec3)`.
+pub fn parse_ras_ai_preamble(data: &[u8]) -> Option<(usize, [f32; 3])> {
+    let mut i = 0;
+    let _ = parse_ras_ai_header(data)?;
+    // skip four ints already known; re-parse to advance i
+    for _ in 0..4 {
+        read_mf_i32(data, &mut i)?;
+    }
+    let mut f4 = [0f32; 4];
+    for slot in &mut f4 {
+        if data.get(i) != Some(&0x09) || i + 5 > data.len() {
+            return None;
+        }
+        *slot = f32::from_le_bytes(data[i + 1..i + 5].try_into().ok()?);
+        i += 5;
+    }
+    let vec = read_mf_vec3(data, &mut i)?;
+    for _ in 0..3 {
+        if data.get(i) != Some(&0x09) || i + 5 > data.len() {
+            return None;
+        }
+        i += 5;
+    }
+    let _a = read_mf_i32(data, &mut i)?;
+    let _b = read_mf_i32(data, &mut i)?;
+    if data.get(i) != Some(&0x1a) || i + 1 + 48 > data.len() {
+        return None;
+    }
+    i += 1 + 48;
+    let _ = f4;
+    Some((i, vec))
+}
+
+/// Soft-count known MemoryFile tags from `offset` until an unknown byte.
+pub fn soft_walk_mf_tags(data: &[u8], offset: usize, max: usize) -> (usize, usize) {
+    let mut i = offset;
+    let mut n = 0usize;
+    while n < max && i < data.len() {
+        let next = match data[i] {
+            0x14 | 0x11 | 0x0e => i + 2,
+            0x13 | 0x10 => i + 3,
+            0x12 => i + 4,
+            0x02 => i + 5,
+            0x09 => i + 5,
+            0x16 => i + 13,
+            0x1a => i + 1 + 48,
+            0x0d if i + 2 < data.len() && data[i + 1] == 0x14 => {
+                let len = data[i + 2] as usize;
+                i + 3 + len
+            }
+            _ => break,
+        };
+        if next <= i || next > data.len() {
+            break;
+        }
+        i = next;
+        n += 1;
+    }
+    (n, i)
+}
+
+/// Harvest `::…Tele…` path strings from a byte window (post-light entities).
+pub fn ras_ldb_import_tele_names_at(data: &[u8], offset: usize, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = offset;
+    let end = data.len().min(offset.saturating_add(256 * 1024));
+    while i + 3 < end && out.len() < max {
+        if data[i] == 0x0d && data[i + 1] == 0x14 {
+            let len = data[i + 2] as usize;
+            let start = i + 3;
+            if start + len <= data.len() {
+                let bytes = &data[start..start + len];
+                if bytes.starts_with(b"::")
+                    && bytes.windows(4).any(|w| w == b"Tele")
+                    && bytes.iter().all(|&b| (0x20..=0x7e).contains(&b))
+                {
+                    if let Ok(s) = String::from_utf8(bytes.to_vec()) {
+                        if !s.contains("->") {
+                            out.push(s);
+                        }
+                    }
+                }
+                i = start + len;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Best-effort label for a space-stripped record lead byte (BYOD `.ai` histogram).
 pub fn classify_ldb_lead(lead: u8) -> &'static str {
     match lead {
@@ -2363,6 +2455,35 @@ mod tests {
         assert_eq!(surfs.len(), 1);
         assert_eq!(n, body.len());
         assert_eq!(surfs[0].attrs, [0, 6, 1, 6, 0, 6]);
+    }
+
+    #[test]
+    fn parses_ai_preamble_floats_and_vec3() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x14, 123, 0x14, 10, 0x14, 0, 0x14, 0]);
+        for v in [0.3f32, 0.05, 3.0, 5.0] {
+            body.push(0x09);
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        body.push(0x16);
+        for v in [0.0f32, -20.0, 0.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [2.0f32, 0.0, 0.31] {
+            body.push(0x09);
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        body.extend_from_slice(&[0x14, 1, 0x14, 5]);
+        body.push(0x1a);
+        for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        body.push(0xff);
+        let (end, grav) = parse_ras_ai_preamble(&body).unwrap();
+        assert_eq!(grav, [0.0, -20.0, 0.0]);
+        assert_eq!(body[end], 0xff);
+        let (n, _) = soft_walk_mf_tags(&body, 0, 32);
+        assert!(n >= 8);
     }
 
     #[test]

@@ -7,8 +7,8 @@ use maxfx_engine::{
     parse_ras_ldb_import_character_head_at, parse_ras_ldb_import_lights_at,
     parse_ras_ldb_import_mesh_attribs_at, parse_ras_ldb_import_mesh_polys_at,
     parse_ras_ldb_import_point_stream_at, parse_ras_ldb_import_static_mesh_at,
-    parse_ras_ldb_import_textures, parse_ras_ldb_section_at,
-    ras_ldb_import_jumppoint_names_at,
+    parse_ras_ldb_import_textures, parse_ras_ldb_section_at, parse_ras_ai_preamble,
+    ras_ldb_import_jumppoint_names_at, ras_ldb_import_tele_names_at, soft_walk_mf_tags,
     ras_ldb_after_geometry,
     ras_ldb_after_import_materials, ras_ldb_count_section_end, ras_ldb_first_mf_section_body,
     ras_ldb_import_paths, ras_ldb_import_stats, ras_ldb_vec3_section_end, split_ldb_records,
@@ -272,6 +272,18 @@ fn main() -> ExitCode {
                                                                         lit.name, lit.subtype, lit.param_count
                                                                     );
                                                                 }
+                                                                let teles = ras_ldb_import_tele_names_at(
+                                                                    &data, lend, 24,
+                                                                );
+                                                                if !teles.is_empty() {
+                                                                    println!(
+                                                                        "  import teles after lights: shown={}",
+                                                                        teles.len()
+                                                                    );
+                                                                    for t in &teles {
+                                                                        println!("    tele {t}");
+                                                                    }
+                                                                }
                                                             }
                                                     }
                                                 }
@@ -309,6 +321,14 @@ fn main() -> ExitCode {
                             println!(" ints=[{},{},{},{}]", h.a, h.b, h.c, h.d);
                         } else {
                             println!();
+                        }
+                        if let Some((pend, grav)) = parse_ras_ai_preamble(&data) {
+                            let [gx, gy, gz] = grav;
+                            let (n, wend) = soft_walk_mf_tags(&data, pend, 4096);
+                            println!(
+                                "  ai preamble end={pend:#x} gravity=({gx:.1},{gy:.1},{gz:.1}) soft_tags={n} walk_end={wend:#x}/{:#x}",
+                                data.len()
+                            );
                         }
                         return ExitCode::SUCCESS;
                     }
