@@ -23,6 +23,9 @@ pub mod obj {
     /// Companion block (`FUN_00418fe0`): type `0x40`, ver `2`.
     pub const COMPANION: u8 = 0x40;
     pub const COMPANION_VER: u8 = 2;
+    /// Companion inner (`FUN_00415d00`): type `0x21`, ver `5`.
+    pub const COMPANION_INNER: u8 = 0x21;
+    pub const COMPANION_INNER_VER: u8 = 5;
     /// Sampled curve (`FUN_00432fd0`): type `0x71`, ver `3`.
     pub const CURVE: u8 = 0x71;
     pub const CURVE_VER: u8 = 3;
@@ -254,6 +257,7 @@ mod tests {
         w.write_object_header(obj::EMITTER, obj::EMITTER_VER);
         w.write_object_header(obj::CURVE, obj::CURVE_VER);
         w.write_object_header(obj::COMPANION, obj::COMPANION_VER);
+        w.write_object_header(obj::COMPANION_INNER, obj::COMPANION_INNER_VER);
         let h = parse_rps(w.as_bytes()).unwrap();
         let vals: Vec<u8> = h
             .values
@@ -265,7 +269,7 @@ mod tests {
             .collect();
         assert_eq!(
             vals,
-            vec![0x60, 5, 0x31, 1, 0x20, 3, 0x30, 4, 0x71, 3, 0x40, 2]
+            vec![0x60, 5, 0x31, 1, 0x20, 3, 0x30, 4, 0x71, 3, 0x40, 2, 0x21, 5]
         );
     }
 
