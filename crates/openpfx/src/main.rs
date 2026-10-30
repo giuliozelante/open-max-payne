@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use openpfx::{
-    pse_header_to_rps_preamble, pse_to_rps_export, read_pse, read_rps, roundtrip_rps,
-    scan_pse_emitters, PseExportOptions, RpsValue,
+    pse_header_to_rps_preamble, pse_to_rps_export_with_curves, read_pse, read_rps, roundtrip_rps,
+    sample_emitter_curves_from_pse, scan_pse_emitters, PseExportOptions, RpsValue,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -152,12 +152,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 Vec::new()
             };
-            let bytes = pse_to_rps_export(
+            let sampled = if emitter_stubs {
+                sample_emitter_curves_from_pse(&data, 16)?
+            } else {
+                Vec::new()
+            };
+            let bytes = pse_to_rps_export_with_curves(
                 &h,
                 &PseExportOptions {
                     empty_graph: empty_graph && stubs.is_empty(),
                     emitter_stubs: stubs.clone(),
                 },
+                &sampled,
             )?;
             fs::write(&output, &bytes)?;
             let tag = if !stubs.is_empty() {
@@ -168,7 +174,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 String::new()
             };
             println!(
-                "Wrote {} bytes root{} → {} (curves/paths NOT exported yet)",
+                "Wrote {} bytes root{} → {} (paths/embeds still stubbed)",
                 bytes.len(),
                 tag,
                 output.display()
