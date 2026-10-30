@@ -213,7 +213,10 @@ Tagged int `0x14 0x20` (`LDB_IMPORT_VERSION`) — see ExportLevel below.
 - [x] REA: `X_LevelDBImportLevel` vtable + version gate (see below)
 - [x] Map post-vec3 ImportLevel stream through textures→materials→cats→lightmaps→exits→points→static meshes (+polys/attribs)→lights/character head
 - [x] Soft MemoryFile walk of Tutorial.ai to EOF (semantic FSM still open)
-- [ ] Nested character/teleport entity graph + ImportBSP if distinct from mesh polys
+- [x] Further static meshes (form B / N-gons / attribs) + ImportLight + tele/entity harvest
+- [x] Character head + long `0d 13` strings + soft-walk into character region
+- [x] ImportBSP: **not** a separate BYOD post-mesh section — room geometry is static-mesh polys
+- [ ] Deep DO_/`.DO` FSM script bodies (typed character children) — structural walk only
 
 ## `X_LevelDBImportLevel` (MaxPayne.exe REA)
 

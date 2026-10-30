@@ -446,11 +446,40 @@ fn read_mf_uint_u8(data: &[u8], i: &mut usize) -> Option<u8> {
 }
 
 fn read_mf_str(data: &[u8], i: &mut usize) -> Option<String> {
-    if *i + 3 > data.len() || data[*i] != 0x0d || data[*i + 1] != 0x14 {
+    if *i >= data.len() || data[*i] != 0x0d {
         return None;
     }
-    let len = data[*i + 2] as usize;
-    *i += 3;
+    *i += 1;
+    let len = match data.get(*i).copied() {
+        Some(0x14) => {
+            *i += 1;
+            if *i >= data.len() {
+                return None;
+            }
+            let n = data[*i] as usize;
+            *i += 1;
+            n
+        }
+        Some(0x13) => {
+            *i += 1;
+            if *i + 2 > data.len() {
+                return None;
+            }
+            let n = u16::from_le_bytes(data[*i..*i + 2].try_into().ok()?) as usize;
+            *i += 2;
+            n
+        }
+        Some(0x12) => {
+            *i += 1;
+            if *i + 3 > data.len() {
+                return None;
+            }
+            let n = u32::from_le_bytes([data[*i], data[*i + 1], data[*i + 2], 0]) as usize;
+            *i += 3;
+            n
+        }
+        _ => return None,
+    };
     if *i + len > data.len() {
         return None;
     }
@@ -1537,7 +1566,8 @@ pub fn parse_ras_ai_preamble(data: &[u8]) -> Option<(usize, [f32; 3])> {
 /// Soft-count known MemoryFile tags from `offset` until an unknown byte.
 ///
 /// Tag sizes match ImportLevel / Tutorial.ai BYOD (incl. raw `0x19` mat3,
-/// `0x15` dual-f32, nest `0x1c` / list `0x1f`). Tutorial.ai walks to EOF.
+/// `0x15` dual-f32, nest `0x1c` / list `0x1f`, long `0d 13` strings).
+/// Tutorial.ai walks to EOF.
 pub fn soft_walk_mf_tags(data: &[u8], offset: usize, max: usize) -> (usize, usize) {
     let mut i = offset;
     let mut n = 0usize;
@@ -1553,10 +1583,19 @@ pub fn soft_walk_mf_tags(data: &[u8], offset: usize, max: usize) -> (usize, usiz
             0x19 => i + 1 + 36,
             0x1a => i + 1 + 48,
             0x1c | 0x1f => i + 1,
-            0x0d if i + 2 < data.len() && data[i + 1] == 0x14 => {
-                let len = data[i + 2] as usize;
-                i + 3 + len
-            }
+            0x0d if i + 1 < data.len() => match data[i + 1] {
+                0x14 if i + 2 < data.len() => i + 3 + data[i + 2] as usize,
+                0x13 if i + 4 <= data.len() => {
+                    let len = u16::from_le_bytes(data[i + 2..i + 4].try_into().unwrap()) as usize;
+                    i + 4 + len
+                }
+                0x12 if i + 5 <= data.len() => {
+                    let len =
+                        u32::from_le_bytes([data[i + 2], data[i + 3], data[i + 4], 0]) as usize;
+                    i + 5 + len
+                }
+                _ => break,
+            },
             _ => break,
         };
         if next <= i || next > data.len() {
@@ -1566,6 +1605,33 @@ pub fn soft_walk_mf_tags(data: &[u8], offset: usize, max: usize) -> (usize, usiz
         n += 1;
     }
     (n, i)
+}
+
+/// Harvest `::…` entity path strings (no `->` scripts) from a byte window.
+pub fn ras_ldb_import_entity_names_at(data: &[u8], offset: usize, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = offset;
+    let end = data.len().min(offset.saturating_add(1024 * 1024));
+    while i + 3 < end && out.len() < max {
+        if data[i] != 0x0d {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        match read_mf_str(data, &mut j) {
+            Some(s)
+                if s.starts_with("::")
+                    && !s.contains("->")
+                    && !s.starts_with("DO_")
+                    && s.chars().all(|c| c.is_ascii_graphic() || c == ' ') =>
+            {
+                out.push(s);
+                i = j;
+            }
+            _ => i += 1,
+        }
+    }
+    out
 }
 
 /// Harvest `::…Tele…` path strings from a byte window (post-light entities).
@@ -2461,6 +2527,22 @@ mod tests {
         assert_eq!(surfs.len(), 1);
         assert_eq!(n, body.len());
         assert_eq!(surfs[0].attrs, [0, 6, 1, 6, 0, 6]);
+    }
+
+    #[test]
+    fn reads_long_mf_string_0d13() {
+        let mut body = Vec::new();
+        let s = "::".to_string() + &"A".repeat(80);
+        body.push(0x0d);
+        body.push(0x13);
+        body.extend_from_slice(&(s.len() as u16).to_le_bytes());
+        body.extend_from_slice(s.as_bytes());
+        let mut i = 0;
+        assert_eq!(read_mf_str(&body, &mut i).as_deref(), Some(s.as_str()));
+        assert_eq!(i, body.len());
+        let (n, end) = soft_walk_mf_tags(&body, 0, 8);
+        assert_eq!(n, 1);
+        assert_eq!(end, body.len());
     }
 
     #[test]

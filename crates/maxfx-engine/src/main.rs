@@ -8,7 +8,8 @@ use maxfx_engine::{
     parse_ras_ldb_import_mesh_attribs_at, parse_ras_ldb_import_mesh_polys_at,
     parse_ras_ldb_import_point_stream_at, parse_ras_ldb_import_static_mesh_at,
     parse_ras_ldb_import_textures, parse_ras_ldb_section_at, parse_ras_ai_preamble,
-    ras_ldb_import_jumppoint_names_at, ras_ldb_import_tele_names_at, soft_walk_mf_tags,
+    ras_ldb_import_entity_names_at, ras_ldb_import_jumppoint_names_at,
+    ras_ldb_import_tele_names_at, soft_walk_mf_tags,
     ras_ldb_after_geometry,
     ras_ldb_after_import_materials, ras_ldb_count_section_end, ras_ldb_first_mf_section_body,
     ras_ldb_import_paths, ras_ldb_import_stats, ras_ldb_vec3_section_end, split_ldb_records,
@@ -249,12 +250,25 @@ fn main() -> ExitCode {
                                                                     ras_ldb_import_jumppoint_names_at(
                                                                         &data, cstart, 16,
                                                                     );
+                                                                let ents =
+                                                                    ras_ldb_import_entity_names_at(
+                                                                        &data, cstart, 48,
+                                                                    );
+                                                                let (tags, wend) =
+                                                                    soft_walk_mf_tags(
+                                                                        &data, mesh_off, 500_000,
+                                                                    );
                                                                 println!(
-                                                                    "  import character head @{mesh_off:#x}: count={cc} first_name@{cstart:#x} jumppoints={}",
-                                                                    jumps.len()
+                                                                    "  import character head @{mesh_off:#x}: count={cc} first_name@{cstart:#x} jumppoints={} entities={} soft_tags={tags} walk_end={wend:#x}/{:#x}",
+                                                                    jumps.len(),
+                                                                    ents.len(),
+                                                                    data.len()
                                                                 );
                                                                 for jn in &jumps {
                                                                     println!("    jump {jn}");
+                                                                }
+                                                                for en in ents.iter().take(12) {
+                                                                    println!("    ent {en}");
                                                                 }
                                                             } else if let Some((lc, lights, lend)) =
                                                                 parse_ras_ldb_import_lights_at(

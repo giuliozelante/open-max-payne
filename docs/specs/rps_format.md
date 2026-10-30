@@ -209,8 +209,13 @@ parent dir → emitter order, and embeds case-resolved `.jpg`/`.pcx` pairs via
 repeated `write_embedded_file`. Fire_Medium Examples → ~106 KiB / 91 blobs
 (retail cooked `Fire_Medium.rps` ≈ 110 KiB / 91 blobs).
 
+## Accept bar (issue #11)
+
+- [x] `dump-rps` walks **100%** of `export-root --emitter-stubs --bitmap-root` output (0 unknowns)
+- [x] Fire_Medium BYOD: ~91 blobs / ~106 KiB vs retail ~110 KiB
+- [ ] Human in-game particle smoke test (Wine ParticleFX `-e` still hangs; use `openpfx` export)
+
 ## Next
 
-1. Game-accept probe of bitmap-root export (Wine ParticleFX `-e` still hangs)
+1. In-game smoke of bitmap-root Fire_Medium (replace inside `x_data.ras` BYOD)
 2. Finish remaining `FUN_00417570` emitter field parity vs candle
-3. Retire Python `tools/openpfx` if any remains

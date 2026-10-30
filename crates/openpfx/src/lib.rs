@@ -932,6 +932,49 @@ mod tests {
     }
 
     #[test]
+    fn export_texture_sequence_walks_full_file() {
+        let h = PseHeader {
+            word0: 96,
+            word1: 5,
+            word2: 12,
+            float_a: 2.5,
+            word3: 10,
+            float_b: 2.5,
+            word4: 10,
+            flag_a: 0,
+            flag_b: 0,
+            ascii_paths: vec![],
+        };
+        let jpeg = vec![0xff, 0xd8, 0xff, 0xd9];
+        let seq = vec![
+            (r"fire\a.JPG".into(), Some(jpeg.clone())),
+            (r"fire\a.PCX".into(), Some(vec![0x0a, 0x05, 0x01])),
+        ];
+        let bytes = pse_to_rps_export_with_curves(
+            &h,
+            &PseExportOptions {
+                emitter_stubs: vec!["Spark".into()],
+                texture_sequences: vec![seq],
+                ..Default::default()
+            },
+            &[vec![None, None, None, None]],
+        )
+        .unwrap();
+        let walked = parse_rps(&bytes).unwrap();
+        assert_eq!(walked.bytes_consumed, bytes.len());
+        assert!(walked.values.iter().all(|v| !matches!(v, RpsValue::Unknown { .. })));
+        let blobs: Vec<_> = walked
+            .values
+            .iter()
+            .filter_map(|v| match v {
+                RpsValue::Blob { data } => Some(data.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(blobs, vec![4, 3]);
+    }
+
+    #[test]
     fn export_with_jpeg_embed_walks_as_blob() {
         let h = PseHeader {
             word0: 96,
