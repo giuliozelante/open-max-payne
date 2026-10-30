@@ -166,7 +166,9 @@ nest `0x1c` + ints, `0x12` even count, subtype int, then `count/2` bodies
 → `0xfdd873` (+ trailing bodies → Startup `0x1197022` / Tutorial `0xb8ea3b`).
 **Static mesh-like** (`parse_ras_ldb_import_static_mesh_at`): `a`,`b`, u8 `n`,
 `n` vec3s, nest `0x1c` + `n` vec3s, `0x1a` mat3, pos. First Startup object @
-`0x1197022` (50 pts → pos). Further mesh/BSP list still open.
+`0x1197022` (50 pts → pos `763.5,-40.5,-138`). After that a different record
+shape begins (`14 1a 14 00 12 <point-count> 14 03 16…`) — ImportBSP/list still
+open.
 
 ### Retail RAS `.ai`
 
