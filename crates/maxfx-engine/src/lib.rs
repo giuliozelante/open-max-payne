@@ -758,6 +758,36 @@ pub fn parse_ras_ldb_import_lightmaps_at(data: &[u8], offset: usize) -> Option<(
     Some((count, i))
 }
 
+/// Harvest `::…::…` exit/room-ish names from the ImportLevel stream after `offset`.
+pub fn ras_ldb_import_exit_names_at(data: &[u8], offset: usize, max: usize) -> Vec<String> {
+    if offset >= data.len() || max == 0 {
+        return Vec::new();
+    }
+    let slice = &data[offset..];
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 3 < slice.len() && out.len() < max {
+        if slice[i] == 0x0d && slice[i + 1] == 0x14 {
+            let len = slice[i + 2] as usize;
+            let start = i + 3;
+            if start + len <= slice.len() {
+                let bytes = &slice[start..start + len];
+                if bytes.iter().all(|&b| (0x20..=0x7e).contains(&b)) {
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        if s.starts_with("::") && s.matches("::").count() >= 2 {
+                            out.push(s.to_string());
+                        }
+                    }
+                }
+                i = start + len;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
     let mut out = Vec::new();
     let mut off = 0;
@@ -1364,6 +1394,20 @@ mod tests {
         assert_eq!(mats[0].name, "mat");
         assert_eq!(mats[0].texture, "t.JPG");
         assert_eq!(mats[0].index, 7);
+    }
+
+    #[test]
+    fn harvests_exit_names_after_offset() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x11, 0x04]);
+        body.extend_from_slice(&[0x0d, 0x14, 14]);
+        body.extend_from_slice(b"::start::Exit0");
+        body.extend_from_slice(&[0x0d, 0x14, 4]);
+        body.extend_from_slice(b"nope");
+        body.extend_from_slice(&[0x0d, 0x14, 13]);
+        body.extend_from_slice(b"::help::Exit1");
+        let names = ras_ldb_import_exit_names_at(&body, 0, 8);
+        assert_eq!(names, vec!["::start::Exit0", "::help::Exit1"]);
     }
 
     #[test]

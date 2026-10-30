@@ -154,7 +154,9 @@ after categories, `count`, `0`, u8 `0`, prefix `0x12` + u32 `size`
 (`256*256*3+18` on BYOD) + three u32s (`512,0,0`) + `01 00 01` + mark
 `18 20`, then `count` payloads with sep `00 00 00 01 00 01 18 20` between
 blobs. Startup 45 @ `0x5bb95f` → `0xe2be05`; Tutorial 9 → `0x95ad8d`.
-Next MF strings include `::start::Exit0` / `::StartRoom::Exit0` (ImportRoom/Exit).
+Next MF: room AABB (u8 corner count + `0x16` vec3s), `0x1a` 3×3 matrix, pos,
+then exit/room names (`::start::Exit0`, …) — soft-harvest via
+`ras_ldb_import_exit_names_at`. Full ImportRoom/Exit/`0x1c` nesting still open.
 
 ### Retail RAS `.ai`
 
