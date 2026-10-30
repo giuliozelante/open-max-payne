@@ -369,6 +369,18 @@ pub struct RasLdbSectionSpan {
     pub end: usize,
 }
 
+/// Byte offset where geometry `0x1c` sections end and the ImportLevel MF stream
+/// begins (expects `0x14 0x20` = [`LDB_IMPORT_VERSION`]).
+pub fn ras_ldb_after_geometry(data: &[u8]) -> Option<usize> {
+    let spans = walk_ras_ldb_known_sections(data);
+    let end = spans.last().filter(|s| s.end > s.offset).map(|s| s.end)?;
+    if data.len() >= end + 2 && data[end] == 0x14 && data[end + 1] == LDB_IMPORT_VERSION as u8 {
+        Some(end)
+    } else {
+        None
+    }
+}
+
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
     let mut out = Vec::new();
     let mut off = 0;

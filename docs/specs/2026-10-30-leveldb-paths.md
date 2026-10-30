@@ -118,8 +118,15 @@ of **surf** records (`parse_ras_ldb_surfs_ex`):
 ```
 
 Kind `0x13` = MemoryFile payload; try schemas in order: **faces**, **surfs**,
-**int list** (`parse_ras_ldb_ints_ex` — Startup §4 has 18944 ints). Further
-sections still WIP. ImportLevel `0x20` gate not yet located.
+**int list** (`parse_ras_ldb_ints_ex` — Startup §4 has 18944 ints).
+
+### ImportLevel stream (after geometry)
+
+On Startup, after the last `0x1c` section (`ras_ldb_after_geometry`), the file
+continues as a flat MemoryFile stream beginning **`14 20`**
+([`LDB_IMPORT_VERSION`]) then more ints/strings/JPEG embeds — e.g. absolute
+texture path `\\HYPERION\MAX\PROJECTS\TEXTURES\…JPG` + `FFD8` blob. This is the
+bridge from RAS geometry packing to the MaxED ImportLevel gate.
 
 ### Retail RAS `.ai`
 
