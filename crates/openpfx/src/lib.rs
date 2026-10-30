@@ -315,6 +315,167 @@ pub fn scan_pse_curves(data: &[u8]) -> Vec<PseCurveRef> {
     out
 }
 
+/// Harvest relative bitmap stems from PSE (`fire\reelflames\flame1_0000`).
+///
+/// Stems are `u8` length-prefixed ASCII paths (no extension) in bitmap lists.
+pub fn scan_pse_bitmap_stems(data: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 1 < data.len() {
+        let len = data[i] as usize;
+        if !(8..=120).contains(&len) || i + 1 + len > data.len() {
+            i += 1;
+            continue;
+        }
+        let raw = &data[i + 1..i + 1 + len];
+        if !raw.contains(&b'\\')
+            || !raw
+                .iter()
+                .all(|&b| b.is_ascii_alphanumeric() || b == b'\\' || b == b'_' || b == b'-')
+        {
+            i += 1;
+            continue;
+        }
+        let s = String::from_utf8_lossy(raw).into_owned();
+        let last = s.rsplit('\\').next().unwrap_or("");
+        if last.chars().any(|c| c.is_ascii_digit()) {
+            out.push(s.to_ascii_lowercase());
+            i += 1 + len;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Group consecutive stems that share the same parent directory.
+pub fn group_bitmap_stems(stems: &[String]) -> Vec<Vec<String>> {
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    for stem in stems {
+        let parent = stem
+            .rsplit_once('\\')
+            .map(|(p, _)| p)
+            .unwrap_or("")
+            .to_string();
+        match groups.last_mut() {
+            Some(g) if g
+                .last()
+                .and_then(|s| s.rsplit_once('\\').map(|(p, _)| p))
+                == Some(parent.as_str()) =>
+            {
+                g.push(stem.clone());
+            }
+            _ => groups.push(vec![stem.clone()]),
+        }
+    }
+    groups
+}
+
+/// Resolve a stem against a bitmap root (case-insensitive components).
+///
+/// Tries `.jpg` / `.JPG` then `.pcx` / `.PCX`. Returns `(rps_relative_path, bytes)`.
+pub fn resolve_bitmap_stem(
+    bitmap_root: &std::path::Path,
+    stem: &str,
+) -> Option<Vec<TextureFrame>> {
+    use std::fs;
+    let parts: Vec<&str> = stem.split('\\').collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let mut dir = bitmap_root.to_path_buf();
+    for (i, part) in parts.iter().enumerate() {
+        if i + 1 == parts.len() {
+            break;
+        }
+        dir = case_insensitive_join(&dir, part)?;
+    }
+    let file_stem = *parts.last()?;
+    let mut frames = Vec::new();
+    for (ext, rps_ext) in [("jpg", "JPG"), ("pcx", "PCX")] {
+        let Some(path) = case_insensitive_file(&dir, file_stem, ext) else {
+            continue;
+        };
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let rel = format!("{stem}.{rps_ext}");
+        frames.push((rel.replace('/', "\\"), Some(bytes)));
+    }
+    if frames.is_empty() {
+        None
+    } else {
+        Some(frames)
+    }
+}
+
+fn case_insensitive_join(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    use std::fs;
+    if let Ok(rd) = fs::read_dir(dir) {
+        let want = name.to_ascii_lowercase();
+        for ent in rd.flatten() {
+            let n = ent.file_name();
+            let s = n.to_string_lossy();
+            if s.to_ascii_lowercase() == want {
+                return Some(ent.path());
+            }
+        }
+    }
+    let p = dir.join(name);
+    if p.is_dir() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+fn case_insensitive_file(
+    dir: &std::path::Path,
+    stem: &str,
+    ext: &str,
+) -> Option<std::path::PathBuf> {
+    use std::fs;
+    let want = format!("{stem}.{ext}").to_ascii_lowercase();
+    if let Ok(rd) = fs::read_dir(dir) {
+        for ent in rd.flatten() {
+            let s = ent.file_name().to_string_lossy().to_ascii_lowercase();
+            if s == want {
+                return Some(ent.path());
+            }
+        }
+    }
+    let p = dir.join(format!("{stem}.{ext}"));
+    if p.is_file() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// Build per-emitter texture sequences from PSE stems + bitmap root.
+pub fn build_texture_sequences_from_pse(
+    data: &[u8],
+    bitmap_root: &std::path::Path,
+    emitter_count: usize,
+) -> Vec<Vec<TextureFrame>> {
+    let stems = scan_pse_bitmap_stems(data);
+    let groups = group_bitmap_stems(&stems);
+    let mut out = vec![Vec::new(); emitter_count];
+    for (gi, group) in groups.into_iter().enumerate() {
+        if gi >= emitter_count {
+            break;
+        }
+        let mut frames = Vec::new();
+        for stem in group {
+            if let Some(mut got) = resolve_bitmap_stem(bitmap_root, &stem) {
+                frames.append(&mut got);
+            }
+        }
+        out[gi] = frames;
+    }
+    out
+}
+
 /// Scan `.pse` bytes for emitter object headers and their names.
 pub fn scan_pse_emitters(data: &[u8]) -> Vec<PseEmitterRef> {
     const EMIT: &[u8] = &[0x30, 0, 0, 0, 4, 0, 0, 0, 0x20, 0, 0, 0, 3, 0, 0, 0];
@@ -349,6 +510,9 @@ pub fn pse_to_rps_root(h: &PseHeader) -> Result<Vec<u8>, PfxError> {
     pse_to_rps_root_into(h, false)
 }
 
+/// One texture frame for RPS embed (`relative path` + optional blob bytes).
+pub type TextureFrame = (String, Option<Vec<u8>>);
+
 /// Options for [`pse_to_rps_root_into`].
 #[derive(Debug, Clone, Default)]
 pub struct PseExportOptions {
@@ -357,10 +521,13 @@ pub struct PseExportOptions {
     /// Append graph section + stub emitter-open (+ sampled/placeholder curves +
     /// texture path + companion stub) per name.
     pub emitter_stubs: Vec<String>,
-    /// Optional relative texture path per emitter.
+    /// Optional relative texture path per emitter (legacy single-frame).
     pub texture_stubs: Vec<String>,
     /// Optional JPEG/blob bytes per emitter (`None` → external ref int `0`).
     pub texture_embeds: Vec<Option<Vec<u8>>>,
+    /// Per-emitter texture sequences (JPG/PCX frames). When non-empty for an
+    /// emitter, replaces the single stub/embed pair.
+    pub texture_sequences: Vec<Vec<TextureFrame>>,
 }
 
 /// Like [`pse_to_rps_root`], with optional graph / emitter stubs.
@@ -460,17 +627,24 @@ pub fn pse_to_rps_export_with_curves(
             for _ in 0..4 {
                 w.write_int_u8(1);
             }
-            let tex = opts
-                .texture_stubs
-                .get(ei)
-                .map(String::as_str)
-                .unwrap_or(r"stub\particle.JPG");
-            let embed = opts
-                .texture_embeds
-                .get(ei)
-                .and_then(|o| o.as_ref())
-                .map(|v| v.as_slice());
-            w.write_embedded_file(tex, embed)?;
+            let seq = opts.texture_sequences.get(ei).filter(|s| !s.is_empty());
+            if let Some(frames) = seq {
+                for (tex, embed) in frames {
+                    w.write_embedded_file(tex, embed.as_deref())?;
+                }
+            } else {
+                let tex = opts
+                    .texture_stubs
+                    .get(ei)
+                    .map(String::as_str)
+                    .unwrap_or(r"stub\particle.JPG");
+                let embed = opts
+                    .texture_embeds
+                    .get(ei)
+                    .and_then(|o| o.as_ref())
+                    .map(|v| v.as_slice());
+                w.write_embedded_file(tex, embed)?;
+            }
             w.write_companion_stub()?;
         }
     } else if opts.empty_graph {
@@ -729,6 +903,32 @@ mod tests {
         assert!((kfs[1].t - 1.0).abs() < 1e-5 && (kfs[1].values[0] - 2.0).abs() < 1e-5);
         let grid = sample_linear(&kfs, 1, 0.0, 1.0, 3).unwrap();
         assert!((grid[1] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn harvests_bitmap_stems_and_groups() {
+        let mut raw = Vec::new();
+        for s in [
+            r"fire\reelflames\flame1_0000",
+            r"fire\reelflames\flame1_0001",
+            r"smoke\smoke-loop\smokel0000",
+        ] {
+            raw.push(s.len() as u8);
+            raw.extend_from_slice(s.as_bytes());
+        }
+        let stems = scan_pse_bitmap_stems(&raw);
+        assert_eq!(
+            stems,
+            vec![
+                r"fire\reelflames\flame1_0000",
+                r"fire\reelflames\flame1_0001",
+                r"smoke\smoke-loop\smokel0000",
+            ]
+        );
+        let groups = group_bitmap_stems(&stems);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].len(), 2);
+        assert_eq!(groups[1].len(), 1);
     }
 
     #[test]

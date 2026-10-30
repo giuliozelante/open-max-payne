@@ -201,8 +201,16 @@ BYOD `fire_candle_flame_large_1.rps` (2347 bytes): walker consumes **entire** fi
 `openpfx dump-rps` walks until unknown tag; `export-preamble` writes the six-value
 header from a PSE (graphs omitted). Full `-e` parity = stream the object writers above.
 
+## Bitmap frames on export
+
+`export-root --emitter-stubs --bitmap-root <Examples/Bitmaps>` harvests
+length-prefixed stems from the PSE (`fire\reelflames\flame1_0000`), groups by
+parent dir → emitter order, and embeds case-resolved `.jpg`/`.pcx` pairs via
+repeated `write_embedded_file`. Fire_Medium Examples → ~106 KiB / 91 blobs
+(retail cooked `Fire_Medium.rps` ≈ 110 KiB / 91 blobs).
+
 ## Next
 
-1. Encode emitter/curve/string/blob bodies to match candle (finish `FUN_00417570`)
-2. `openpfx export` end-to-end vs BYOD fixture
+1. Game-accept probe of bitmap-root export (Wine ParticleFX `-e` still hangs)
+2. Finish remaining `FUN_00417570` emitter field parity vs candle
 3. Retire Python `tools/openpfx` if any remains

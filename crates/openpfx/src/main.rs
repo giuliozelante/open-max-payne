@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
 use openpfx::{
-    pse_header_to_rps_preamble, pse_to_rps_export_with_curves, read_pse, read_rps, roundtrip_rps,
-    sample_emitter_curves_from_pse, scan_pse_emitters, PseExportOptions, RpsValue,
+    build_texture_sequences_from_pse, pse_header_to_rps_preamble, pse_to_rps_export_with_curves,
+    read_pse, read_rps, roundtrip_rps, sample_emitter_curves_from_pse, scan_pse_bitmap_stems,
+    scan_pse_emitters, PseExportOptions, RpsValue,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -44,6 +45,9 @@ enum Cmd {
         /// Embed this JPEG/TGA file into emitter 0 (BYOD local; proves `0x13` blob path)
         #[arg(long)]
         embed_jpeg: Option<PathBuf>,
+        /// Resolve PSE bitmap stems under this Examples/Bitmaps root (embeds JPG+PCX frames)
+        #[arg(long)]
+        bitmap_root: Option<PathBuf>,
     },
     /// Parse a retail `.rps` and write it back (encode parity check; BYOD local use)
     Repack {
@@ -145,6 +149,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             empty_graph,
             emitter_stubs,
             embed_jpeg,
+            bitmap_root,
         } => {
             let data = fs::read(&pse)?;
             let h = openpfx::parse_pse(&data)?;
@@ -184,6 +189,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let bytes = fs::read(&path)?;
                 texture_embeds.push(Some(bytes));
             }
+            let texture_sequences = if let Some(root) = bitmap_root.as_ref() {
+                let seq = build_texture_sequences_from_pse(&data, root, stubs.len().max(1));
+                let nframes: usize = seq.iter().map(|s| s.len()).sum();
+                let nstems = scan_pse_bitmap_stems(&data).len();
+                eprintln!(
+                    "bitmap-root: {nstems} stems → {nframes} embeds across {} emitters",
+                    seq.len()
+                );
+                seq
+            } else {
+                Vec::new()
+            };
             let bytes = pse_to_rps_export_with_curves(
                 &h,
                 &PseExportOptions {
@@ -191,6 +208,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     emitter_stubs: stubs.clone(),
                     texture_stubs: textures,
                     texture_embeds,
+                    texture_sequences,
                 },
                 &sampled,
             )?;
