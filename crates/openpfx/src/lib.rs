@@ -118,6 +118,48 @@ pub struct PseCurveRef {
     pub body_offset: usize,
 }
 
+/// Keyframe floats extracted between the PSE curve name and a `PPP` (`50 50 50`) marker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PseCurveFloats {
+    pub name: String,
+    /// Seven LE `u32` words immediately after the name (semantics WIP).
+    pub header_words: [u32; 7],
+    /// LE `f32` values until the `50 50 50` sentinel (paired time/value in simple cases).
+    pub floats: Vec<f32>,
+}
+
+/// Best-effort: name + header words + float run until `PPP` for one [`PseCurveRef`].
+pub fn parse_pse_curve_floats(data: &[u8], curve: &PseCurveRef) -> Option<PseCurveFloats> {
+    let mut i = curve.body_offset;
+    if i + 28 > data.len() {
+        return None;
+    }
+    let mut header_words = [0u32; 7];
+    for w in &mut header_words {
+        *w = u32::from_le_bytes(data[i..i + 4].try_into().ok()?);
+        i += 4;
+    }
+    let mut floats = Vec::new();
+    while i + 3 < data.len() {
+        if data[i] == 0x50 && data[i + 1] == 0x50 && data[i + 2] == 0x50 {
+            break;
+        }
+        if i + 4 > data.len() {
+            break;
+        }
+        floats.push(f32::from_le_bytes(data[i..i + 4].try_into().ok()?));
+        i += 4;
+    }
+    if floats.is_empty() {
+        return None;
+    }
+    Some(PseCurveFloats {
+        name: curve.name.clone(),
+        header_words,
+        floats,
+    })
+}
+
 /// Scan `.pse` for curve object headers and their editor names.
 pub fn scan_pse_curves(data: &[u8]) -> Vec<PseCurveRef> {
     const CURVE: &[u8] = &[0x71, 0, 0, 0, 3, 0, 0, 0];
@@ -362,5 +404,23 @@ mod tests {
         assert_eq!(curves.len(), 1);
         assert_eq!(curves[0].name, "Size m");
         assert_eq!(scan_pse_curve_count(&with_curve), 1);
+        // header 7×u32 + float pairs + PPP
+        let mut raw = vec![0u8; 36];
+        raw.extend_from_slice(&[0x71, 0, 0, 0, 3, 0, 0, 0, 1, b't', 4]);
+        raw.extend_from_slice(b"Test");
+        for w in [1u32, 0, 0, 2, 1, 1, 2] {
+            raw.extend_from_slice(&w.to_le_bytes());
+        }
+        raw.extend_from_slice(&0.0f32.to_le_bytes());
+        raw.extend_from_slice(&1.0f32.to_le_bytes());
+        raw.extend_from_slice(&1.0f32.to_le_bytes());
+        raw.extend_from_slice(&4.0f32.to_le_bytes());
+        raw.extend_from_slice(&[0x50, 0x50, 0x50]);
+        let c = &scan_pse_curves(&raw)[0];
+        let parsed = parse_pse_curve_floats(&raw, c).unwrap();
+        assert_eq!(parsed.header_words[3], 2);
+        assert_eq!(parsed.floats.len(), 4);
+        assert!((parsed.floats[1] - 1.0).abs() < 1e-5);
+        assert!((parsed.floats[3] - 4.0).abs() < 1e-5);
     }
 }
