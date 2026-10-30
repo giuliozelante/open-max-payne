@@ -38,8 +38,16 @@ for later parts.
 
 These are **loader tags**, not filenames. Filenames are the `.ldb` paths above.
 
+## `.ldb` / `.ai` first bytes (BYOD extract — not committed)
+
+After `openras` LZSS extract of `Part1_Level6.ldb` (~6.9 MiB) and sibling `.ai`:
+
+- No obvious ASCII magic (`RAS`, `LDB`, etc.) in the first 64 bytes.
+- Dense runs of `0x20` with sparse non-space markers (`>`, `4`, NULs, etc.).
+- Treat layout as **unknown** until the `.ldb` loader is decompiled — do not invent tags.
+
 ## Next (issue #12)
 
-1. REA: find which code path opens `*.ldb` after mount
-2. Spec first bytes of `.ldb` (magic / version) from a BYOD extract — do not commit retail bytes
-3. `maxfx-engine` optional: list `.ldb`/`.ai` entries from a user-supplied `x_level*.ras`
+1. REA: find which code path opens `*.ldb` after mount (follow `X_LEVELDB_*_LOAD` / `X_LevelDBImport*`)
+2. Lock `.ldb` magic/version from that loader
+3. [x] `maxfx-engine` lists `.ldb`/`.ai` pairs from a user-supplied `x_level*.ras`
