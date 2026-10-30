@@ -738,6 +738,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_ai_header_four_ints() {
+        let buf = [0x14u8, 123, 0x14, 10, 0x14, 0, 0x14, 0, 0x09, 0, 0, 0, 0];
+        let h = parse_ras_ai_header(&buf).unwrap();
+        assert_eq!(
+            h,
+            RasAiHeader {
+                a: 123,
+                b: 10,
+                c: 0,
+                d: 0
+            }
+        );
+        assert!(parse_ras_ai_header(&[0x14, 0x20]).is_none());
+    }
+
+    #[test]
     fn split_ldb_records_on_gt_after_preamble() {
         let mut buf = Vec::from(LDB_PREAMBLE);
         buf.extend_from_slice(b"  \xc7  \x00  \x14\n  >");
