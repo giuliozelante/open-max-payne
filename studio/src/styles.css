@@ -1,0 +1,203 @@
+:root {
+  --bg: #0e0e0e;
+  --panel: #1a1816;
+  --border: #3a342c;
+  --text: #e8e4dc;
+  --muted: #9a9488;
+  --accent: #c9a227;
+  --accent-dim: #8a7018;
+  --danger: #a33;
+  --font: "IBM Plex Sans", "Segoe UI", sans-serif;
+  --display: "Libre Baskerville", Georgia, "Times New Roman", serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(ellipse at 20% 0%, #2a2218 0%, transparent 50%),
+    linear-gradient(180deg, #141210 0%, var(--bg) 40%);
+  color: var(--text);
+  font-family: var(--font);
+}
+
+body {
+  padding: 1.25rem 1.5rem 2rem;
+  max-width: 920px;
+  margin: 0 auto;
+}
+
+.hero {
+  margin-bottom: 1rem;
+}
+
+.brand {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 1.75rem;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+
+.hero h1 {
+  margin: 0.15rem 0 0.35rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+.tagline {
+  margin: 0;
+  color: var(--muted);
+  max-width: 36rem;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 1.25rem 0 0.75rem;
+}
+
+.tab {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 0.45rem 0.85rem;
+  cursor: pointer;
+  font: inherit;
+}
+
+.tab.active {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  background: #1f1a12;
+}
+
+.panel {
+  display: none;
+}
+
+.panel.active {
+  display: block;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 1rem 1.1rem 1.15rem;
+  margin-bottom: 0.85rem;
+}
+
+.card h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+label {
+  display: block;
+  margin: 0.55rem 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+input[type="text"] {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.45rem 0.55rem;
+  background: #0a0a0a;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font: inherit;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0.65rem 0 0.25rem;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--border);
+  background: #12100e;
+  color: var(--text);
+}
+
+button:hover {
+  border-color: var(--accent-dim);
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #12100e;
+  font-weight: 600;
+}
+
+button.primary:hover {
+  filter: brightness(1.05);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.hint {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.hint a {
+  color: var(--accent);
+}
+
+.hint code {
+  font-size: 0.85em;
+  color: var(--text);
+}
+
+.status-box {
+  margin: 0 0 0.65rem;
+  padding: 0.65rem 0.75rem;
+  background: #080808;
+  border: 1px solid var(--border);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  min-height: 4.5rem;
+}
+
+.log-card h2 {
+  margin-bottom: 0.5rem;
+}
+
+.log {
+  margin: 0;
+  min-height: 10rem;
+  max-height: 16rem;
+  overflow: auto;
+  padding: 0.65rem 0.75rem;
+  background: #080808;
+  border: 1px solid var(--border);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

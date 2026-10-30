@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Open Max Payne Studio</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <header class="hero">
+      <p class="brand">Open Max Payne</p>
+      <h1>Studio</h1>
+      <p class="tagline">Play Max Payne 1 and work MAX-FX archives on a modern OS.</p>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button type="button" class="tab active" data-tab="archives">1. Archives</button>
+      <button type="button" class="tab" data-tab="play">2. Play</button>
+      <button type="button" class="tab" data-tab="more">3. More</button>
+    </nav>
+
+    <section id="panel-archives" class="panel active">
+      <div class="card">
+        <h2>RAS / MPM</h2>
+        <label>
+          Archive
+          <input id="archive" type="text" placeholder="path to .ras or .mpm" />
+        </label>
+        <div class="row">
+          <button type="button" id="btn-sample" class="primary">Use sample mod</button>
+          <button type="button" id="btn-browse-archive">Browse…</button>
+          <button type="button" id="btn-list" class="primary">List what’s inside</button>
+          <button type="button" id="btn-extract" class="primary">Extract files</button>
+          <button type="button" id="btn-open-out">Open output folder</button>
+        </div>
+        <label>
+          Pack folder
+          <input id="pack-folder" type="text" />
+        </label>
+        <label>
+          Pack output (.mpm)
+          <input id="pack-out" type="text" />
+        </label>
+        <div class="row">
+          <button type="button" id="btn-browse-pack">Browse folder…</button>
+          <button type="button" id="btn-pack" class="primary">Pack</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="panel-play" class="panel">
+      <div class="card">
+        <h2>A) Install from CD</h2>
+        <label>
+          Max Payne CD folder
+          <input id="cd-root" type="text" placeholder="auto-detect if empty" />
+        </label>
+        <label>
+          Install folder
+          <input id="game-dir" type="text" />
+        </label>
+        <div class="row">
+          <button type="button" id="btn-find-cd">Find CD</button>
+          <button type="button" id="btn-browse-cd">Browse CD…</button>
+          <button type="button" id="btn-browse-game">Browse install…</button>
+        </div>
+        <div class="row">
+          <button type="button" id="btn-install" class="primary">Install Max Payne</button>
+          <button type="button" id="btn-setup">Graphics helpers only</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>B) Make it playable (1.05 + FixPack)</h2>
+        <p class="hint">
+          Retail CD <code>MaxPayne.exe</code> is often SafeDisc-wrapped (REA: entry in <code>stxt*</code>).
+          Rockstar’s “1.05 patch” download is a <strong>drop-in EXE</strong> (running it = starting the game).
+          Use <strong>Download &amp; apply 1.05 EXE</strong> to replace the SafeDisc binary, then
+          <a href="#" id="link-fixpack-guide">FixPack 2025</a>
+          (<strong>CD exe</strong> + <strong>Startup fix</strong> + <strong>d3d8to9</strong>).
+        </p>
+        <pre id="game-status" class="status-box">Click “Refresh status”.</pre>
+        <div class="row">
+          <button type="button" id="btn-status" class="primary">Refresh status</button>
+          <button type="button" id="btn-patch-105" class="primary">Download &amp; apply 1.05 EXE</button>
+          <button type="button" id="btn-localized-safe" class="primary">Apply localized-safe stack</button>
+          <button type="button" id="btn-fixpack-guide">Open FixPack guide</button>
+          <button type="button" id="btn-fixpack-run">Run FixPack installer…</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>C) Launch</h2>
+        <div class="row">
+          <button type="button" id="btn-launch" class="primary">Launch game</button>
+          <button type="button" id="btn-open-game-dir">Open game folder</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="panel-more" class="panel">
+      <div class="card">
+        <h2>Extras</h2>
+        <div class="row">
+          <button type="button" id="btn-tests" class="primary">Run safety tests</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card log-card">
+      <h2>Activity log</h2>
+      <pre id="log" class="log" aria-live="polite"></pre>
+    </section>
+  </body>
+</html>

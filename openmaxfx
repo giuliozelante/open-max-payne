@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# OpenMaxFX — simple front door (“for dummies”)
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+OUT="$ROOT/easy-output"
+
+openras_bin() {
+  if [[ -x "$ROOT/target/release/openras" ]]; then
+    echo "$ROOT/target/release/openras"
+  elif [[ -x "$ROOT/target/debug/openras" ]]; then
+    echo "$ROOT/target/debug/openras"
+  else
+    echo ""
+  fi
+}
+
+run_openras() {
+  local bin
+  bin="$(openras_bin)"
+  if [[ -n "$bin" ]]; then
+    "$bin" "$@"
+  else
+    (cd "$ROOT" && cargo run -q -p openras -- "$@")
+  fi
+}
+
+banner() {
+  echo
+  echo "========================================"
+  echo " OpenMaxFX — simple mode"
+  echo "========================================"
+  echo
+}
+
+cmd_gui() {
+  local release debug
+  release="$ROOT/target/release/open-max-payne-studio"
+  debug="$ROOT/target/debug/open-max-payne-studio"
+  # Legacy paths before workspace move
+  [[ -x "$release" ]] || release="$ROOT/studio/src-tauri/target/release/open-max-payne-studio"
+  [[ -x "$debug" ]] || debug="$ROOT/studio/src-tauri/target/debug/open-max-payne-studio"
+  if [[ -x "$release" ]]; then
+    echo "Starting Open Max Payne Studio (native)…"
+    exec "$release"
+  fi
+  if [[ -x "$debug" ]]; then
+    echo "Starting Open Max Payne Studio (native debug)…"
+    exec "$debug"
+  fi
+  if [[ -f "$ROOT/studio/package.json" ]] && command -v bun >/dev/null 2>&1; then
+    echo "No built Studio binary yet — launching Tauri dev (first run compiles)…"
+    echo "For a release binary later: (cd studio && ./build.sh)"
+    cd "$ROOT/studio"
+    # shellcheck disable=SC1091
+    source "$ROOT/studio/rust-env.sh"
+    exec bun run tauri dev
+  fi
+
+  echo "ERROR: Studio native app missing and bun/tauri not available."
+  echo "Build: cd studio && bun install && ./build.sh"
+  exit 1
+}
+
+cmd_help() {
+  banner
+  cat <<EOF
+Easiest:
+  ./openmaxfx                 Opens native Studio (Tauri)
+  ./openmaxfx gui             Same as above
+
+Also:
+  ./openmaxfx help
+  ./openmaxfx list <file.ras|mpm>
+  ./openmaxfx extract <file>
+  ./openmaxfx pack <folder> <out.mpm>
+  ./openmaxfx install-cd [CD-path] [install-folder]
+  ./openmaxfx setup-game <MaxPayne-folder>
+  ./openmaxfx test
+  ./openmaxfx where-cd
+
+Guide: $ROOT/START_HERE.md
+EOF
+}
+
+cmd_list() {
+  local f="${1:-}"
+  if [[ -z "$f" ]]; then
+    echo "Usage: ./openmaxfx list /path/to/file.ras"
+    exit 1
+  fi
+  if [[ ! -f "$f" ]]; then
+    echo "ERROR: File not found: $f"
+    exit 1
+  fi
+  echo "Listing: $f"
+  run_openras list "$f"
+}
+
+cmd_extract() {
+  local f="${1:-}"
+  if [[ -z "$f" ]]; then
+    echo "Usage: ./openmaxfx extract /path/to/file.ras"
+    exit 1
+  fi
+  if [[ ! -f "$f" ]]; then
+    echo "ERROR: File not found: $f"
+    exit 1
+  fi
+  local base
+  base="$(basename "$f")"
+  base="${base%.*}"
+  local dest="$OUT/$base"
+  mkdir -p "$dest"
+  echo "Extracting → $dest"
+  run_openras extract "$f" -d "$dest"
+  echo
+  echo "Done. Open that folder in your file manager."
+}
+
+cmd_pack() {
+  local dir="${1:-}" out="${2:-}"
+  if [[ -z "$dir" || -z "$out" ]]; then
+    echo "Usage: ./openmaxfx pack /path/to/folder out.mpm"
+    exit 1
+  fi
+  if [[ ! -d "$dir" ]]; then
+    echo "ERROR: Folder not found: $dir"
+    exit 1
+  fi
+  if [[ "$out" != /* && "$out" != ./* && "$out" != ../* ]]; then
+    out="$ROOT/$out"
+  fi
+  echo "Packing $dir → $out"
+  run_openras pack "$dir" "$out"
+  echo "Done: $out"
+}
+
+cmd_setup_game() {
+  local dir="${1:-}"
+  if [[ -z "$dir" ]]; then
+    echo "Usage: ./openmaxfx setup-game /path/to/MaxPayne"
+    echo "That folder must contain MaxPayne.exe"
+    exit 1
+  fi
+  bash "$ROOT/runtime/bootstrap-linux.sh" "$dir"
+}
+
+cmd_test() {
+  echo "Running openras tests…"
+  (cd "$ROOT" && cargo test -p openras)
+}
+
+cmd_where_cd() {
+  echo "Looking for mounted CDs…"
+  if findmnt -t iso9660,udf >/dev/null 2>&1; then
+    findmnt -t iso9660,udf
+  else
+    echo "No CD/DVD filesystem mounted right now."
+  fi
+  echo
+  if [[ -e /dev/sr0 ]]; then
+    echo "Optical drive: /dev/sr0"
+    lsblk -o NAME,SIZE,LABEL,MOUNTPOINT /dev/sr0 2>/dev/null || true
+  else
+    echo "No optical drive (/dev/sr0) detected."
+  fi
+  echo
+  echo "If a Max Payne CD is inserted but not mounted:"
+  echo "  udisksctl mount -b /dev/sr0"
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    ""|gui|studio) cmd_gui ;;
+    menu)
+      banner
+      echo "Tip: the GUI is the easy way — run: ./openmaxfx"
+      echo
+      cmd_help
+      ;;
+    help|-h|--help) cmd_help ;;
+    list) shift; cmd_list "${1:-}" ;;
+    extract) shift; cmd_extract "${1:-}" ;;
+    pack) shift; cmd_pack "${1:-}" "${2:-}" ;;
+    setup-game) shift; cmd_setup_game "${1:-}" ;;
+    install-cd)
+      shift
+      if [[ -n "${1:-}" ]]; then
+        bash "$ROOT/runtime/install-from-cd.sh" "$1" "${2:-$HOME/Games/MaxPayne1}"
+      else
+        OPENMAXFX_INSTALL_DEST="${HOME}/Games/MaxPayne1" bash "$ROOT/runtime/install-from-cd.sh"
+      fi
+      ;;
+    test) cmd_test ;;
+    where-cd) cmd_where_cd ;;
+    open-guide) echo "$ROOT/START_HERE.md" ;;
+    *)
+      echo "Unknown command: $cmd"
+      cmd_help
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

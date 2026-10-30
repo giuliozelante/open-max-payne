@@ -1,0 +1,46 @@
+# Build artifacts
+target/
+**/target/
+dist/
+**/dist/
+*.o
+*.a
+*.so
+*.dylib
+*.rlib
+
+# Proprietary assets and tools (STRICT — never commit)
+vendor/
+runtime/overlays/
+*.exe
+*.dll
+*.dle
+*.dli
+*.cab
+*.ras
+*.mpm
+*.pfx
+easy-output/
+pfx/
+
+# Local / generated
+.claude/
+.cursor/
+*.log
+node_modules/
+**/node_modules/
+
+# System / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+
+# Python (legacy reference only — not the front door)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/

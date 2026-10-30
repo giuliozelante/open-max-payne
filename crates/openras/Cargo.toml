@@ -1,0 +1,19 @@
+[package]
+name = "openras"
+version = "0.1.0"
+edition = "2021"
+description = "Clean-room Remedy Archive System (RAS/MPM) reader/writer for Max Payne 1"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "openras"
+path = "src/main.rs"
+
+[lib]
+name = "openras"
+path = "src/lib.rs"
+
+[dependencies]
+crc32fast = "1.4"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
