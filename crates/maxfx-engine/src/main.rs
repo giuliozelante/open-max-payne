@@ -1,6 +1,7 @@
 use maxfx_engine::{
-    discover_ras_files, list_level_packages, looks_like_ldb_or_ai, looks_like_memory_file_ldb,
-    open_archive, parse_levels_txt, split_ldb_records, LDB_IMPORT_VERSION,
+    classify_ldb_lead, discover_ras_files, list_level_packages, looks_like_ldb_or_ai,
+    looks_like_memory_file_ldb, open_archive, parse_levels_txt, split_ldb_records,
+    LDB_IMPORT_VERSION,
 };
 use openras::RasArchive;
 use std::env;
@@ -49,7 +50,7 @@ fn main() -> ExitCode {
                     let mut pairs: Vec<_> = leads.into_iter().collect();
                     pairs.sort_by_key(|a| std::cmp::Reverse(a.1));
                     for (b, n) in pairs.into_iter().take(12) {
-                        println!("  0x{b:02x}: {n}");
+                        println!("  0x{b:02x} ({}): {n}", classify_ldb_lead(b));
                     }
                     ExitCode::SUCCESS
                 }

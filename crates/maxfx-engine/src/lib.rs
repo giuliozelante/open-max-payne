@@ -69,6 +69,21 @@ pub fn looks_like_memory_file_ldb(data: &[u8]) -> bool {
     data.len() >= 2 && data[0] == 0x14 && data[1] == LDB_IMPORT_VERSION as u8
 }
 
+/// Best-effort label for a space-stripped record lead byte (BYOD `.ai` histogram).
+pub fn classify_ldb_lead(lead: u8) -> &'static str {
+    match lead {
+        0x14 | 0x11 | 0x09 | 0x0d | 0x16 | 0x13 | 0x10 => "mf-tag",
+        0x30 => "type-0x30",
+        0x20 => "type-0x20",
+        0x71 => "type-0x71",
+        0xc7 => "ai-c7",
+        0xcb => "ai-cb",
+        0x80 => "ai-80",
+        0x89 => "ai-89",
+        _ => "other",
+    }
+}
+
 /// One `>`-terminated record from a `.ldb` / `.ai` body (BYOD observation).
 ///
 /// Files start with [`LDB_PREAMBLE`], then a stream of payloads separated by
@@ -332,6 +347,8 @@ mod tests {
         assert_eq!(LDB_IMPORT_VERSION, 0x20);
         assert!(looks_like_memory_file_ldb(&[0x14, 0x20, 0x00]));
         assert!(!looks_like_memory_file_ldb(LDB_PREAMBLE));
+        assert_eq!(classify_ldb_lead(0x14), "mf-tag");
+        assert_eq!(classify_ldb_lead(0xc7), "ai-c7");
     }
 
     #[test]
