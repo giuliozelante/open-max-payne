@@ -4,8 +4,10 @@ use maxfx_engine::{
     looks_like_ras_ldb, open_archive, parse_levels_txt, parse_ras_ldb_faces,
     parse_ras_ldb_header, parse_ras_ldb_import_exits_at, parse_ras_ldb_import_lightmaps_at,
     parse_ras_ldb_import_material_categories_at, parse_ras_ldb_import_materials_at,
+    parse_ras_ldb_import_character_head_at, parse_ras_ldb_import_mesh_attribs_at,
     parse_ras_ldb_import_mesh_polys_at, parse_ras_ldb_import_point_stream_at,
-    parse_ras_ldb_import_static_mesh_at, parse_ras_ldb_import_textures, parse_ras_ldb_section_at,
+    parse_ras_ldb_import_static_mesh_at, parse_ras_ldb_import_textures,
+    parse_ras_ldb_section_at, ras_ldb_import_jumppoint_names_at,
     ras_ldb_after_geometry,
     ras_ldb_after_import_materials, ras_ldb_count_section_end, ras_ldb_first_mf_section_body,
     ras_ldb_import_paths, ras_ldb_import_stats, ras_ldb_vec3_section_end, split_ldb_records,
@@ -193,27 +195,67 @@ fn main() -> ExitCode {
                                                         println!(
                                                             "  import point stream @{eend:#x}: bodies={pn} end={pend:#x}"
                                                         );
-                                                        if let Some((mesh, mend)) =
-                                                            parse_ras_ldb_import_static_mesh_at(
-                                                                &data, pend,
-                                                            )
-                                                        {
-                                                            let [x, y, z] = mesh.pos;
-                                                            println!(
-                                                                "  import static mesh @{pend:#x}: a={} b={} points={} pos=({x:.1},{y:.1},{z:.1}) end={mend:#x}",
-                                                                mesh.a, mesh.b, mesh.point_count
-                                                            );
-                                                            if let Some((h0, polys, pend2)) =
-                                                                parse_ras_ldb_import_mesh_polys_at(
-                                                                    &data, mend,
+                                                            let mut mesh_off = pend;
+                                                            let mut mesh_n = 0;
+                                                            while let Some((mesh, mend)) =
+                                                                parse_ras_ldb_import_static_mesh_at(
+                                                                    &data, mesh_off,
                                                                 )
                                                             {
+                                                                mesh_n += 1;
+                                                                let [x, y, z] = mesh.pos;
                                                                 println!(
-                                                                    "  import mesh polys @{mend:#x}: hdr={h0} shown={} end={pend2:#x}",
-                                                                    polys.len()
+                                                                    "  import static mesh[{mesh_n}] @{mesh_off:#x}: a={} b={} points={} pos=({x:.1},{y:.1},{z:.1}) end={mend:#x}",
+                                                                    mesh.a, mesh.b, mesh.point_count
                                                                 );
+                                                                let mut next = mend;
+                                                                if let Some((h0, polys, pend2)) =
+                                                                    parse_ras_ldb_import_mesh_polys_at(
+                                                                        &data, mend,
+                                                                    )
+                                                                {
+                                                                    println!(
+                                                                        "  import mesh polys @{mend:#x}: hdr={h0} shown={} end={pend2:#x}",
+                                                                        polys.len()
+                                                                    );
+                                                                    next = pend2;
+                                                                }
+                                                                if let Some((ac, attrs, aend)) =
+                                                                    parse_ras_ldb_import_mesh_attribs_at(
+                                                                        &data, next,
+                                                                    )
+                                                                {
+                                                                    println!(
+                                                                        "  import mesh attribs @{next:#x}: count={ac} shown={} end={aend:#x}",
+                                                                        attrs.len()
+                                                                    );
+                                                                    next = aend;
+                                                                }
+                                                                if next <= mesh_off {
+                                                                    break;
+                                                                }
+                                                                mesh_off = next;
+                                                                if mesh_n >= 32 {
+                                                                    break;
+                                                                }
                                                             }
-                                                        }
+                                                            if let Some((cc, cstart)) =
+                                                                parse_ras_ldb_import_character_head_at(
+                                                                    &data, mesh_off,
+                                                                )
+                                                            {
+                                                                let jumps =
+                                                                    ras_ldb_import_jumppoint_names_at(
+                                                                        &data, cstart, 16,
+                                                                    );
+                                                                println!(
+                                                                    "  import character head @{mesh_off:#x}: count={cc} first_name@{cstart:#x} jumppoints={}",
+                                                                    jumps.len()
+                                                                );
+                                                                for jn in &jumps {
+                                                                    println!("    jump {jn}");
+                                                                }
+                                                            }
                                                     }
                                                 }
                                             }

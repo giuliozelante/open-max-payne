@@ -164,12 +164,17 @@ Linked exits often alternate with/without AABB. Immediately after:
 nest `0x1c` + ints, `0x12` even count, subtype int, then `count/2` bodies
 (`15 f32 f32 15 f32 f32 03 i32 0e u8`; first lacks id). Startup 65107 bodies
 → `0xfdd873` (+ trailing bodies → Startup `0x1197022` / Tutorial `0xb8ea3b`).
-**Static mesh-like** (`parse_ras_ldb_import_static_mesh_at`): `a`,`b`, u8 `n`,
-`n` vec3s, nest `0x1c` + `n` vec3s, `0x1a` mat3, pos. First Startup object @
-`0x1197022` (50 pts → pos `763.5,-40.5,-138`). Then **mesh polys**
-(`parse_ras_ldb_import_mesh_polys_at`): hdr0/hdr1 + records
-`point_ref, 3, normal, u8, 0, attr, f32, f32, 0, index` (Startup 25 after first
-mesh). Further meshes/BSP still open.
+**Static mesh-like** (`parse_ras_ldb_import_static_mesh_at`): form A `a`,`b`,`n`;
+form B optional empty `0x1f` + `b`,`n` (`0x10` u16 for large `n`). Dual vec3
+clouds + `0x1a` mat3 + pos. Startup #1 @ `0x1197022` (50 pts); #2 form B
+36797 pts. **Mesh polys** (`parse_ras_ldb_import_mesh_polys_at`): hdr0 (=count)
++ hdr1 + `point_ref, verts(3..=16), normal, u8, 0, attr, f32, f32, 0, index`
+(Startup #2 → 21081 polys). Optional **mesh attribs**
+(`parse_ras_ldb_import_mesh_attribs_at`): `0x1f` + count + `(id, vec3)×count`
+(not `0x25` materials) then next mesh. After meshes: **character head**
+(`parse_ras_ldb_import_character_head_at`) empty `0x1f` + `0` + count, then
+`::…Jumppoint…` / room entity graph with dual `0x1a` xforms + `DO_*` hooks
+(full walk still open).
 
 ### Retail RAS `.ai`
 

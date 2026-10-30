@@ -770,6 +770,8 @@ pub fn parse_ras_ldb_import_lightmaps_at(data: &[u8], offset: usize) -> Option<(
 #[derive(Debug, Clone, PartialEq)]
 pub struct RasLdbImportMeshPoly {
     pub point_ref: i32,
+    /// Vertex count (`3` tris, also 4–12 on large meshes).
+    pub verts: i32,
     pub normal: [f32; 3],
     pub flag: u8,
     pub attr: i32,
@@ -777,7 +779,7 @@ pub struct RasLdbImportMeshPoly {
 }
 
 /// Parse mesh-poly list after a static mesh: `hdr0`, `hdr1`, then records
-/// `point_ref, 3, vec3, u8, 0, attr, f32, f32, 0, index` until the pattern breaks.
+/// `point_ref, verts, vec3, u8, 0, attr, f32, f32, 0, index` until the pattern breaks.
 pub fn parse_ras_ldb_import_mesh_polys_at(
     data: &[u8],
     offset: usize,
@@ -806,8 +808,8 @@ pub fn parse_ras_ldb_import_mesh_polys_at(
 
 fn read_mesh_poly(data: &[u8], i: &mut usize) -> Option<RasLdbImportMeshPoly> {
     let point_ref = read_mf_i32(data, i)?;
-    let three = read_mf_i32(data, i)?;
-    if three != 3 {
+    let verts = read_mf_i32(data, i)?;
+    if !(3..=16).contains(&verts) {
         return None;
     }
     let normal = read_mf_vec3(data, i)?;
@@ -830,6 +832,7 @@ fn read_mesh_poly(data: &[u8], i: &mut usize) -> Option<RasLdbImportMeshPoly> {
     };
     Some(RasLdbImportMeshPoly {
         point_ref,
+        verts,
         normal,
         flag,
         attr,
@@ -837,24 +840,158 @@ fn read_mesh_poly(data: &[u8], i: &mut usize) -> Option<RasLdbImportMeshPoly> {
     })
 }
 
+/// `(id, vec3)` entry in a post-mesh `0x1f` attrib list (not `0x25` materials).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RasLdbImportMeshAttrib {
+    pub id: i32,
+    pub value: [f32; 3],
+}
+
+/// Parse `0x1f` + count + `(id, vec3) × count` between meshes (BYOD Tutorial).
+///
+/// Rejects material lists (next tag `0x25`) and empty delimiters (`count == 0`).
+pub fn parse_ras_ldb_import_mesh_attribs_at(
+    data: &[u8],
+    offset: usize,
+) -> Option<(u32, Vec<RasLdbImportMeshAttrib>, usize)> {
+    if offset >= data.len() || data[offset] != LDB_IMPORT_MATERIAL_LIST_TAG {
+        return None;
+    }
+    let mut i = offset + 1;
+    let count = read_mf_i32(data, &mut i)? as u32;
+    if count == 0 || count > 100_000 {
+        return None;
+    }
+    if data.get(i) == Some(&LDB_IMPORT_MATERIAL_TAG) {
+        return None;
+    }
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let id = read_mf_i32(data, &mut i)?;
+        let value = read_mf_vec3(data, &mut i)?;
+        out.push(RasLdbImportMeshAttrib { id, value });
+    }
+    Some((count, out, i))
+}
+
+/// Head of the post-mesh character/jumppoint block (BYOD Startup).
+///
+/// Layout: empty `0x1f`, int `0`, count, then named entities (`0d 14` paths,
+/// dual `0x1a` transforms, nested DO_* graphs). Returns `(count, offset_at_first_name)`.
+pub fn parse_ras_ldb_import_character_head_at(
+    data: &[u8],
+    offset: usize,
+) -> Option<(u32, usize)> {
+    let mut i = offset;
+    if data.get(i) != Some(&LDB_IMPORT_MATERIAL_LIST_TAG) {
+        return None;
+    }
+    i += 1;
+    let empty = read_mf_i32(data, &mut i)?;
+    if empty != 0 {
+        return None;
+    }
+    let _zero = read_mf_i32(data, &mut i)?;
+    let count = read_mf_i32(data, &mut i)? as u32;
+    if count == 0 || count > 10_000 {
+        return None;
+    }
+    if data.get(i) != Some(&0x0d) {
+        return None;
+    }
+    Some((count, i))
+}
+
+/// Harvest `::…Jumppoint…` names from a character-block window.
+pub fn ras_ldb_import_jumppoint_names_at(
+    data: &[u8],
+    offset: usize,
+    max: usize,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = offset;
+    let end = data.len().min(offset.saturating_add(512 * 1024));
+    while i + 3 < end && out.len() < max {
+        if data[i] == 0x0d && data[i + 1] == 0x14 {
+            let len = data[i + 2] as usize;
+            let start = i + 3;
+            if start + len <= data.len() {
+                let bytes = &data[start..start + len];
+                if bytes.windows(9).any(|w| w == b"Jumppoint")
+                    && bytes.iter().all(|&b| (0x20..=0x7e).contains(&b))
+                {
+                    if let Ok(s) = String::from_utf8(bytes.to_vec()) {
+                        out.push(s);
+                    }
+                }
+                i = start + len;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 /// One dual-vec3-cloud object after the point stream (likely ImportStaticMesh).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RasLdbImportStaticMesh {
     pub a: i32,
     pub b: i32,
-    pub point_count: u8,
+    pub point_count: u32,
     pub pos: [f32; 3],
 }
 
+fn read_point_count(data: &[u8], i: &mut usize) -> Option<u32> {
+    match data.get(*i).copied() {
+        Some(0x11) => Some(read_mf_uint_u8(data, i)? as u32),
+        Some(0x10) => {
+            if *i + 3 > data.len() {
+                return None;
+            }
+            let v = u16::from_le_bytes(data[*i + 1..*i + 3].try_into().ok()?) as u32;
+            *i += 3;
+            Some(v)
+        }
+        Some(0x14 | 0x13 | 0x12 | 0x02) => Some(read_mf_i32(data, i)? as u32),
+        _ => None,
+    }
+}
+
 /// Parse a dual point-cloud + `0x1a` mat3 + pos record at `offset`.
+///
+/// Form A (first mesh): `a`, `b`, u8/`u16` `n`, clouds…
+/// Form B (later meshes): optional empty `0x1f` list, then `b`, `n` (often `0x10` u16).
 pub fn parse_ras_ldb_import_static_mesh_at(
     data: &[u8],
     offset: usize,
 ) -> Option<(RasLdbImportStaticMesh, usize)> {
     let mut i = offset;
-    let a = read_mf_i32(data, &mut i)?;
-    let b = read_mf_i32(data, &mut i)?;
-    let n = read_mf_uint_u8(data, &mut i)?;
+    // Optional empty material-list delimiter between meshes.
+    if data.get(i) == Some(&LDB_IMPORT_MATERIAL_LIST_TAG) {
+        i += 1;
+        let c = read_mf_i32(data, &mut i)?;
+        if c != 0 {
+            return None;
+        }
+    }
+    let a;
+    let b;
+    let n;
+    // Form A: a, b, n — Form B: b, n (a defaults 0)
+    let first = read_mf_i32(data, &mut i)?;
+    if data.get(i) == Some(&0x11) || data.get(i) == Some(&0x10) {
+        a = 0;
+        b = first;
+        n = read_point_count(data, &mut i)?;
+    } else {
+        a = first;
+        b = read_mf_i32(data, &mut i)?;
+        n = read_point_count(data, &mut i)?;
+    }
+    if n == 0 || n > 500_000 {
+        return None;
+    }
     for _ in 0..n {
         read_mf_vec3(data, &mut i)?;
     }
@@ -862,7 +999,7 @@ pub fn parse_ras_ldb_import_static_mesh_at(
         return None;
     }
     i += 1;
-    let n2 = read_mf_i32(data, &mut i)? as u8;
+    let n2 = read_mf_i32(data, &mut i)? as u32;
     if n2 != n {
         return None;
     }
@@ -1841,8 +1978,80 @@ mod tests {
         let (hdr0, polys, end) = parse_ras_ldb_import_mesh_polys_at(&body, 0).unwrap();
         assert_eq!(hdr0, 2);
         assert_eq!(polys.len(), 2);
+        assert_eq!(polys[0].verts, 3);
         assert_eq!(polys[1].index, 1);
         assert_eq!(body[end], 0x1f);
+    }
+
+    #[test]
+    fn parses_import_mesh_quad_poly() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x14, 1, 0x14, 0]);
+        body.extend_from_slice(&[0x14, 7, 0x14, 4]); // pref, verts=4
+        body.push(0x16);
+        for v in [0.0f32, -1.0, 0.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        body.extend_from_slice(&[0x11, 1, 0x14, 0, 0x14, 1]);
+        body.push(0x09);
+        body.extend_from_slice(&0.0f32.to_le_bytes());
+        body.push(0x09);
+        body.extend_from_slice(&0.0f32.to_le_bytes());
+        body.extend_from_slice(&[0x14, 0, 0x14, 9]);
+        let (hdr0, polys, end) = parse_ras_ldb_import_mesh_polys_at(&body, 0).unwrap();
+        assert_eq!(hdr0, 1);
+        assert_eq!(polys.len(), 1);
+        assert_eq!(polys[0].verts, 4);
+        assert_eq!(polys[0].index, 9);
+        assert_eq!(end, body.len());
+    }
+
+    #[test]
+    fn parses_import_mesh_attribs_list() {
+        let mut body = Vec::new();
+        body.push(LDB_IMPORT_MATERIAL_LIST_TAG);
+        body.extend_from_slice(&[0x14, 2]); // count
+        for id in [40u8, 41u8] {
+            body.extend_from_slice(&[0x14, id]);
+            body.push(0x16);
+            for v in [1.0f32, 2.0, 3.0] {
+                body.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        body.extend_from_slice(&[0x14, 99]); // next mesh int
+        let (count, attrs, end) = parse_ras_ldb_import_mesh_attribs_at(&body, 0).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(attrs[1].id, 41);
+        assert_eq!(attrs[1].value, [1.0, 2.0, 3.0]);
+        assert_eq!(body[end], 0x14);
+        // materials must not match
+        let mut mats = Vec::new();
+        mats.push(LDB_IMPORT_MATERIAL_LIST_TAG);
+        mats.extend_from_slice(&[0x14, 1]);
+        mats.push(LDB_IMPORT_MATERIAL_TAG);
+        assert!(parse_ras_ldb_import_mesh_attribs_at(&mats, 0).is_none());
+    }
+
+    #[test]
+    fn parses_import_character_head_and_jumppoints() {
+        let mut body = Vec::new();
+        body.push(LDB_IMPORT_MATERIAL_LIST_TAG);
+        body.extend_from_slice(&[0x14, 0, 0x14, 0, 0x14, 2]);
+        body.extend_from_slice(&[0x0d, 0x14, 21]);
+        body.extend_from_slice(b"::start::Jumppoint 00");
+        body.extend_from_slice(&[0x0d, 0x14, 0]);
+        body.push(0x1a);
+        for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        let jp2 = b"::room::Jumppoint 01";
+        body.extend_from_slice(&[0x0d, 0x14, jp2.len() as u8]);
+        body.extend_from_slice(jp2);
+        let (count, at) = parse_ras_ldb_import_character_head_at(&body, 0).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(body[at], 0x0d);
+        let names = ras_ldb_import_jumppoint_names_at(&body, at, 8);
+        assert_eq!(names, vec!["::start::Jumppoint 00", "::room::Jumppoint 01"]);
     }
 
     #[test]
