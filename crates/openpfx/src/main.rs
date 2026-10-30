@@ -76,10 +76,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             for e in &emitters {
                 println!("  @{:#x} {}", e.offset, e.name);
             }
-            println!(
-                "curve headers (0x71/3): {}",
-                openpfx::scan_pse_curve_count(&data)
-            );
+            let curves = openpfx::scan_pse_curves(&data);
+            println!("curves ({}):", curves.len());
+            for c in curves.iter().take(12) {
+                println!("  @{:#x} {}", c.offset, c.name);
+            }
+            if curves.len() > 12 {
+                println!("  … {} more", curves.len() - 12);
+            }
             println!("paths ({}):", h.ascii_paths.len());
             for p in &h.ascii_paths {
                 println!("  {p}");

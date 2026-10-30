@@ -106,8 +106,53 @@ pub struct PseEmitterRef {
 
 /// Count raw `0x71`/`3` curve object headers in a `.pse` (editor keyframe blocks).
 pub fn scan_pse_curve_count(data: &[u8]) -> usize {
+    scan_pse_curves(data).len()
+}
+
+/// Curve header found in a `.pse`: `0x71`/`3` + `u8` + `'t'` + len-prefixed name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PseCurveRef {
+    pub offset: usize,
+    pub name: String,
+    /// Byte after the name; keyframe body starts here (layout still WIP).
+    pub body_offset: usize,
+}
+
+/// Scan `.pse` for curve object headers and their editor names.
+pub fn scan_pse_curves(data: &[u8]) -> Vec<PseCurveRef> {
     const CURVE: &[u8] = &[0x71, 0, 0, 0, 3, 0, 0, 0];
-    data.windows(CURVE.len()).filter(|w| *w == CURVE).count()
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + CURVE.len() + 3 < data.len() {
+        if &data[i..i + CURVE.len()] != CURVE {
+            i += 1;
+            continue;
+        }
+        let mut j = i + CURVE.len();
+        // Observed: u8 (often 1) + 't' + u8 len + ascii name
+        if j + 2 >= data.len() || data[j + 1] != b't' {
+            i += 1;
+            continue;
+        }
+        j += 2; // skip channel-ish byte + 't'
+        let len = data[j] as usize;
+        j += 1;
+        if j + len > data.len() {
+            i += 1;
+            continue;
+        }
+        let name = String::from_utf8_lossy(&data[j..j + len]).into_owned();
+        j += len;
+        if name.chars().all(|c| c.is_ascii_graphic() || c == ' ') && !name.is_empty() {
+            out.push(PseCurveRef {
+                offset: i,
+                name,
+                body_offset: j,
+            });
+        }
+        i += CURVE.len();
+    }
+    out
 }
 
 /// Scan `.pse` bytes for emitter object headers and their names.
@@ -310,7 +355,12 @@ mod tests {
         assert_eq!(found[0].name, "Spark");
         assert_eq!(found[1].name, "Dust");
         let mut with_curve = buf.clone();
-        with_curve.extend_from_slice(&[0x71, 0, 0, 0, 3, 0, 0, 0]);
+        with_curve.extend_from_slice(&[0x71, 0, 0, 0, 3, 0, 0, 0, 1, b't', 6]);
+        with_curve.extend_from_slice(b"Size m");
+        with_curve.extend_from_slice(&[0u8; 8]);
+        let curves = scan_pse_curves(&with_curve);
+        assert_eq!(curves.len(), 1);
+        assert_eq!(curves[0].name, "Size m");
         assert_eq!(scan_pse_curve_count(&with_curve), 1);
     }
 }
