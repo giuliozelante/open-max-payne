@@ -823,7 +823,11 @@ fn read_mesh_poly(data: &[u8], i: &mut usize) -> Option<RasLdbImportMeshPoly> {
     }
     *i += 5;
     let _z1 = read_mf_i32(data, i)?;
-    let index = read_mf_i32(data, i)?;
+    // Final index int is present on most records; last-in-list may omit it.
+    let index = match data.get(*i).copied() {
+        Some(0x14 | 0x13 | 0x12 | 0x02) => read_mf_i32(data, i)?,
+        _ => -1,
+    };
     Some(RasLdbImportMeshPoly {
         point_ref,
         normal,
