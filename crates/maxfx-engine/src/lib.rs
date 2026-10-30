@@ -876,7 +876,42 @@ pub fn parse_ras_ldb_import_exits_at(
         if peek_exit_at(data, i) {
             continue;
         }
-        skip_until_next_exit(data, &mut i, 8192);
+        // Advance through nested 0x1c / ints only until the next exit; do not
+        // scan thousands of bytes past the exit list into lights/BSP.
+        let before = i;
+        skip_until_next_exit(data, &mut i, 512);
+        if !peek_exit_at(data, i) {
+            i = before;
+            // Soft-skip nested tags after this exit without leaving the nest.
+            let nest = i;
+            while i < data.len() && i < nest + 256 {
+                if peek_exit_at(data, i) {
+                    break;
+                }
+                match data[i] {
+                    0x1c => i += 1,
+                    0x14 | 0x13 | 0x12 | 0x02 => {
+                        if read_mf_i32(data, &mut i).is_none() {
+                            break;
+                        }
+                    }
+                    0x0d => {
+                        if read_mf_str(data, &mut i).is_none() {
+                            break;
+                        }
+                    }
+                    0x11 => {
+                        if read_mf_uint_u8(data, &mut i).is_none() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            if !peek_exit_at(data, i) {
+                break;
+            }
+        }
     }
     if out.is_empty() {
         None

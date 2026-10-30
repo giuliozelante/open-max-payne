@@ -158,7 +158,9 @@ non-last blobs (full `size` incl. 18-byte trailer). **Last blob is RGB only**
 Tutorial 9 → `0x95ad7b`. **ImportExit** (`parse_ras_ldb_import_exits_at`): after lightmaps, records are
 `id` int + `::room::ExitN` name, optionally a room AABB (`11 <n>` corners +
 axis `0x16` + `0x1a` mat3 + pos), then nested `0x1c`/ints until the next exit.
-Linked exits often alternate with/without AABB. ImportBSP/Character still open.
+Linked exits often alternate with/without AABB. Immediately after: repeating
+`0x15` float pairs (+ raw floats) with `0x03`/`0x0e` trailers (possible
+lights/triggers — ImportStaticPointLight?). ImportBSP/Character still open.
 
 ### Retail RAS `.ai`
 
