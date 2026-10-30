@@ -10,19 +10,60 @@ pub const TAG_U8_B: u8 = 0x11;
 pub const TAG_F32: u8 = 0x09;
 /// String: `0x0d` + `0x14` + len_u8 + bytes (BYOD candle RPS).
 pub const TAG_STR: u8 = 0x0d;
-/// Blob: `0x13` + u16_le length + bytes (often embedded JPEG `FFD8…`).
-pub const TAG_BLOB: u8 = 0x13;
 /// Vec3: `0x16` + 3 × LE f32 (BYOD frequency analysis across `x_data.ras` RPS files).
 pub const TAG_VEC3: u8 = 0x16;
 
+/// Signed int size-compression tags (RLMFC `operator<<(mf, int)`).
+pub const TAG_I32_1: u8 = 0x14; // == TAG_U8_A
+pub const TAG_I32_2: u8 = 0x13;
+pub const TAG_I32_3: u8 = 0x12;
+pub const TAG_I32_4: u8 = 0x02;
+
+/// Unsigned int size-compression tags (RLMFC `operator<<(mf, uint)`).
+pub const TAG_U32_1: u8 = 0x11; // == TAG_U8_B
+pub const TAG_U32_2: u8 = 0x10;
+pub const TAG_U32_3: u8 = 0x0f;
+pub const TAG_U32_4: u8 = 0x03;
+
+/// Tags that begin a MemoryFile typed value (not raw embedded payload).
+const KNOWN_TAGS: &[u8] = &[
+    TAG_I32_4, TAG_U32_4, 0x07, TAG_F32, TAG_STR, TAG_U32_3, TAG_U32_2, TAG_U8_B, TAG_I32_3,
+    TAG_I32_2, TAG_U8_A, 0x15, TAG_VEC3, 0x17,
+];
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RpsValue {
-    U8 { tag: u8, value: u8 },
-    F32 { value: f32 },
-    Str { value: String },
-    Blob { data: Vec<u8> },
-    Vec3 { x: f32, y: f32, z: f32 },
-    Unknown { tag: u8, at: usize },
+    U8 {
+        tag: u8,
+        value: u8,
+    },
+    /// Multi-byte compressed signed int (`0x13`/`0x12`/`0x02`).
+    Int {
+        value: i32,
+    },
+    /// Multi-byte compressed unsigned int (`0x10`/`0x0f`/`0x03`).
+    UInt {
+        value: u32,
+    },
+    F32 {
+        value: f32,
+    },
+    Str {
+        value: String,
+    },
+    /// Length-prefixed raw embed (`FUN_00418190`): compressed int + untaged bytes.
+    Blob {
+        data: Vec<u8>,
+    },
+    Vec3 {
+        x: f32,
+        y: f32,
+        z: f32,
+    },
+    Unknown {
+        tag: u8,
+        at: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +75,38 @@ pub struct RpsHeader {
 
 pub fn read_rps(path: &Path) -> Result<RpsHeader, PfxError> {
     parse_rps(&std::fs::read(path)?)
+}
+
+fn push_compressed_int(out: &mut Vec<u8>, value: i32) {
+    let bits = value as u32;
+    let bytes = value.to_le_bytes();
+    if bits & 0xff80_0000 != 0 {
+        out.push(TAG_I32_4);
+        out.extend_from_slice(&bytes);
+    } else if bits & 0x007f_8000 != 0 {
+        out.push(TAG_I32_3);
+        out.extend_from_slice(&bytes[..3]);
+    } else if bits & 0x0000_7f80 != 0 {
+        out.push(TAG_I32_2);
+        out.extend_from_slice(&bytes[..2]);
+    } else {
+        out.push(TAG_U8_A);
+        out.push(bytes[0]);
+    }
+}
+
+fn try_take_raw_blob(data: &[u8], i: &mut usize, len: usize, values: &mut Vec<RpsValue>) -> bool {
+    if len == 0 || *i + len > data.len() {
+        return false;
+    }
+    if KNOWN_TAGS.contains(&data[*i]) {
+        return false;
+    }
+    values.push(RpsValue::Blob {
+        data: data[*i..*i + len].to_vec(),
+    });
+    *i += len;
+    true
 }
 
 /// Walk tagged values until an unknown tag or EOF (bounded).
@@ -54,11 +127,79 @@ pub fn parse_rps(data: &[u8]) -> Result<RpsHeader, PfxError> {
                 if i >= data.len() {
                     break;
                 }
-                values.push(RpsValue::U8 {
-                    tag,
-                    value: data[i],
-                });
+                let value = data[i];
                 i += 1;
+                if !try_take_raw_blob(data, &mut i, value as usize, &mut values) {
+                    values.push(RpsValue::U8 { tag, value });
+                }
+            }
+            TAG_I32_2 => {
+                if i + 2 > data.len() {
+                    values.push(RpsValue::Unknown { tag, at: i - 1 });
+                    break;
+                }
+                let mut b = [0u8; 4];
+                b[..2].copy_from_slice(&data[i..i + 2]);
+                i += 2;
+                let value = i32::from_le_bytes(b);
+                if value < 0 || !try_take_raw_blob(data, &mut i, value as usize, &mut values) {
+                    values.push(RpsValue::Int { value });
+                }
+            }
+            TAG_I32_3 => {
+                if i + 3 > data.len() {
+                    values.push(RpsValue::Unknown { tag, at: i - 1 });
+                    break;
+                }
+                let mut b = [0u8; 4];
+                b[..3].copy_from_slice(&data[i..i + 3]);
+                i += 3;
+                let value = i32::from_le_bytes(b);
+                if value < 0 || !try_take_raw_blob(data, &mut i, value as usize, &mut values) {
+                    values.push(RpsValue::Int { value });
+                }
+            }
+            TAG_I32_4 => {
+                if i + 4 > data.len() {
+                    values.push(RpsValue::Unknown { tag, at: i - 1 });
+                    break;
+                }
+                let value = i32::from_le_bytes(data[i..i + 4].try_into().unwrap());
+                i += 4;
+                if value < 0 || !try_take_raw_blob(data, &mut i, value as usize, &mut values) {
+                    values.push(RpsValue::Int { value });
+                }
+            }
+            TAG_U32_2 => {
+                if i + 2 > data.len() {
+                    values.push(RpsValue::Unknown { tag, at: i - 1 });
+                    break;
+                }
+                let mut b = [0u8; 4];
+                b[..2].copy_from_slice(&data[i..i + 2]);
+                i += 2;
+                let value = u32::from_le_bytes(b);
+                values.push(RpsValue::UInt { value });
+            }
+            TAG_U32_3 => {
+                if i + 3 > data.len() {
+                    values.push(RpsValue::Unknown { tag, at: i - 1 });
+                    break;
+                }
+                let mut b = [0u8; 4];
+                b[..3].copy_from_slice(&data[i..i + 3]);
+                i += 3;
+                let value = u32::from_le_bytes(b);
+                values.push(RpsValue::UInt { value });
+            }
+            TAG_U32_4 => {
+                if i + 4 > data.len() {
+                    values.push(RpsValue::Unknown { tag, at: i - 1 });
+                    break;
+                }
+                let value = u32::from_le_bytes(data[i..i + 4].try_into().unwrap());
+                i += 4;
+                values.push(RpsValue::UInt { value });
             }
             TAG_F32 => {
                 if i + 4 > data.len() {
@@ -82,22 +223,6 @@ pub fn parse_rps(data: &[u8]) -> Result<RpsHeader, PfxError> {
                 }
                 let value = String::from_utf8_lossy(&data[i..i + len]).into_owned();
                 values.push(RpsValue::Str { value });
-                i += len;
-            }
-            TAG_BLOB => {
-                if i + 2 > data.len() {
-                    values.push(RpsValue::Unknown { tag, at: i - 1 });
-                    break;
-                }
-                let len = u16::from_le_bytes([data[i], data[i + 1]]) as usize;
-                i += 2;
-                if i + len > data.len() {
-                    values.push(RpsValue::Unknown { tag, at: i - 3 });
-                    break;
-                }
-                values.push(RpsValue::Blob {
-                    data: data[i..i + len].to_vec(),
-                });
                 i += len;
             }
             TAG_VEC3 => {
@@ -150,6 +275,23 @@ pub fn encode_rps(values: &[RpsValue]) -> Result<Vec<u8>, PfxError> {
                 out.push(*tag);
                 out.push(*value);
             }
+            RpsValue::Int { value } => push_compressed_int(&mut out, *value),
+            RpsValue::UInt { value } => {
+                let bytes = value.to_le_bytes();
+                if *value & 0xff00_0000 != 0 {
+                    out.push(TAG_U32_4);
+                    out.extend_from_slice(&bytes);
+                } else if *value & 0x00ff_0000 != 0 {
+                    out.push(TAG_U32_3);
+                    out.extend_from_slice(&bytes[..3]);
+                } else if *value & 0x0000_ff00 != 0 {
+                    out.push(TAG_U32_2);
+                    out.extend_from_slice(&bytes[..2]);
+                } else {
+                    out.push(TAG_U8_B);
+                    out.push(bytes[0]);
+                }
+            }
             RpsValue::F32 { value } => {
                 out.push(TAG_F32);
                 out.extend_from_slice(&value.to_le_bytes());
@@ -165,11 +307,10 @@ pub fn encode_rps(values: &[RpsValue]) -> Result<Vec<u8>, PfxError> {
                 out.extend_from_slice(bytes);
             }
             RpsValue::Blob { data } => {
-                if data.len() > u16::MAX as usize {
-                    return Err(PfxError::Msg("blob longer than u16".into()));
+                if data.len() > i32::MAX as usize {
+                    return Err(PfxError::Msg("blob too large".into()));
                 }
-                out.push(TAG_BLOB);
-                out.extend_from_slice(&(data.len() as u16).to_le_bytes());
+                push_compressed_int(&mut out, data.len() as i32);
                 out.extend_from_slice(data);
             }
             RpsValue::Vec3 { x, y, z } => {
@@ -286,10 +427,10 @@ mod tests {
     }
 
     #[test]
-    fn walks_jpeg_blob_tag() {
+    fn walks_jpeg_blob_as_length_plus_raw() {
         let jpeg = b"\xff\xd8\xff\xd9";
-        let mut buf = vec![TAG_BLOB];
-        buf.extend_from_slice(&(jpeg.len() as u16).to_le_bytes());
+        let mut buf = Vec::new();
+        push_compressed_int(&mut buf, jpeg.len() as i32);
         buf.extend_from_slice(jpeg);
         buf.push(0xff);
         let h = parse_rps(&buf).unwrap();
@@ -300,6 +441,19 @@ mod tests {
             }
             _ => panic!("expected blob"),
         }
+    }
+
+    #[test]
+    fn walks_multi_byte_int_and_uint() {
+        let mut buf = Vec::new();
+        push_compressed_int(&mut buf, 0x100);
+        // uint 959 → 0x10 + le16
+        buf.push(TAG_U32_2);
+        buf.extend_from_slice(&959u16.to_le_bytes());
+        let h = parse_rps(&buf).unwrap();
+        assert!(matches!(h.values[0], RpsValue::Int { value: 0x100 }));
+        assert!(matches!(h.values[1], RpsValue::UInt { value: 959 }));
+        assert_eq!(h.bytes_consumed, buf.len());
     }
 
     #[test]
@@ -368,5 +522,6 @@ mod tests {
         let back = parse_rps(&bytes).unwrap();
         assert_eq!(back.values, values);
         assert_eq!(back.bytes_consumed, bytes.len());
+        assert_eq!(roundtrip_rps(&bytes).unwrap(), bytes);
     }
 }

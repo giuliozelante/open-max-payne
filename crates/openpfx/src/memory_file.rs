@@ -3,7 +3,7 @@
 //!
 //! Spec: docs/specs/rps_format.md
 
-use crate::rps::{TAG_BLOB, TAG_F32, TAG_STR, TAG_U8_A, TAG_U8_B, TAG_VEC3};
+use crate::rps::{TAG_F32, TAG_STR, TAG_U8_A, TAG_U8_B, TAG_VEC3};
 use crate::PfxError;
 
 /// Object-type markers written as `operator<<(mf, &typeId)` then a version/count int.
@@ -50,16 +50,51 @@ impl MemoryFileWriter {
         &self.buf
     }
 
-    /// `operator<<(mf, int*)` — tag `0x14` + u8 payload.
-    pub fn write_int_u8(&mut self, value: u8) {
-        self.buf.push(TAG_U8_A);
-        self.buf.push(value);
+    /// `operator<<(mf, int const&)` with RLMFC size compression (tags `0x14`…`0x02`).
+    pub fn write_int(&mut self, value: i32) {
+        let bits = value as u32;
+        let bytes = value.to_le_bytes();
+        if bits & 0xff80_0000 != 0 {
+            self.buf.push(0x02);
+            self.buf.extend_from_slice(&bytes);
+        } else if bits & 0x007f_8000 != 0 {
+            self.buf.push(0x12);
+            self.buf.extend_from_slice(&bytes[..3]);
+        } else if bits & 0x0000_7f80 != 0 {
+            self.buf.push(0x13);
+            self.buf.extend_from_slice(&bytes[..2]);
+        } else {
+            self.buf.push(TAG_U8_A);
+            self.buf.push(bytes[0]);
+        }
     }
 
-    /// `operator<<(mf, uint*)` — tag `0x11` + u8 payload.
+    /// `operator<<(mf, int*)` — tag `0x14` + u8 payload (fits-in-u8 fast path).
+    pub fn write_int_u8(&mut self, value: u8) {
+        self.write_int(i32::from(value));
+    }
+
+    /// `operator<<(mf, uint const&)` with RLMFC size compression (`0x11`…`0x03`).
+    pub fn write_uint(&mut self, value: u32) {
+        let bytes = value.to_le_bytes();
+        if value & 0xff00_0000 != 0 {
+            self.buf.push(0x03);
+            self.buf.extend_from_slice(&bytes);
+        } else if value & 0x00ff_0000 != 0 {
+            self.buf.push(0x0f);
+            self.buf.extend_from_slice(&bytes[..3]);
+        } else if value & 0x0000_ff00 != 0 {
+            self.buf.push(0x10);
+            self.buf.extend_from_slice(&bytes[..2]);
+        } else {
+            self.buf.push(TAG_U8_B);
+            self.buf.push(bytes[0]);
+        }
+    }
+
+    /// `operator<<(mf, uint*)` — tag `0x11` + u8 payload (fits-in-u8 fast path).
     pub fn write_uint_u8(&mut self, value: u8) {
-        self.buf.push(TAG_U8_B);
-        self.buf.push(value);
+        self.write_uint(u32::from(value));
     }
 
     /// `operator<<(mf, float*)` — tag `0x09` + LE f32.
@@ -89,14 +124,12 @@ impl MemoryFileWriter {
         Ok(())
     }
 
-    /// Embedded blob: `0x13` + u16_le length + bytes.
+    /// Raw `R_MemoryFile::write` after a compressed length int (`FUN_00418190` embed).
     pub fn write_blob(&mut self, data: &[u8]) -> Result<(), PfxError> {
-        if data.len() > u16::MAX as usize {
-            return Err(PfxError::Msg("blob longer than u16".into()));
+        if data.len() > i32::MAX as usize {
+            return Err(PfxError::Msg("blob too large".into()));
         }
-        self.buf.push(TAG_BLOB);
-        self.buf
-            .extend_from_slice(&(data.len() as u16).to_le_bytes());
+        self.write_int(data.len() as i32);
         self.buf.extend_from_slice(data);
         Ok(())
     }
@@ -226,8 +259,8 @@ impl MemoryFileWriter {
 
     /// `FUN_00418190` texture embed: relative path string + optional JPEG/blob bytes.
     ///
-    /// When `data` is `Some`, matches the `param_3 == 0` branch (size +
-    /// `R_MemoryFile::write` → on-disk `0x13` blob). `None` writes int `0`
+    /// When `data` is `Some`, matches the `param_3 == 0` branch (compressed
+    /// length int + `R_MemoryFile::write`). `None` writes int `0`
     /// (external reference, no embed).
     pub fn write_embedded_file(
         &mut self,
@@ -291,6 +324,22 @@ mod tests {
             1, 0x09, 0x00, 0x00, 0x40, 0xc0, 0x09, 0x00, 0x00, 0x40, 0x40, 0x11, 2,
         ];
         assert_eq!(w.as_bytes(), expected);
+    }
+
+    #[test]
+    fn int_compression_matches_rlmfc_windows() {
+        let mut w = MemoryFileWriter::new();
+        w.write_int(5);
+        w.write_int(0x100);
+        w.write_uint(10);
+        w.write_uint(959);
+        assert_eq!(w.as_bytes()[0], TAG_U8_A);
+        assert_eq!(w.as_bytes()[1], 5);
+        assert_eq!(w.as_bytes()[2], 0x13); // 2-byte signed
+        assert_eq!(w.as_bytes()[5], TAG_U8_B);
+        assert_eq!(w.as_bytes()[6], 10);
+        assert_eq!(w.as_bytes()[7], 0x10); // 2-byte unsigned (959)
+        assert_eq!(&w.as_bytes()[8..10], &959u16.to_le_bytes());
     }
 
     #[test]

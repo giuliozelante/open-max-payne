@@ -84,6 +84,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     RpsValue::U8 { tag, value } => {
                         println!("  [{i}] u8 tag=0x{tag:02x} value={value}")
                     }
+                    RpsValue::Int { value } => println!("  [{i}] int {value}"),
+                    RpsValue::UInt { value } => println!("  [{i}] uint {value}"),
                     RpsValue::F32 { value } => println!("  [{i}] f32 {value}"),
                     RpsValue::Str { value } => println!("  [{i}] str {value:?}"),
                     RpsValue::Blob { data } => {

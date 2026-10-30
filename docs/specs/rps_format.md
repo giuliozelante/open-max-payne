@@ -50,18 +50,40 @@ psysedit [-h] [-y] [-r] [-e filename(s)] [-d directory]
 `FUN_00418190(mf, path, flag)`: loads file via `R_File::load`, writes relative path,
 then either embeds bytes (`flag==0`) or writes int `0` (no embed).
 
-`RLMFC.DLL::operator<<` overload → on-disk tags:
+### `RLMFC.DLL` `R_MemoryFile::writeTagged` (REA)
 
-| C++ arg | Tag | Payload |
-|---------|-----|---------|
-| `int*` | `0x14` | u8 |
-| `uint*` | `0x11` | u8 |
-| `float*` | `0x09` | LE f32 |
-| `M_Vector3Template<float>*` | `0x16` | 3 × LE f32 |
-| string (BYOD) | `0x0d` | `14 <len>` + bytes |
-| blob (BYOD JPEG) | `0x13` | u16_le len + bytes |
+`writeTag(BasicType)` writes the type enum as **one byte** (when tags enabled),
+then `write` copies `size` payload bytes.
 
-Mirrored in Rust: `openpfx::MemoryFileWriter` + `openpfx::rps_obj::*`.
+**Signed `int` compression** (`operator<<(mf, int const&)` @ `rlmfc` `0x10017a10`):
+
+| Tag | Payload bytes | When |
+|-----|---------------|------|
+| `0x14` | 1 | value fits in 1 byte |
+| `0x13` | 2 | else fits in 2 |
+| `0x12` | 3 | else fits in 3 |
+| `0x02` | 4 | full int |
+
+**Unsigned `uint` compression** (`0x10017a90`):
+
+| Tag | Payload bytes |
+|-----|---------------|
+| `0x11` | 1 |
+| `0x10` | 2 |
+| `0x0f` | 3 |
+| `0x03` | 4 |
+
+Other fixed tags: `float` → `0x09` + 4; `vec2` → `0x15` + 8; `vec3` → `0x16` + 12;
+`vec4` → `0x17` + 16; `signed char` → `0x07` + 1.
+
+**Embedded file** (`FUN_00418190`): compressed int length then raw
+`MemoryFile::write` (untagged). Walker promotes length+raw → `RpsValue::Blob`
+when the next byte is not a known MemoryFile tag (JPEG `FFD8…` common).
+
+Retail candle stays in the 1-byte int/uint regime (`0x14`/`0x11`).
+
+Mirrored in Rust: `openpfx::MemoryFileWriter` + `parse_rps` multi-byte int/uint
+tags (`0x13`/`0x12`/`0x02`, `0x10`/`0x0f`/`0x03`).
 
 ### Version / structure gate (load)
 
