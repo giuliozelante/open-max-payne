@@ -163,8 +163,8 @@ Linked exits often alternate with/without AABB. Immediately after:
 **Point stream** (`parse_ras_ldb_import_point_stream_at`, likely lights/triggers):
 nest `0x1c` + ints, `0x12` even count, subtype int, then `count/2` bodies
 (`15 f32 f32 15 f32 f32 03 i32 0e u8`; first lacks id). Startup 65107 bodies
-→ `0xfdd873`; Tutorial 42009 → `0xa7339c`. Trailing `14 <n> 15… 0f…` still open.
-ImportBSP/Character still open.
+→ `0xfdd873` (+ trailing bodies → Startup `0x1197022` / Tutorial `0xb8ea3b`).
+Next: ints + `0x11` + many `0x16` vec3s (possible ImportBSP / mesh). Still open.
 
 ### Retail RAS `.ai`
 
