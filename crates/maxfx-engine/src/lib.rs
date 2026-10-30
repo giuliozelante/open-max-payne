@@ -768,32 +768,121 @@ pub fn parse_ras_ldb_import_lightmaps_at(data: &[u8], offset: usize) -> Option<(
 
 /// Harvest `::…::…` exit/room-ish names from the ImportLevel stream after `offset`.
 pub fn ras_ldb_import_exit_names_at(data: &[u8], offset: usize, max: usize) -> Vec<String> {
-    if offset >= data.len() || max == 0 {
-        return Vec::new();
+    parse_ras_ldb_import_exits_at(data, offset, max)
+        .map(|(exits, _)| exits.into_iter().map(|e| e.name).collect())
+        .unwrap_or_default()
+}
+
+/// One ImportExit (optional linked room AABB) after lightmaps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RasLdbImportExit {
+    pub id: i32,
+    pub name: String,
+    pub corners: u8,
+    pub pos: Option<[f32; 3]>,
+}
+
+fn peek_exit_at(data: &[u8], i: usize) -> bool {
+    let mut j = i;
+    if read_mf_i32(data, &mut j).is_none() {
+        return false;
     }
-    let slice = &data[offset..];
+    if j + 3 >= data.len() || data[j] != 0x0d || data[j + 1] != 0x14 {
+        return false;
+    }
+    let len = data[j + 2] as usize;
+    let start = j + 3;
+    if start + len > data.len() {
+        return false;
+    }
+    let bytes = &data[start..start + len];
+    bytes.len() >= 4
+        && bytes.starts_with(b"::")
+        && bytes.iter().all(|&b| (0x20..=0x7e).contains(&b))
+}
+
+fn skip_until_next_exit(data: &[u8], i: &mut usize, limit: usize) {
+    let start = *i;
+    while *i < data.len() && *i < start + limit {
+        if peek_exit_at(data, *i) {
+            return;
+        }
+        *i += 1;
+    }
+}
+
+/// Parse ImportExit records after lightmaps: `id` int, `::` name, optional room
+/// (`u8` corners + vec3s + axis + `0x1a` mat3 + pos), then skip nested `0x1c`/ints
+/// until the next exit or `max` reached.
+pub fn parse_ras_ldb_import_exits_at(
+    data: &[u8],
+    offset: usize,
+    max: usize,
+) -> Option<(Vec<RasLdbImportExit>, usize)> {
+    if offset >= data.len() || max == 0 {
+        return None;
+    }
+    let mut i = offset;
     let mut out = Vec::new();
-    let mut i = 0;
-    while i + 3 < slice.len() && out.len() < max {
-        if slice[i] == 0x0d && slice[i + 1] == 0x14 {
-            let len = slice[i + 2] as usize;
-            let start = i + 3;
-            if start + len <= slice.len() {
-                let bytes = &slice[start..start + len];
-                if bytes.iter().all(|&b| (0x20..=0x7e).contains(&b)) {
-                    if let Ok(s) = std::str::from_utf8(bytes) {
-                        if s.starts_with("::") && s.matches("::").count() >= 2 {
-                            out.push(s.to_string());
+    while out.len() < max && peek_exit_at(data, i) {
+        let Some(id) = read_mf_i32(data, &mut i) else {
+            break;
+        };
+        let Some(name) = read_mf_str(data, &mut i) else {
+            break;
+        };
+        let mut corners = 0u8;
+        let mut pos = None;
+        if data.get(i) == Some(&0x11) {
+            let mark = i;
+            if let Some(n) = read_mf_uint_u8(data, &mut i) {
+                if (3..=32).contains(&n) {
+                    let mut ok = true;
+                    for _ in 0..n {
+                        if read_mf_vec3(data, &mut i).is_none() {
+                            ok = false;
+                            break;
                         }
                     }
+                    if ok
+                        && read_mf_vec3(data, &mut i).is_some()
+                        && data.get(i) == Some(&0x1a)
+                        && i + 1 + 36 + 12 <= data.len()
+                    {
+                        i += 1 + 36; // mat3
+                        let x = f32::from_le_bytes(data[i..i + 4].try_into().unwrap());
+                        let y = f32::from_le_bytes(data[i + 4..i + 8].try_into().unwrap());
+                        let z = f32::from_le_bytes(data[i + 8..i + 12].try_into().unwrap());
+                        i += 12;
+                        corners = n;
+                        pos = Some([x, y, z]);
+                    } else {
+                        i = mark;
+                    }
+                } else {
+                    i = mark;
                 }
-                i = start + len;
-                continue;
             }
         }
-        i += 1;
+        out.push(RasLdbImportExit {
+            id,
+            name,
+            corners,
+            pos,
+        });
+        if out.len() >= max {
+            break;
+        }
+        if peek_exit_at(data, i) {
+            continue;
+        }
+        skip_until_next_exit(data, &mut i, 8192);
     }
-    out
+    if out.is_empty() {
+        None
+    } else {
+        Some((out, i))
+    }
 }
 
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
@@ -1407,15 +1496,63 @@ mod tests {
     #[test]
     fn harvests_exit_names_after_offset() {
         let mut body = Vec::new();
-        body.extend_from_slice(&[0x11, 0x04]);
+        body.extend_from_slice(&[0x14, 1]);
         body.extend_from_slice(&[0x0d, 0x14, 14]);
         body.extend_from_slice(b"::start::Exit0");
+        body.extend_from_slice(&[0x14, 2]);
         body.extend_from_slice(&[0x0d, 0x14, 4]);
-        body.extend_from_slice(b"nope");
-        body.extend_from_slice(&[0x0d, 0x14, 13]);
-        body.extend_from_slice(b"::help::Exit1");
+        body.extend_from_slice(b"nope"); // not :: — stops list
         let names = ras_ldb_import_exit_names_at(&body, 0, 8);
-        assert_eq!(names, vec!["::start::Exit0", "::help::Exit1"]);
+        assert_eq!(names, vec!["::start::Exit0"]);
+        let mut body2 = Vec::new();
+        body2.extend_from_slice(&[0x14, 1]);
+        body2.extend_from_slice(&[0x0d, 0x14, 14]);
+        body2.extend_from_slice(b"::start::Exit0");
+        body2.extend_from_slice(&[0x14, 2]);
+        body2.extend_from_slice(&[0x0d, 0x14, 13]);
+        body2.extend_from_slice(b"::help::Exit1");
+        assert_eq!(
+            ras_ldb_import_exit_names_at(&body2, 0, 8),
+            vec!["::start::Exit0", "::help::Exit1"]
+        );
+    }
+
+    #[test]
+    fn parses_import_exit_with_room_aabb() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x14, 4]); // flag/id
+        let name1 = b"::help::Exit1";
+        body.extend_from_slice(&[0x0d, 0x14, name1.len() as u8]);
+        body.extend_from_slice(name1);
+        body.extend_from_slice(&[0x11, 4]); // 4 corners
+        for _ in 0..5 {
+            // 4 corners + axis
+            body.push(0x16);
+            for v in [1.0f32, 2.0, 3.0] {
+                body.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        body.push(0x1a);
+        for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [10.0f32, 20.0, 30.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        // second exit without room
+        body.extend_from_slice(&[0x14, 2]);
+        let name2 = b"::start::Exit0";
+        body.extend_from_slice(&[0x0d, 0x14, name2.len() as u8]);
+        body.extend_from_slice(name2);
+        body.extend_from_slice(&[0x1c, 0x14, 1]); // nesting marker
+        let (exits, end) = parse_ras_ldb_import_exits_at(&body, 0, 8).unwrap();
+        assert_eq!(exits.len(), 2);
+        assert_eq!(exits[0].name, "::help::Exit1");
+        assert_eq!(exits[0].pos, Some([10.0, 20.0, 30.0]));
+        assert_eq!(exits[0].corners, 4);
+        assert_eq!(exits[1].name, "::start::Exit0");
+        assert!(exits[1].pos.is_none());
+        assert!(end > 0);
     }
 
     #[test]

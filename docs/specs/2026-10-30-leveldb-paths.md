@@ -155,9 +155,10 @@ after categories, `count`, `0`, u8 `0`, prefix `0x12` + u32 `size`
 `18 20`, then `count` payloads with sep `00 00 00 01 00 01 18 20` between
 non-last blobs (full `size` incl. 18-byte trailer). **Last blob is RGB only**
 (`size-18`) — exits/rooms resume immediately. Startup 45 → `0xe2bdf3`;
-Tutorial 9 → `0x95ad7b`. Next: ints + `::…::…` names, then room AABB
-(`11 <n>` + `0x16` corners, `0x1a` mat3, pos). Full ImportRoom/Exit/`0x1c`
-still open (`ras_ldb_import_exit_names_at` soft-harvest).
+Tutorial 9 → `0x95ad7b`. **ImportExit** (`parse_ras_ldb_import_exits_at`): after lightmaps, records are
+`id` int + `::room::ExitN` name, optionally a room AABB (`11 <n>` corners +
+axis `0x16` + `0x1a` mat3 + pos), then nested `0x1c`/ints until the next exit.
+Linked exits often alternate with/without AABB. ImportBSP/Character still open.
 
 ### Retail RAS `.ai`
 
