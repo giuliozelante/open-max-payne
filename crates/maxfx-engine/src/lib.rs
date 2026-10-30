@@ -174,6 +174,135 @@ pub fn count_ras_ldb_leading_vec3(data: &[u8]) -> usize {
     n
 }
 
+/// One face-like record from a kind-`0x13` MemoryFile body (BYOD Startup).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RasLdbFace {
+    pub indices: [u8; 3],
+    pub attr: i32,
+    pub normal: [f32; 3],
+    pub point: [f32; 3],
+}
+
+fn read_mf_u8_int(data: &[u8], i: &mut usize) -> Option<u8> {
+    if *i + 2 > data.len() || data[*i] != 0x14 {
+        return None;
+    }
+    *i += 1;
+    let v = data[*i];
+    *i += 1;
+    Some(v)
+}
+
+fn read_mf_i32(data: &[u8], i: &mut usize) -> Option<i32> {
+    if *i >= data.len() {
+        return None;
+    }
+    match data[*i] {
+        0x14 => {
+            *i += 1;
+            if *i >= data.len() {
+                return None;
+            }
+            let v = data[*i] as i32;
+            *i += 1;
+            Some(v)
+        }
+        0x13 => {
+            *i += 1;
+            if *i + 2 > data.len() {
+                return None;
+            }
+            let mut b = [0u8; 4];
+            b[..2].copy_from_slice(&data[*i..*i + 2]);
+            *i += 2;
+            Some(i32::from_le_bytes(b))
+        }
+        0x12 => {
+            *i += 1;
+            if *i + 3 > data.len() {
+                return None;
+            }
+            let mut b = [0u8; 4];
+            b[..3].copy_from_slice(&data[*i..*i + 3]);
+            *i += 3;
+            Some(i32::from_le_bytes(b))
+        }
+        0x02 => {
+            *i += 1;
+            if *i + 4 > data.len() {
+                return None;
+            }
+            let v = i32::from_le_bytes(data[*i..*i + 4].try_into().ok()?);
+            *i += 4;
+            Some(v)
+        }
+        _ => None,
+    }
+}
+
+fn read_mf_vec3(data: &[u8], i: &mut usize) -> Option<[f32; 3]> {
+    if *i + 13 > data.len() || data[*i] != 0x16 {
+        return None;
+    }
+    *i += 1;
+    let x = f32::from_le_bytes(data[*i..*i + 4].try_into().ok()?);
+    let y = f32::from_le_bytes(data[*i + 4..*i + 8].try_into().ok()?);
+    let z = f32::from_le_bytes(data[*i + 8..*i + 12].try_into().ok()?);
+    *i += 12;
+    Some([x, y, z])
+}
+
+/// Parse up to `max` face-like records from a kind-`0x13` section body (no header).
+pub fn parse_ras_ldb_faces(body: &[u8], max: usize) -> Vec<RasLdbFace> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while out.len() < max && i < body.len() {
+        let start = i;
+        let Some(i0) = read_mf_u8_int(body, &mut i) else {
+            break;
+        };
+        let Some(i1) = read_mf_u8_int(body, &mut i) else {
+            break;
+        };
+        let Some(i2) = read_mf_u8_int(body, &mut i) else {
+            break;
+        };
+        let Some(attr) = read_mf_i32(body, &mut i) else {
+            break;
+        };
+        let Some(normal) = read_mf_vec3(body, &mut i) else {
+            break;
+        };
+        let Some(point) = read_mf_vec3(body, &mut i) else {
+            break;
+        };
+        if i == start {
+            break;
+        }
+        out.push(RasLdbFace {
+            indices: [i0, i1, i2],
+            attr,
+            normal,
+            point,
+        });
+    }
+    out
+}
+
+/// Body slice of the first kind-`0x13` section after a flag-0 vec3 cloud.
+pub fn ras_ldb_first_mf_section_body(data: &[u8]) -> Option<&[u8]> {
+    let h = parse_ras_ldb_header(data)?;
+    if h.flag != 0 {
+        return None;
+    }
+    let end = ras_ldb_count_section_end(&h);
+    let sec = parse_ras_ldb_section_at(data, end)?;
+    if sec.kind != LDB_SECTION_KIND_MF {
+        return None;
+    }
+    Some(&data[end + 4..])
+}
+
 /// MaxED MemoryFile-native `.ldb` prefix: tagged int `LDB_IMPORT_VERSION` (`0x14 0x20`).
 pub fn looks_like_memory_file_ldb(data: &[u8]) -> bool {
     data.len() >= 2 && data[0] == 0x14 && data[1] == LDB_IMPORT_VERSION as u8
@@ -551,6 +680,28 @@ mod tests {
         assert_eq!(sec.count, 3);
         assert_eq!(sec.flag, None);
         assert_eq!(s2[4], 0x14);
+    }
+
+    #[test]
+    fn parses_face_like_mf_record() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x14, 0, 0x14, 3, 0x14, 0]);
+        body.push(0x13);
+        body.extend_from_slice(&804u16.to_le_bytes());
+        body.push(0x16);
+        for v in [0.0f32, 0.0, 1.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        body.push(0x16);
+        for v in [-1.5f32, -1.5, -2.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        let faces = parse_ras_ldb_faces(&body, 2);
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0].indices, [0, 3, 0]);
+        assert_eq!(faces[0].attr, 804);
+        assert!((faces[0].normal[2] - 1.0).abs() < 1e-5);
+        assert!((faces[0].point[0] + 1.5).abs() < 1e-5);
     }
 
     #[test]
