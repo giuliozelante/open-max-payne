@@ -1,4 +1,7 @@
-use maxfx_engine::{discover_ras_files, list_level_packages, open_archive, parse_levels_txt};
+use maxfx_engine::{
+    discover_ras_files, list_level_packages, looks_like_ldb_or_ai, open_archive, parse_levels_txt,
+    split_ldb_records,
+};
 use openras::RasArchive;
 use std::env;
 use std::path::Path;
@@ -7,10 +10,47 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(path) = args.next() else {
-        eprintln!("usage: maxfx-engine <archive.ras|archive.mpm|game-dir>");
+        eprintln!("usage: maxfx-engine <archive.ras|archive.mpm|game-dir|level.ldb|.ai>");
         return ExitCode::FAILURE;
     };
     let p = Path::new(&path);
+    if p.is_file() {
+        let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if ext.eq_ignore_ascii_case("ldb") || ext.eq_ignore_ascii_case("ai") {
+            return match std::fs::read(p) {
+                Ok(data) => {
+                    if !looks_like_ldb_or_ai(&data) {
+                        eprintln!("error: missing LDB/AI preamble");
+                        return ExitCode::FAILURE;
+                    }
+                    let recs = split_ldb_records(&data).unwrap();
+                    println!(
+                        "{}: {} bytes, {} >-records after preamble",
+                        p.display(),
+                        data.len(),
+                        recs.len()
+                    );
+                    let mut leads = std::collections::BTreeMap::<u8, usize>::new();
+                    for r in &recs {
+                        if let Some(b) = r.lead_byte() {
+                            *leads.entry(b).or_default() += 1;
+                        }
+                    }
+                    println!("lead bytes (top):");
+                    let mut pairs: Vec<_> = leads.into_iter().collect();
+                    pairs.sort_by_key(|a| std::cmp::Reverse(a.1));
+                    for (b, n) in pairs.into_iter().take(12) {
+                        println!("  0x{b:02x}: {n}");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+    }
     if p.is_dir() {
         return match discover_ras_files(p) {
             Ok(files) => {

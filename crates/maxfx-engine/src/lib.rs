@@ -59,6 +59,58 @@ pub fn looks_like_ldb_or_ai(data: &[u8]) -> bool {
     data.len() >= LDB_PREAMBLE.len() && data.starts_with(LDB_PREAMBLE)
 }
 
+/// One `>`-terminated record from a `.ldb` / `.ai` body (BYOD observation).
+///
+/// Files start with [`LDB_PREAMBLE`], then a stream of payloads separated by
+/// ASCII `>` (`0x3e`). Payloads are **space-padded** (`0x20`); after stripping
+/// spaces, retail `.ai` records often begin with opcode-like bytes (e.g. `0xc7`)
+/// and embed MemoryFile-style tags (`0x14` / `0x09` / `0x16`). Full opcode map
+/// still needs `X_LevelDBImportLevel` REA (issue #14).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LdbRecord {
+    /// Bytes between the previous `>` and this record's terminating `>` (exclusive of `>`).
+    pub raw: Vec<u8>,
+}
+
+impl LdbRecord {
+    /// Payload with `0x20` padding removed (lossy view for opcode probing).
+    pub fn space_stripped(&self) -> Vec<u8> {
+        self.raw.iter().copied().filter(|&b| b != 0x20).collect()
+    }
+
+    /// First non-space byte, if any.
+    pub fn lead_byte(&self) -> Option<u8> {
+        self.raw.iter().copied().find(|&b| b != 0x20)
+    }
+}
+
+/// Split `.ldb` / `.ai` bytes into `>`-delimited records after the shared preamble.
+///
+/// Returns `None` if the preamble does not match. The preamble's own trailing
+/// `>` starts the first record boundary (empty leading chunk is dropped).
+pub fn split_ldb_records(data: &[u8]) -> Option<Vec<LdbRecord>> {
+    if !looks_like_ldb_or_ai(data) {
+        return None;
+    }
+    let body = &data[LDB_PREAMBLE.len()..]; // after first '>'
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, &b) in body.iter().enumerate() {
+        if b == b'>' {
+            out.push(LdbRecord {
+                raw: body[start..i].to_vec(),
+            });
+            start = i + 1;
+        }
+    }
+    if start < body.len() {
+        out.push(LdbRecord {
+            raw: body[start..].to_vec(),
+        });
+    }
+    Some(out)
+}
+
 /// One level entry from `\data\database\levels\levels.txt` (SharedDB catalog).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LevelsTxtEntry {
@@ -264,6 +316,21 @@ mod tests {
         buf.extend_from_slice(&[0x00, 0x01, 0x02]);
         assert!(looks_like_ldb_or_ai(&buf));
         assert!(!looks_like_ldb_or_ai(b"RAS\0"));
+    }
+
+    #[test]
+    fn split_ldb_records_on_gt_after_preamble() {
+        let mut buf = Vec::from(LDB_PREAMBLE);
+        buf.extend_from_slice(b"  \xc7  \x14\n  >");
+        buf.extend_from_slice(b"abc>");
+        buf.extend_from_slice(b"tail");
+        let recs = split_ldb_records(&buf).unwrap();
+        assert_eq!(recs.len(), 3);
+        assert_eq!(recs[0].lead_byte(), Some(0xc7));
+        assert_eq!(recs[0].space_stripped(), vec![0xc7, 0x14, 0x0a]);
+        assert_eq!(recs[1].raw, b"abc");
+        assert_eq!(recs[2].raw, b"tail");
+        assert!(split_ldb_records(b"nope").is_none());
     }
 
     #[test]

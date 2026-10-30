@@ -93,6 +93,11 @@ pub fn parse_pse(data: &[u8]) -> Result<PseHeader, PfxError> {
 
 /// PSE flat fields → RPS root object through pre-graph ints (`FUN_0041ab00` before graphs).
 pub fn pse_to_rps_root(h: &PseHeader) -> Result<Vec<u8>, PfxError> {
+    pse_to_rps_root_into(h, false)
+}
+
+/// Like [`pse_to_rps_root`], optionally appending an empty graph header (`0x31`/`0`).
+pub fn pse_to_rps_root_into(h: &PseHeader, empty_graph: bool) -> Result<Vec<u8>, PfxError> {
     use memory_file::MemoryFileWriter;
     fn u8_fit(v: u32, name: &str) -> Result<u8, PfxError> {
         u8::try_from(v).map_err(|_| PfxError::Msg(format!("{name}={v} does not fit u8 tag")))
@@ -117,6 +122,9 @@ pub fn pse_to_rps_root(h: &PseHeader) -> Result<Vec<u8>, PfxError> {
         u8_fit(h.flag_a, "flag_a")?,
         u8_fit(h.flag_b, "flag_b")?,
     );
+    if empty_graph {
+        w.write_graph_header(0);
+    }
     Ok(w.into_bytes())
 }
 
@@ -173,5 +181,8 @@ mod tests {
             0x00, 0x20, 0x40, 0x11, 10, 0x14, 0, 0x14, 0,
         ];
         assert_eq!(bytes, expected);
+        let with_graph = pse_to_rps_root_into(&h, true).unwrap();
+        assert!(with_graph.starts_with(expected));
+        assert_eq!(&with_graph[expected.len()..], &[0x14, 0x31, 0x14, 0]);
     }
 }

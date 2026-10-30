@@ -81,7 +81,7 @@ Tokens sit in `.rdata` after `MP_GM_LEVEL_INIT1`. Mapping from `X_LevelDBImport*
 Also present: `X_LevelDBImportLevel` (top-level), `ImportBSP`, `ImportCharacter`,
 `ImportTrigger`, `ImportStartpoint`, `ImportExit`, `ImportLevelItem`, …
 
-## `.ldb` / `.ai` preamble (BYOD)
+## `.ldb` / `.ai` preamble + records (BYOD, issue #14)
 
 Both `.ldb` and `.ai` from `x_level1.ras` share:
 
@@ -91,16 +91,35 @@ Both `.ldb` and `.ai` from `x_level1.ras` share:
 
 Constant in code: `maxfx_engine::LDB_PREAMBLE` / `looks_like_ldb_or_ai`.
 
-After the preamble, files stay **space-heavy** early on (`.ai` shows embedded
-`0x14` tag-like bytes and many `>` record markers). Full chunk layout still needs
-decompile of `X_LevelDBImportLevel`.
+### Record framing
 
-## Done / next (issue #12)
+After that first `>`, the body is a stream of **payloads separated by `>`**.
+Payloads are densely padded with `0x20`. Helpers:
 
+- `split_ldb_records` → `Vec<LdbRecord>`
+- `LdbRecord::space_stripped` / `lead_byte` for opcode probing
+- CLI: `maxfx-engine path/to/file.ldb` (or `.ai`) prints record count + lead-byte histogram
+
+### Observations (part0_level1)
+
+| File | Size | `>` records (approx) | Notes |
+|------|------|----------------------|-------|
+| `.ai` | ~45 KiB | ~435 | Space-stripped leads include `0x89`, `0x14`, `0x55`, …; some records start `c7 …` then MemoryFile-like `14`/`09`/`16` |
+| `.ldb` | ~15 MiB | ~238k | Same `>` framing; even more space-heavy early on |
+
+**Not** a flat MemoryFile stream (skipping spaces still hits non-tag opcodes immediately).
+Opcode / section semantics need `X_LevelDBImportLevel` (or a `*_LOAD` handler) decompile.
+
+## Done / next
+
+### Issue #12 (paths) — closed
 - [x] Path layout inside `x_level*.ras`
 - [x] Token list + Import* RTTI map (best-effort)
 - [x] Shared preamble observation + engine helper
 - [x] `maxfx-engine` lists `.ldb`/`.ai` pairs
 - [x] `levels.txt` → archive path construction + parser/tests
-- [ ] Decompile `X_LevelDBImportLevel` / `*_LOAD` dispatch (chunk format)
-- [ ] Chunk / section format inside `.ldb` after preamble
+
+### Issue #14 (chunks)
+- [x] `>`-record split + space-strip probe + CLI histogram
+- [ ] Decompile `X_LevelDBImportLevel` / `*_LOAD` → opcode map
+- [ ] Typed section decode inside records

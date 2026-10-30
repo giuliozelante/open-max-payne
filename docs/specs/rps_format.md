@@ -73,7 +73,11 @@ read int → must be 5      else Invalid File Version (format uses %8x)
 ```
 
 Strings: `PS_ParticleSystem: Invalid File Version in %s\nCurrent: %8x  Expected: %8x`
-and `T_Graph: Invalid File Version…` (graph object gate).
+and `T_Graph: Invalid File Version…`.
+
+REA: the `T_Graph` version string is referenced from `FUN_00424410`, which gates
+**type `0x71`, version `3`** — i.e. the **curve** object (`FUN_00432fd0` writer),
+not the `0x31` particle-graph section. Editor “graphs” are curve UIs.
 
 **Expected root magic = type `0x60`, version `5`.** Same values PSE flat header word0/word1.
 

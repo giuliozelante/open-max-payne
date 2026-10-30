@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use openpfx::{
-    pse_header_to_rps_preamble, pse_to_rps_root, read_pse, read_rps, roundtrip_rps, RpsValue,
+    pse_header_to_rps_preamble, pse_to_rps_root_into, read_pse, read_rps, roundtrip_rps, RpsValue,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -34,6 +34,9 @@ enum Cmd {
         pse: PathBuf,
         #[arg(short = 'o', long)]
         output: PathBuf,
+        /// Append empty graph header `0x31`/`0` (structural stub)
+        #[arg(long)]
+        empty_graph: bool,
     },
     /// Parse a retail `.rps` and write it back (encode parity check; BYOD local use)
     Repack {
@@ -110,13 +113,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 output.display()
             );
         }
-        Cmd::ExportRoot { pse, output } => {
+        Cmd::ExportRoot {
+            pse,
+            output,
+            empty_graph,
+        } => {
             let h = read_pse(&pse)?;
-            let bytes = pse_to_rps_root(&h)?;
+            let bytes = pse_to_rps_root_into(&h, empty_graph)?;
             fs::write(&output, &bytes)?;
             println!(
-                "Wrote {} bytes root → {} (graphs/emitters NOT exported yet)",
+                "Wrote {} bytes root{} → {} (emitters/curves NOT exported yet)",
                 bytes.len(),
+                if empty_graph { "+empty-graph" } else { "" },
                 output.display()
             );
         }
