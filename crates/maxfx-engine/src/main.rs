@@ -3,9 +3,9 @@ use maxfx_engine::{
     looks_like_ldb_or_ai, looks_like_memory_file_ai, looks_like_memory_file_ldb,
     looks_like_ras_ldb, open_archive, parse_levels_txt, parse_ras_ldb_faces,
     parse_ras_ldb_header, parse_ras_ldb_section_at, ras_ldb_count_section_end,
-    ras_ldb_after_geometry, ras_ldb_first_mf_section_body, split_ldb_records,
-    walk_ras_ldb_known_sections, LDB_IMPORT_VERSION, LDB_RAS_MAGIC, LDB_SECTION_KIND_MF,
-    LDB_SECTION_KIND_VEC3, LDB_SECTION_TAG,
+    ras_ldb_after_geometry, ras_ldb_first_mf_section_body, ras_ldb_import_paths,
+    split_ldb_records, walk_ras_ldb_known_sections, LDB_IMPORT_VERSION, LDB_RAS_MAGIC,
+    LDB_SECTION_KIND_MF, LDB_SECTION_KIND_VEC3, LDB_SECTION_TAG,
 };
 use openras::RasArchive;
 use std::env;
@@ -84,10 +84,19 @@ fn main() -> ExitCode {
                                 );
                             }
                             match ras_ldb_after_geometry(&data) {
-                                Some(at) => println!(
-                                    "  ImportLevel MF @ {at:#x} (14 {:#x})",
-                                    LDB_IMPORT_VERSION
-                                ),
+                                Some(at) => {
+                                    println!(
+                                        "  ImportLevel MF @ {at:#x} (14 {:#x})",
+                                        LDB_IMPORT_VERSION
+                                    );
+                                    let paths = ras_ldb_import_paths(&data, 8);
+                                    for pth in &paths {
+                                        println!("    path {pth}");
+                                    }
+                                    if paths.len() >= 8 {
+                                        println!("    …");
+                                    }
+                                }
                                 None => println!("  ImportLevel MF head not found after geometry"),
                             }
                         }

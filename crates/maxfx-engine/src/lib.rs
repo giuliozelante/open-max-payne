@@ -381,6 +381,32 @@ pub fn ras_ldb_after_geometry(data: &[u8]) -> Option<usize> {
     }
 }
 
+/// Harvest MemoryFile `0x0d` path strings from the ImportLevel stream after geometry.
+pub fn ras_ldb_import_paths(data: &[u8], max: usize) -> Vec<String> {
+    let Some(at) = ras_ldb_after_geometry(data) else {
+        return Vec::new();
+    };
+    let slice = &data[at..];
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < slice.len() && out.len() < max {
+        if slice[i] == 0x0d && i + 2 < slice.len() && slice[i + 1] == 0x14 {
+            let len = slice[i + 2] as usize;
+            let start = i + 3;
+            if start + len <= slice.len() {
+                let s = String::from_utf8_lossy(&slice[start..start + len]).into_owned();
+                if s.chars().any(|c| c.is_ascii_alphanumeric()) {
+                    out.push(s);
+                }
+                i = start + len;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
     let mut out = Vec::new();
     let mut off = 0;
