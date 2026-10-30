@@ -1,8 +1,12 @@
-//! ParticleFX editor project (`.pse`) dump — draft, REA still in progress.
+//! ParticleFX editor project (`.pse`) + runtime (`.rps`) tooling — draft.
 //! Spec: docs/specs/rps_format.md
+
+pub mod rps;
 
 use std::path::Path;
 use thiserror::Error;
+
+pub use rps::{parse_rps, pse_header_to_rps_preamble, read_rps, RpsHeader, RpsValue};
 
 #[derive(Debug, Error)]
 pub enum PfxError {

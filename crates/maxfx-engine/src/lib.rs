@@ -52,6 +52,13 @@ pub struct LevelPackage {
     pub ai: Option<String>,
 }
 
+/// Observed BYOD `.ldb` / `.ai` file preamble: 16 × `0x20` then ASCII `>` (`0x3e`).
+pub const LDB_PREAMBLE: &[u8] = b"                >"; // 16 spaces + '>'
+
+pub fn looks_like_ldb_or_ai(data: &[u8]) -> bool {
+    data.len() >= LDB_PREAMBLE.len() && data.starts_with(LDB_PREAMBLE)
+}
+
 /// Pair `.ldb` / `.ai` basenames under `\\data\\database\\levels\\` (BYOD probe helper).
 pub fn list_level_packages(arc: &RasArchive) -> Vec<LevelPackage> {
     let mut ldbs: Vec<String> = Vec::new();
@@ -143,6 +150,14 @@ mod tests {
         assert_eq!(opened.file_count, 1);
         assert_eq!(opened.compatibility, 3);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ldb_preamble_matches_byod_observation() {
+        let mut buf = Vec::from(LDB_PREAMBLE);
+        buf.extend_from_slice(&[0x00, 0x01, 0x02]);
+        assert!(looks_like_ldb_or_ai(&buf));
+        assert!(!looks_like_ldb_or_ai(b"RAS\0"));
     }
 
     #[test]

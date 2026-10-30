@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `openpfx dump-rps` / `export-preamble` (RPS tag stream + PSE header→tagged preamble)
+- `maxfx-engine` LDB/AI preamble detector (`16×0x20` + `>`)
+
+### Added
+
 - `openras` RASMaker flag parity (`-x/-v/-a/-m/-p/-c`) from REA strings
 - `crates/openpfx` PSE dump CLI + synthetic tests
 - `crates/maxfx-engine` walking skeleton (`open_archive`)

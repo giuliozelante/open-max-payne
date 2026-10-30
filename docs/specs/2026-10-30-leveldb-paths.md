@@ -2,7 +2,7 @@
 
 Goal:
   Document how Max Payne 1 stores levels relative to `R_File::loadArchives` +
-  `X_LEVELDB_*_LOAD` tokens — without inventing `.ldb` binary layout yet.
+  `X_LEVELDB_*_LOAD` tokens — without inventing full `.ldb` geometry layout.
 
 ## Archive mount (done)
 
@@ -20,34 +20,47 @@ secondary path). See `2026-10-30-engine-skeleton.md`.
 
 Paired names e.g. `Part1_Level1.ldb` + `Part1_Level1.ai` (case varies).
 
-`x_level2.ras` / `x_level3.ras` follow the same `data\database\levels\...` layout
-for later parts.
+**Note:** `MaxPayne.exe` has **no** literal `.ldb` string. Paths are built at runtime
+(or come from scripts). Nearby string table: `MP_GM_LEVEL_INIT1` then the
+`X_LEVELDB_*_LOAD` tokens in order.
 
-## `X_LEVELDB_*_LOAD` tokens (MaxPayne.exe strings)
+## `X_LEVELDB_*_LOAD` tokens → Import RTTI (MaxPayne.exe)
 
-| Token | Likely container (from nearby RTTI) |
-|-------|-------------------------------------|
-| `X_LEVELDB_RC_LOAD` | Room (`X_LevelDBRoom`) |
-| `X_LEVELDB_SMC_LOAD` | Static mesh (`X_LevelDBStaticMesh`) |
-| `X_LEVELDB_SLC_LOAD` | Static light |
-| `X_LEVELDB_LC_LOAD` | Light |
-| `X_LEVELDB_MC_LOAD` | Mesh / mesh polygon |
-| `X_LEVELDB_FSMC_LOAD` | FSM-related mesh container |
-| `X_LEVELDB_DMC_LOAD` | Dynamic mesh |
-| `X_LEVELDB_TI_LOAD` | TBD (no clear RTTI neighbour yet) |
+Tokens sit in `.rdata` after `MP_GM_LEVEL_INIT1`. Mapping from `X_LevelDBImport*` RTTI:
 
-These are **loader tags**, not filenames. Filenames are the `.ldb` paths above.
+| Token | Import RTTI (best fit) |
+|-------|-------------------------|
+| `X_LEVELDB_RC_LOAD` | `X_LevelDBImportRoom` / `…RoomContainer` |
+| `X_LEVELDB_DMC_LOAD` | `X_LevelDBImportDynamicMesh` / `…Container` |
+| `X_LEVELDB_FSMC_LOAD` | `X_LevelDBImportFSM` / `…FSMContainer` |
+| `X_LEVELDB_SLC_LOAD` | `X_LevelDBImportStaticLight` / `…Container` |
+| `X_LEVELDB_SMC_LOAD` | `X_LevelDBImportStaticMesh` / `…Container` |
+| `X_LEVELDB_LC_LOAD` | `X_LevelDBImportLightmap` / `…Container` (or static light — confirm) |
+| `X_LEVELDB_MC_LOAD` | `X_LevelDBImportMaterial` / mesh polygon — confirm |
+| `X_LEVELDB_TI_LOAD` | `X_LevelDBImportTextureImage` / trigger / level item — confirm |
 
-## `.ldb` / `.ai` first bytes (BYOD extract — not committed)
+Also present: `X_LevelDBImportLevel` (top-level), `ImportBSP`, `ImportCharacter`,
+`ImportTrigger`, `ImportStartpoint`, `ImportExit`, `ImportLevelItem`, …
 
-After `openras` LZSS extract of `Part1_Level6.ldb` (~6.9 MiB) and sibling `.ai`:
+## `.ldb` / `.ai` preamble (BYOD)
 
-- No obvious ASCII magic (`RAS`, `LDB`, etc.) in the first 64 bytes.
-- Dense runs of `0x20` with sparse non-space markers (`>`, `4`, NULs, etc.).
-- Treat layout as **unknown** until the `.ldb` loader is decompiled — do not invent tags.
+Both `.ldb` and `.ai` from `x_level1.ras` share:
 
-## Next (issue #12)
+```
+16 × 0x20   then   0x3E ('>')
+```
 
-1. REA: find which code path opens `*.ldb` after mount (follow `X_LEVELDB_*_LOAD` / `X_LevelDBImport*`)
-2. Lock `.ldb` magic/version from that loader
-3. [x] `maxfx-engine` lists `.ldb`/`.ai` pairs from a user-supplied `x_level*.ras`
+Constant in code: `maxfx_engine::LDB_PREAMBLE` / `looks_like_ldb_or_ai`.
+
+After the preamble, files are **high-entropy** (`.ldb` entropy ~7.8) with embedded
+floats — not a space-filled format overall. Full chunk layout still needs
+decompile of `X_LevelDBImportLevel` (or the `*_LOAD` dispatch).
+
+## Done / next (issue #12)
+
+- [x] Path layout inside `x_level*.ras`
+- [x] Token list + Import* RTTI map (best-effort)
+- [x] Shared preamble observation + engine helper
+- [x] `maxfx-engine` lists `.ldb`/`.ai` pairs
+- [ ] Decompile `X_LevelDBImportLevel` / `*_LOAD` dispatch → open path construction
+- [ ] Chunk / section format inside `.ldb` after preamble

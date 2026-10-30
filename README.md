@@ -16,7 +16,7 @@ Product spec: [docs/specs/2026-10-30-open-max-payne.md](docs/specs/2026-10-30-op
 | **Play (Rust)** | `maxfx-play` — Wine win32 `pfx/` on Unix; native EXE on Windows; localized-safe stack |
 | **1.05 patcher** | `maxfx-patcher` — HTTPS + SHA-256 allowlist; refuses SFX installers |
 | **`openras` (Rust)** | **Alpha** — RASMaker `-x/-v/-a/-m/-p/-c` + subcommands; CI tests |
-| **`openpfx` (Rust)** | **Draft** — `dump-pse` header/path harvest; PSE→RPS export TBD |
+| **`openpfx` (Rust)** | **Draft** — `dump-pse` / `dump-rps` (tags `14`/`11`/`09`/`0d`/`13`); preamble export only |
 | **`maxfx-engine`** | **Skeleton** — opens BYOD MP1 RAS via `openras` (not playable) |
 | **Studio (Tauri)** | GUI front door (Launch/Stop process tracking) |
 | **`.sh` runtime** | Linux convenience only — not required on Windows |

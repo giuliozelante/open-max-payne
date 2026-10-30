@@ -1,8 +1,10 @@
 # ParticleFX RPS / PSE — Working Spec (Phase 4)
 
-**Status:** Draft. PSE dump in Rust `crates/openpfx`. Full serialize/export still REA-backed WIP.
+**Status:** Draft. Rust `crates/openpfx`: `dump-pse`, `dump-rps`, `export-preamble` (header only).
 
-**REA artifact:** `vendor/max-fx-tools/ParticleFX_files/ParticleFX.exe` (sha256 `3ce05189…69c7`).
+**REA artifacts:**
+- `ParticleFX.exe` sha256 `3ce05189…69c7`
+- BYOD `x_data.ras` → `\data\database\particles\**\*.rps` (mode 3 stored; not in git)
 
 ## Files
 
@@ -22,12 +24,9 @@ psysedit [-h] [-y] [-r] [-e filename(s)] [-d directory]
   -d   Export destination directory (must exist)
 ```
 
-Note: help says to combine `-y -r` when replacing readonly outputs.
-MFC doc filter: `ParticleFX Files (*.pse)`. Runtime filter: `Runtime Particle Sets (*.rps)`.
-Export UI: `Export data to run particle system in other programs` (Ctrl+E).
-Runtime particle code largely lives in `E2MFC.DLL` / `RLMFC.DLL` imports — export body REA should follow those next.
+Export implementation likely continues in `EditorDoc` / `E2MFC` / `RLMFC` (not fully decompiled yet).
 
-RPS load errors (version gate):
+RPS load errors (from ParticleFX.exe strings):
 
 ```
 PS_ParticleSystem: Invalid File Version in %s
@@ -35,28 +34,44 @@ Current: %8x  Expected: %8x
 PS_ParticleSystem: Invalid File Structure in %s
 ```
 
-## PSE example (editor project `.pse`)
+## PSE flat header
 
-Observed on `Bullet_Impact_default.pse` (local vendor fixture; not in git):
+| Off | Type | Notes |
+|-----|------|-------|
+| 0 | u32 | often `96` (`0x60`) |
+| 4 | u32 | often `5` |
+| 8 | u32 | varies (e.g. `35`) |
+| 12 | f32 | e.g. `2.5` |
+| 16 | u32 | e.g. `10` — **not** a float |
+| 20 | f32 | e.g. `2.5` |
+| later | ASCII | absolute tool/bitmap paths |
 
-| Off | Value | Notes |
-|-----|-------|-------|
-| 0 | `0x60` (96) | struct / block size guess |
-| 4 | `5` | version / count guess |
-| 8 | `0x23` (35) | varies by project |
-| 12 | float `2.5` | |
-| 16 | `0x0A` (10) | u32 — **not** a float |
-| 20 | float `2.5` | |
-| later | ASCII | `C:\Program Files\MAX-FX Tools\...` paths, bitmap leaf names |
+## RPS tagged stream (BYOD)
 
-`openpfx dump-pse` prints these fields (synthetic unit test; no retail bytes in CI).
+Retail `.rps` files are a **tag-byte stream** (Remedy `R_MemoryFile`-style), not the PSE flat u32 layout.
 
-### RPS example (runtime `database/particles/.../*.rps`)
+Observed tags (consistent across multiple `x_data.ras` samples):
 
-Dense binary. No plain ASCII paths; bitmaps by cooked ids. Version checked as `%8x` against expected.
+| Tag | Payload | Role |
+|-----|---------|------|
+| `0x14` | 1 × u8 | uint8 channel A |
+| `0x11` | 1 × u8 | uint8 channel B |
+| `0x09` | 4 × LE f32 | float |
+| `0x0d` | `14 <len>` + bytes | relative path string (e.g. `fire\candleflame2\pflame.JPG`) |
+| `0x13` | u16_le length + bytes | embedded blob (often JPEG starting `FFD8`) |
+| `0x16` | TBD | appears after particle params; e.g. `16 00 00 00 00` + floats — not walked yet |
+
+Common prefix (candle / light examples):
+
+```
+14 60 | 14 05 | 11 NN | 09 00 00 20 40 | 11 0a | 09 00 00 20 40 | …
+```
+
+i.e. u8(96), u8(5), u8(N), f32(2.5), u8(10), f32(2.5) — same *ideas* as the PSE header, packed as tags.
+`openpfx dump-rps` walks until an unknown tag; `export-preamble` writes that six-value header from a PSE (graphs omitted).
 
 ## Next
 
-1. REA: locate `-e` export path → `PS_ParticleSystem` write.
-2. `openpfx export` once RPS version magic is known from REA.
-3. Retire Python `tools/openpfx` once Rust CLI covers dump + export.
+1. REA: `-e` / `EditorDoc` export → full graph encode + version `%8x`
+2. `openpfx export` parity with `psysedit -e` once version magic known
+3. Retire Python `tools/openpfx`
