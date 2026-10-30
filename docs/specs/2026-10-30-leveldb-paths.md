@@ -141,7 +141,9 @@ repeat N:
 
 Helpers: `parse_ras_ldb_import_textures`, then
 `parse_ras_ldb_import_materials_at` (`0x1f` list + `0x25` name/texture/index —
-`X_LevelDBImportMaterial`). Further ImportBSP/Character/… still open.
+`X_LevelDBImportMaterial`). Startup may nest another `0x1f` list immediately
+after (category/container — RTTI `ImportMaterialCategory`). Further
+ImportBSP/Character/… still open.
 
 ### Retail RAS `.ai`
 
