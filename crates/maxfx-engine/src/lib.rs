@@ -247,6 +247,11 @@ fn read_mf_vec3(data: &[u8], i: &mut usize) -> Option<[f32; 3]> {
 
 /// Parse up to `max` face-like records from a kind-`0x13` section body (no header).
 pub fn parse_ras_ldb_faces(body: &[u8], max: usize) -> Vec<RasLdbFace> {
+    parse_ras_ldb_faces_ex(body, max).0
+}
+
+/// Like [`parse_ras_ldb_faces`], also returning bytes consumed from `body`.
+pub fn parse_ras_ldb_faces_ex(body: &[u8], max: usize) -> (Vec<RasLdbFace>, usize) {
     let mut out = Vec::new();
     let mut i = 0;
     while out.len() < max && i < body.len() {
@@ -279,7 +284,7 @@ pub fn parse_ras_ldb_faces(body: &[u8], max: usize) -> Vec<RasLdbFace> {
             point,
         });
     }
-    out
+    (out, i)
 }
 
 /// Body slice of the first kind-`0x13` section after a flag-0 vec3 cloud.
@@ -294,6 +299,70 @@ pub fn ras_ldb_first_mf_section_body(data: &[u8]) -> Option<&[u8]> {
         return None;
     }
     Some(&data[end + 4..])
+}
+
+/// Top-level `0x1c` sections with known sizes (vec3 cloud + face `0x13` only).
+///
+/// Stops before a kind-`0x13` section whose body is not face-shaped (Startup's
+/// second `0x13`), leaving its offset as the walk end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasLdbSectionSpan {
+    pub offset: usize,
+    pub kind: u8,
+    pub count: u16,
+    pub end: usize,
+}
+
+pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
+    let mut out = Vec::new();
+    let mut off = 0;
+    loop {
+        let Some(sec) = parse_ras_ldb_section_at(data, off) else {
+            break;
+        };
+        match sec.kind {
+            LDB_SECTION_KIND_VEC3 => {
+                let end = off + LDB_RAS_HEADER_LEN + sec.count as usize * 13;
+                if end > data.len() {
+                    break;
+                }
+                out.push(RasLdbSectionSpan {
+                    offset: off,
+                    kind: sec.kind,
+                    count: sec.count,
+                    end,
+                });
+                off = end;
+            }
+            LDB_SECTION_KIND_MF => {
+                let body = &data[off + 4..];
+                let (faces, consumed) = parse_ras_ldb_faces_ex(body, sec.count as usize);
+                if faces.len() != sec.count as usize {
+                    // Unknown 0x13 schema — stop before this section.
+                    out.push(RasLdbSectionSpan {
+                        offset: off,
+                        kind: sec.kind,
+                        count: sec.count,
+                        end: off,
+                    });
+                    break;
+                }
+                let end = off + 4 + consumed;
+                out.push(RasLdbSectionSpan {
+                    offset: off,
+                    kind: sec.kind,
+                    count: sec.count,
+                    end,
+                });
+                off = end;
+            }
+            _ => break,
+        }
+        if out.len() > 64 {
+            break;
+        }
+    }
+    out
 }
 
 /// MaxED MemoryFile-native `.ldb` prefix: tagged int `LDB_IMPORT_VERSION` (`0x14 0x20`).
@@ -735,6 +804,45 @@ mod tests {
         assert_eq!(f2[0].attr, 10);
         assert!((faces[0].normal[2] - 1.0).abs() < 1e-5);
         assert!((faces[0].point[0] + 1.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn walks_vec3_then_face_sections() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&LDB_RAS_MAGIC.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.push(0);
+        data.push(0x16);
+        for v in [0.0f32, 0.0, 0.0] {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        let face_start = data.len();
+        data.push(LDB_SECTION_TAG);
+        data.push(LDB_SECTION_KIND_MF);
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&[0x14, 0, 0x14, 1, 0x14, 2]);
+        data.push(0x13);
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.push(0x16);
+        for v in [0.0f32, 1.0, 0.0] {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        data.push(0x16);
+        for v in [1.0f32, 2.0, 3.0] {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        // trailing unknown 0x13 head
+        data.push(LDB_SECTION_TAG);
+        data.push(LDB_SECTION_KIND_MF);
+        data.extend_from_slice(&9u16.to_le_bytes());
+        data.push(0x16); // not a face
+        let spans = walk_ras_ldb_known_sections(&data);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].kind, LDB_SECTION_KIND_VEC3);
+        assert_eq!(spans[1].kind, LDB_SECTION_KIND_MF);
+        assert_eq!(spans[1].count, 1);
+        assert_eq!(spans[1].offset, face_start);
+        assert_eq!(spans[2].end, spans[2].offset); // stop marker
     }
 
     #[test]

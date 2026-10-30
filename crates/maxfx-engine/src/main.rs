@@ -3,8 +3,9 @@ use maxfx_engine::{
     looks_like_ldb_or_ai, looks_like_memory_file_ai, looks_like_memory_file_ldb,
     looks_like_ras_ldb, open_archive, parse_levels_txt, parse_ras_ldb_faces,
     parse_ras_ldb_header, parse_ras_ldb_section_at, ras_ldb_count_section_end,
-    ras_ldb_first_mf_section_body, split_ldb_records, LDB_IMPORT_VERSION, LDB_RAS_MAGIC,
-    LDB_SECTION_KIND_MF, LDB_SECTION_TAG,
+    ras_ldb_first_mf_section_body, split_ldb_records, walk_ras_ldb_known_sections,
+    LDB_IMPORT_VERSION, LDB_RAS_MAGIC, LDB_SECTION_KIND_MF, LDB_SECTION_KIND_VEC3,
+    LDB_SECTION_TAG,
 };
 use openras::RasArchive;
 use std::env;
@@ -67,6 +68,20 @@ fn main() -> ExitCode {
                                     );
                                 }
                                 println!("  parsed {} face prefix(es)", faces.len());
+                            }
+                            let spans = walk_ras_ldb_known_sections(&data);
+                            println!("  known sections ({}):", spans.len());
+                            for s in &spans {
+                                let label = match s.kind {
+                                    LDB_SECTION_KIND_VEC3 => "vec3",
+                                    LDB_SECTION_KIND_MF if s.end > s.offset => "faces",
+                                    LDB_SECTION_KIND_MF => "mf-stop",
+                                    _ => "other",
+                                };
+                                println!(
+                                    "    @{:#x} kind={:#x} ({label}) count={} end={:#x}",
+                                    s.offset, s.kind, s.count, s.end
+                                );
                             }
                         }
                         return ExitCode::SUCCESS;
