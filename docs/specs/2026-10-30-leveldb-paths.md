@@ -141,9 +141,16 @@ repeat N:
 
 Helpers: `parse_ras_ldb_import_textures`, then
 `parse_ras_ldb_import_materials_at` (`0x1f` list + `0x25` name/texture/index —
-`X_LevelDBImportMaterial`). Startup nests a second `0x1f` list (no padding int). After both lists, a
-different schema begins (`14 <n>` then name/int/paths, and `0x0e` bytes that may
-be bool tags). Further ImportBSP/Character/… still open.
+`X_LevelDBImportMaterial`). Startup nests a second `0x1f` list (no padding int). Immediately after:
+
+**`X_LevelDBImportMaterialCategory`** (`parse_ras_ldb_import_material_categories_at`):
+count int, then for each category: name, `member_count` (includes primary),
+texture name, path, path2, two `0x0e` bools, then `member_count - 1` child
+members (name, one or two paths, two bools). BYOD: Startup 9 cats @ `0x5b8d8d`
+→ `0x5bb95f`; Tutorial 25 cats @ `0x7a7026` → `0x7aac8f`.
+
+After categories a binary-ish header begins (`14 <n> 14 00 11 00` then raw —
+likely ImportBSP/Room/…). Still open.
 
 ### Retail RAS `.ai`
 

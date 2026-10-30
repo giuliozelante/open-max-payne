@@ -557,6 +557,135 @@ pub fn parse_ras_ldb_import_materials_at(
     Some((count, out, i))
 }
 
+/// MemoryFile bool tag (`0x0e` + u8) seen on ImportMaterialCategory records.
+pub const LDB_MF_BOOL_TAG: u8 = 0x0e;
+
+/// One nested texture/member under an [`RasLdbImportMaterialCategory`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasLdbImportCategoryMember {
+    pub name: String,
+    pub path: String,
+    /// Present when a second `0x0d` path precedes the bool pair (often alpha).
+    pub path2: Option<String>,
+    pub flag_a: u8,
+    pub flag_b: u8,
+}
+
+/// `X_LevelDBImportMaterialCategory`: name, member_count (incl. primary), primary
+/// texture+paths+bools, then `member_count - 1` child members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasLdbImportMaterialCategory {
+    pub name: String,
+    pub member_count: i32,
+    pub texture: String,
+    pub path: String,
+    pub path2: String,
+    pub flag_a: u8,
+    pub flag_b: u8,
+    pub members: Vec<RasLdbImportCategoryMember>,
+}
+
+fn read_mf_bool(data: &[u8], i: &mut usize) -> Option<u8> {
+    if *i + 2 > data.len() || data[*i] != LDB_MF_BOOL_TAG {
+        return None;
+    }
+    *i += 1;
+    let v = data[*i];
+    *i += 1;
+    Some(v)
+}
+
+fn read_category_member(data: &[u8], i: &mut usize) -> Option<RasLdbImportCategoryMember> {
+    let name = read_mf_str(data, i)?;
+    // Children never carry the category index int; next must be a path string.
+    if data.get(*i) == Some(&0x14) {
+        return None;
+    }
+    let path = read_mf_str(data, i)?;
+    let path2 = if data.get(*i) == Some(&0x0d) {
+        Some(read_mf_str(data, i)?)
+    } else {
+        None
+    };
+    let flag_a = read_mf_bool(data, i)?;
+    let flag_b = read_mf_bool(data, i)?;
+    Some(RasLdbImportCategoryMember {
+        name,
+        path,
+        path2,
+        flag_a,
+        flag_b,
+    })
+}
+
+/// Parse ImportMaterialCategory list at `offset` (count int, then categories).
+///
+/// Each category: name, member_count, texture, path, path2, bool, bool, then
+/// `member_count - 1` child members (`name`, path(s), bool, bool).
+pub fn parse_ras_ldb_import_material_categories_at(
+    data: &[u8],
+    offset: usize,
+) -> Option<(u32, Vec<RasLdbImportMaterialCategory>, usize)> {
+    if offset >= data.len() {
+        return None;
+    }
+    let mut i = offset;
+    let count = read_mf_i32(data, &mut i)? as u32;
+    if count == 0 {
+        return Some((0, Vec::new(), i));
+    }
+    let mut out = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let name = read_mf_str(data, &mut i)?;
+        let member_count = read_mf_i32(data, &mut i)?;
+        if member_count < 1 {
+            return None;
+        }
+        let texture = read_mf_str(data, &mut i)?;
+        let path = read_mf_str(data, &mut i)?;
+        let path2 = read_mf_str(data, &mut i)?;
+        let flag_a = read_mf_bool(data, &mut i)?;
+        let flag_b = read_mf_bool(data, &mut i)?;
+        let child_n = (member_count - 1) as usize;
+        let mut members = Vec::with_capacity(child_n);
+        for _ in 0..child_n {
+            members.push(read_category_member(data, &mut i)?);
+        }
+        out.push(RasLdbImportMaterialCategory {
+            name,
+            member_count,
+            texture,
+            path,
+            path2,
+            flag_a,
+            flag_b,
+            members,
+        });
+    }
+    Some((count, out, i))
+}
+
+/// Walk consecutive `0x1f` material lists after textures; return offset after the last.
+pub fn ras_ldb_after_import_materials(data: &[u8]) -> Option<usize> {
+    let (_, _, mut off) = parse_ras_ldb_import_textures(data, 0)?;
+    let mut passes = 0;
+    while let Some((_, _, end)) = parse_ras_ldb_import_materials_at(data, off, 0) {
+        if end <= off {
+            break;
+        }
+        off = end;
+        passes += 1;
+        if passes >= 8 {
+            break;
+        }
+    }
+    if passes == 0 {
+        None
+    } else {
+        Some(off)
+    }
+}
+
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
     let mut out = Vec::new();
     let mut off = 0;
@@ -1163,6 +1292,44 @@ mod tests {
         assert_eq!(mats[0].name, "mat");
         assert_eq!(mats[0].texture, "t.JPG");
         assert_eq!(mats[0].index, 7);
+    }
+
+    #[test]
+    fn parses_import_material_categories() {
+        // count=1 category "wall" member_count=2 → primary + one child
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x14, 1]); // category count
+        body.extend_from_slice(&[0x0d, 0x14, 4]);
+        body.extend_from_slice(b"wall");
+        body.extend_from_slice(&[0x14, 2]); // members incl. primary
+        body.extend_from_slice(&[0x0d, 0x14, 5]);
+        body.extend_from_slice(b"a.JPG");
+        body.extend_from_slice(&[0x0d, 0x14, 3]);
+        body.extend_from_slice(b"p/a");
+        body.extend_from_slice(&[0x0d, 0x14, 0]); // empty path2
+        body.extend_from_slice(&[0x0e, 0, 0x0e, 1]); // bools
+        // child member
+        body.extend_from_slice(&[0x0d, 0x14, 5]);
+        body.extend_from_slice(b"b.JPG");
+        body.extend_from_slice(&[0x0d, 0x14, 3]);
+        body.extend_from_slice(b"p/b");
+        body.extend_from_slice(&[0x0e, 1, 0x0e, 0]);
+        let (n, cats, end) = parse_ras_ldb_import_material_categories_at(&body, 0).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(end, body.len());
+        assert_eq!(cats[0].name, "wall");
+        assert_eq!(cats[0].member_count, 2);
+        assert_eq!(cats[0].texture, "a.JPG");
+        assert_eq!(cats[0].path, "p/a");
+        assert_eq!(cats[0].path2, "");
+        assert_eq!(cats[0].flag_a, 0);
+        assert_eq!(cats[0].flag_b, 1);
+        assert_eq!(cats[0].members.len(), 1);
+        assert_eq!(cats[0].members[0].name, "b.JPG");
+        assert_eq!(cats[0].members[0].path, "p/b");
+        assert_eq!(cats[0].members[0].path2, None);
+        assert_eq!(cats[0].members[0].flag_a, 1);
+        assert_eq!(cats[0].members[0].flag_b, 0);
     }
 
     #[test]
