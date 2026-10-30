@@ -766,6 +766,73 @@ pub fn parse_ras_ldb_import_lightmaps_at(data: &[u8], offset: usize) -> Option<(
     Some((count, i))
 }
 
+/// Skip-walk the post-exit `0x15` point stream (likely lights/triggers).
+///
+/// Layout after ImportExit: nest `0x1c` + ints, then `0x12` count (even;
+/// body count = count/2), subtype int, first body without id, then
+/// `(id, body) × (n-1)`. Each body: `15 f32 f32 15 f32 f32 03 i32 0e u8`.
+pub fn parse_ras_ldb_import_point_stream_at(
+    data: &[u8],
+    offset: usize,
+) -> Option<(u32, usize)> {
+    if offset >= data.len() {
+        return None;
+    }
+    let mut i = offset;
+    let lim = offset.saturating_add(96).min(data.len());
+    let mut count = None;
+    while i < lim {
+        match data[i] {
+            0x1c => i += 1,
+            0x12 => {
+                count = Some(read_mf_i32(data, &mut i)? as u32);
+                break;
+            }
+            0x14 | 0x13 | 0x02 => {
+                read_mf_i32(data, &mut i)?;
+            }
+            _ => return None,
+        }
+    }
+    let count = count?;
+    if count < 2 || count % 2 != 0 {
+        return None;
+    }
+    let _subtype = read_mf_i32(data, &mut i)?;
+    let nexpect = (count / 2) as usize;
+    let mut n = 0usize;
+    if data.get(i) == Some(&0x15) {
+        i = read_point_body(data, i)?;
+        n = 1;
+    }
+    while n < nexpect {
+        read_mf_i32(data, &mut i)?;
+        i = read_point_body(data, i)?;
+        n += 1;
+    }
+    Some((n as u32, i))
+}
+
+fn read_point_body(data: &[u8], mut i: usize) -> Option<usize> {
+    if data.get(i) != Some(&0x15) {
+        return None;
+    }
+    i += 1 + 8; // tag + two f32
+    if data.get(i) != Some(&0x15) {
+        return None;
+    }
+    i += 1 + 8;
+    if data.get(i) != Some(&0x03) {
+        return None;
+    }
+    i += 1 + 4; // i32
+    if data.get(i) != Some(&LDB_MF_BOOL_TAG) {
+        return None;
+    }
+    i += 2;
+    Some(i)
+}
+
 /// Harvest `::…::…` exit/room-ish names from the ImportLevel stream after `offset`.
 pub fn ras_ldb_import_exit_names_at(data: &[u8], offset: usize, max: usize) -> Vec<String> {
     parse_ras_ldb_import_exits_at(data, offset, max)
@@ -1578,6 +1645,41 @@ mod tests {
             ras_ldb_import_exit_names_at(&body2, 0, 8),
             vec!["::start::Exit0", "::help::Exit1"]
         );
+    }
+
+    #[test]
+    fn skips_post_exit_point_stream() {
+        // nest + count=4 (→ 2 bodies) + sub + body + (id, body)
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x1c, 0x14, 1, 0x1c]);
+        body.extend_from_slice(&[0x12, 4, 0, 0]); // count = 4
+        body.extend_from_slice(&[0x14, 3]); // subtype
+        // body without id
+        body.push(0x15);
+        body.extend_from_slice(&1.0f32.to_le_bytes());
+        body.extend_from_slice(&2.0f32.to_le_bytes());
+        body.push(0x15);
+        body.extend_from_slice(&3.0f32.to_le_bytes());
+        body.extend_from_slice(&4.0f32.to_le_bytes());
+        body.extend_from_slice(&[0x03]);
+        body.extend_from_slice(&(-1i32).to_le_bytes());
+        body.extend_from_slice(&[0x0e, 0]);
+        // id + body
+        body.extend_from_slice(&[0x14, 1]);
+        body.push(0x15);
+        body.extend_from_slice(&5.0f32.to_le_bytes());
+        body.extend_from_slice(&6.0f32.to_le_bytes());
+        body.push(0x15);
+        body.extend_from_slice(&7.0f32.to_le_bytes());
+        body.extend_from_slice(&8.0f32.to_le_bytes());
+        body.extend_from_slice(&[0x03]);
+        body.extend_from_slice(&(-1i32).to_le_bytes());
+        body.extend_from_slice(&[0x0e, 0]);
+        body.push(0xff);
+        let (n, end) = parse_ras_ldb_import_point_stream_at(&body, 0).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(end, body.len() - 1);
+        assert_eq!(body[end], 0xff);
     }
 
     #[test]
