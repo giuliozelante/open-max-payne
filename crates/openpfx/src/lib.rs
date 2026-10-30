@@ -139,10 +139,10 @@ pub fn pse_to_rps_root(h: &PseHeader) -> Result<Vec<u8>, PfxError> {
 /// Options for [`pse_to_rps_root_into`].
 #[derive(Debug, Clone, Default)]
 pub struct PseExportOptions {
-    /// Append graph header `0x31`/`0` with no nodes.
+    /// Append graph section with zero emitters (`0x31`/`1` + param + count `0`).
     pub empty_graph: bool,
-    /// Append graph header + one stub emitter-open per name (scalars from candle REA;
-    /// **not** game-complete — curves/paths still missing).
+    /// Append graph section + stub emitter-open (+ 4 minimal curves + companion open)
+    /// per name. **Not** game-complete — texture embeds / companion body incomplete.
     pub emitter_stubs: Vec<String>,
 }
 
@@ -187,13 +187,22 @@ pub fn pse_to_rps_export(h: &PseHeader, opts: &PseExportOptions) -> Result<Vec<u
         let n = u8::try_from(opts.emitter_stubs.len()).map_err(|_| {
             PfxError::Msg(format!("too many emitters ({})", opts.emitter_stubs.len()))
         })?;
-        w.write_graph_header(n);
+        w.write_graph_section_open(n, 1.0, 0, 1, 0.1);
         for _name in &opts.emitter_stubs {
             // Candle-shaped stub; name not yet placed on the RPS wire (REA pending).
             w.write_emitter_open(0.0, 0, 1, 0.0, 0, 10.0, 0, 1, -3.0, 3.0, 2);
+            // Four curves required by FUN_00417570 before path embeds.
+            let c16 = vec![0.5f32; 16];
+            w.write_curve(1, 16, &c16)?;
+            w.write_curve(1, 2, &[0.0, 0.0])?;
+            w.write_curve(1, 16, &c16)?;
+            w.write_curve(1, 16, &c16)?;
+            // Texture/path list omitted → companion header only (incomplete vs retail).
+            w.write_companion_open();
+            w.write_companion_inner_open();
         }
     } else if opts.empty_graph {
-        w.write_graph_header(0);
+        w.write_graph_section_open(0, 1.0, 0, 1, 0.1);
     }
     Ok(w.into_bytes())
 }
@@ -253,7 +262,12 @@ mod tests {
         assert_eq!(bytes, expected);
         let with_graph = pse_to_rps_root_into(&h, true).unwrap();
         assert!(with_graph.starts_with(expected));
-        assert_eq!(&with_graph[expected.len()..], &[0x14, 0x31, 0x14, 0]);
+        // 0x31/1 + param(1,0,1,0.1) + emitter count 0
+        let graph_empty: &[u8] = &[
+            0x14, 0x31, 0x14, 1, 0x14, 0x20, 0x14, 3, 0x09, 0x00, 0x00, 0x80, 0x3f, 0x14, 0, 0x14,
+            1, 0x09, 0xcd, 0xcc, 0xcc, 0x3d, 0x14, 0,
+        ];
+        assert_eq!(&with_graph[expected.len()..], graph_empty);
         let with_stubs = pse_to_rps_export(
             &h,
             &PseExportOptions {
@@ -267,7 +281,8 @@ mod tests {
             &with_stubs[expected.len()..expected.len() + 4],
             &[0x14, 0x31, 0x14, 1]
         );
-        assert!(with_stubs.len() > expected.len() + 4);
+        assert_eq!(with_stubs[expected.len() + graph_empty.len() - 1], 1);
+        assert!(with_stubs.len() > expected.len() + graph_empty.len());
     }
 
     #[test]

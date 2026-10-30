@@ -196,9 +196,25 @@ impl MemoryFileWriter {
         self.write_f32(f_b);
     }
 
-    /// `FUN_00419be0` graph section header (`0x31` + count). Nested nodes omitted.
-    pub fn write_graph_header(&mut self, count: u8) {
-        self.write_object_header(obj::GRAPH, count);
+    /// `FUN_00419be0` graph section header only: type `0x31` + **version `1`**
+    /// (the second int is not the emitter count — that follows the param block).
+    pub fn write_graph_header(&mut self, version: u8) {
+        self.write_object_header(obj::GRAPH, version);
+    }
+
+    /// Graph section open per `FUN_00419be0`: `0x31`/`1` + shared param block +
+    /// enabled-emitter count int. Callers then write that many emitters (+ companions).
+    pub fn write_graph_section_open(
+        &mut self,
+        emitter_count: u8,
+        param_f_a: f32,
+        param_i_a: u8,
+        param_i_b: u8,
+        param_f_b: f32,
+    ) {
+        self.write_graph_header(1);
+        self.write_param_block(param_f_a, param_i_a, param_i_b, param_f_b);
+        self.write_int_u8(emitter_count);
     }
 
     /// Companion block open (`FUN_00418fe0`): type `0x40` / ver `2`.
@@ -393,16 +409,15 @@ mod tests {
 
     #[test]
     fn candle_prefix_through_graph_header() {
-        // fire_candle_flame_large_1.rps values[0..12] (BYOD; not committed).
+        // fire_candle_flame_large_1.rps through graph param (BYOD; not committed).
         let mut w = MemoryFileWriter::new();
         w.write_object_header(obj::PARTICLE_SYSTEM, obj::PARTICLE_SYSTEM_VER);
         w.write_particle_system_fields(12, 2.5, 10, 2.5, 10, 0, 0);
-        w.write_graph_header(1);
-        w.write_param_block(1.0, 0, 1, 0.1);
+        w.write_graph_section_open(1, 1.0, 0, 1, 0.1);
         let expected: &[u8] = &[
             0x14, 0x60, 0x14, 0x05, 0x11, 12, 0x09, 0x00, 0x00, 0x20, 0x40, 0x11, 10, 0x09, 0x00,
             0x00, 0x20, 0x40, 0x11, 10, 0x14, 0, 0x14, 0, 0x14, 0x31, 0x14, 1, 0x14, 0x20, 0x14, 3,
-            0x09, 0x00, 0x00, 0x80, 0x3f, 0x14, 0, 0x14, 1, 0x09, 0xcd, 0xcc, 0xcc, 0x3d,
+            0x09, 0x00, 0x00, 0x80, 0x3f, 0x14, 0, 0x14, 1, 0x09, 0xcd, 0xcc, 0xcc, 0x3d, 0x14, 1,
         ];
         assert_eq!(w.as_bytes(), expected);
     }

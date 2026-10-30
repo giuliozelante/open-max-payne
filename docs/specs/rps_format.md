@@ -39,7 +39,7 @@ psysedit [-h] [-y] [-r] [-e filename(s)] [-d directory]
 | Addr | Role | Header pair (`operator<<(mf,int*)` ×2) |
 |------|------|----------------------------------------|
 | `FUN_0041ab00` | Particle system root | type `0x60`, ver `5` then uint/float fields |
-| `FUN_00419be0` | Graph section | type `0x31`, count |
+| `FUN_00419be0` | Graph section | type `0x31`, ver `1`, then param block, then **emitter-count** int |
 | `FUN_00414d20` | Shared param block | type `0x20`, ver `3` |
 | `FUN_00417570` | Emitter / node | type `0x30`, ver `4` (+ paths, curves) |
 | `FUN_00418fe0` | Companion block | type `0x40`, ver `2` |
