@@ -342,7 +342,7 @@ fn extract_archive(path: String) -> Result<String, String> {
 
 #[tauri::command]
 fn pack_archive(folder: String, out: String) -> Result<String, String> {
-    let arc = openras::RasArchive::from_directory(Path::new(&folder), 0x12345678)
+    let arc = openras::RasArchive::from_directory(Path::new(&folder), 0x12345678, true)
         .map_err(|e| e.to_string())?;
     arc.write(Path::new(&out), false)
         .map_err(|e| e.to_string())?;

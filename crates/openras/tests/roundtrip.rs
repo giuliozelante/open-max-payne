@@ -3,7 +3,7 @@
 use openras::archive::{RasArchive, RasDirEntry, RasFileEntry, MODE_LZSS, MODE_STORED};
 use openras::lzss;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn tmpdir(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("openras-test-{name}-{}", std::process::id()));
@@ -106,7 +106,7 @@ fn directory_roundtrip_on_disk() {
     fs::write(root.join("root.txt"), b"root-file").unwrap();
     fs::write(data.join("child.txt"), b"child-payload-zzzzzzzzzzzzzzzz").unwrap();
 
-    let arc = RasArchive::from_directory(&root, 0x1234_5678).unwrap();
+    let arc = RasArchive::from_directory(&root, 0x1234_5678, true).unwrap();
     let packed = root.join("out.mpm");
     arc.write(&packed, true).unwrap();
 
@@ -129,4 +129,33 @@ fn rejects_traversal_basename() {
     let mut arc = sample_archive(MODE_STORED);
     arc.files[0].name = "../evil.txt".into();
     assert!(arc.to_bytes(false).is_err());
+}
+
+#[test]
+fn pack_keeps_source_path_without_exclude() {
+    let root = tmpdir("keep-path");
+    let data = root.join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("child.txt"), b"payload").unwrap();
+
+    // Pack `data` relative to `root` while cwd is `root` → names include `\data\`.
+    let prev = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+    let arc = RasArchive::from_directory(Path::new("data"), 0x1111, false).unwrap();
+    std::env::set_current_dir(&prev).unwrap();
+
+    let names: Vec<_> = arc
+        .files
+        .iter()
+        .map(|f| {
+            let d = &arc.directories[f.dir_index as usize].name;
+            format!("{d}{}", f.name)
+        })
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "\\data\\child.txt"),
+        "got {names:?}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
 }

@@ -1,0 +1,14 @@
+[package]
+name = "maxfx-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Native Max Payne 1 engine walking skeleton (OpenLara-style BYOD) — not playable yet"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "maxfx_engine"
+path = "src/lib.rs"
+
+[dependencies]
+openras = { path = "../openras" }
+thiserror = "2"

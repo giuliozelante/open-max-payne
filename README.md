@@ -15,11 +15,11 @@ Product spec: [docs/specs/2026-10-30-open-max-payne.md](docs/specs/2026-10-30-op
 |------|--------|
 | **Play (Rust)** | `maxfx-play` — Wine win32 `pfx/` on Unix; native EXE on Windows; localized-safe stack |
 | **1.05 patcher** | `maxfx-patcher` — HTTPS + SHA-256 allowlist; refuses SFX installers |
-| **`openras` (Rust)** | **Alpha** — list / extract / pack RAS/MPM; synthetic CI tests |
-| **Native engine** | **Planned** — REA-backed; not started |
+| **`openras` (Rust)** | **Alpha** — RASMaker `-x/-v/-a/-m/-p/-c` + subcommands; CI tests |
+| **`openpfx` (Rust)** | **Draft** — `dump-pse` header/path harvest; PSE→RPS export TBD |
+| **`maxfx-engine`** | **Skeleton** — opens BYOD MP1 RAS via `openras` (not playable) |
 | **Studio (Tauri)** | GUI front door (Launch/Stop process tracking) |
 | **`.sh` runtime** | Linux convenience only — not required on Windows |
-| **`openpfx` / particles** | Draft specification |
 | **Blender KF2** | Specification / early architecture (stub add-on) |
 
 ## Quick start (Linux)
@@ -45,13 +45,16 @@ Guide: [START_HERE.md](START_HERE.md) · Play notes: [docs/PLAY_LINUX.md](docs/P
 ## Layout
 
 ```
-crates/openras/   # Native RAS/MPM CLI + library
-studio/           # Tauri Studio
-runtime/          # CD install, Wine bootstrap, localized-safe stack
-tools/openpfx/    # particles (draft)
-tools/blender_io_kf2/   # Blender KF2 (early)
-docs/specs/       # clean-room format notes
-vendor/           # local-only REA reference (gitignored — never commit)
+crates/openras/       # RAS/MPM + RASMaker-compatible CLI
+crates/openpfx/       # ParticleFX PSE dump (draft)
+crates/maxfx-engine/  # Native engine skeleton (BYOD archive open)
+crates/maxfx-play/    # Wine/native Play bridge
+crates/maxfx-patcher/  # 1.05 drop-in apply
+studio/               # Tauri Studio
+runtime/              # CD install, Wine bootstrap, localized-safe stack
+tools/blender_io_kf2/ # Blender KF2 (early)
+docs/specs/           # clean-room format notes
+vendor/               # local-only REA reference (gitignored — never commit)
 ```
 
 ## License / legal

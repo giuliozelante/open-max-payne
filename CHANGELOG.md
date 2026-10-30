@@ -11,9 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Product north star: OpenLara-style native **engine** + **MAX-FX tools** (BYOD);
   Wine Play remains the bridge ([spec](docs/specs/2026-10-30-open-max-payne.md))
+- CI Action pins: checkout v7.0.1, CodeQL Action v4.39.1, artifact actions refreshed
 
 ### Added
 
+- `openras` RASMaker flag parity (`-x/-v/-a/-m/-p/-c`) from REA strings
+- `crates/openpfx` PSE dump CLI + synthetic tests
+- `crates/maxfx-engine` walking skeleton (`open_archive`)
 - CI matrix (`ubuntu` / `windows` / `macos`) for library crates
 - `clippy` + `rustfmt` + `shellcheck` gates
 - CodeQL (`rust`, `javascript-typescript`)

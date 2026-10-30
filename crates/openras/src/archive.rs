@@ -5,7 +5,7 @@ use crate::lzss::{compress as lzss_compress, decompress as lzss_decompress};
 use crate::pathutil::{rel_to_win_dir, validate_basename, win_dir_to_rel, PathError};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub const MAGIC: &[u8; 4] = b"RAS\0";
@@ -275,7 +275,32 @@ impl RasArchive {
         Ok(())
     }
 
-    pub fn from_directory(root: &Path, seed: i32) -> Result<Self, RasError> {
+    /// Pack `root` into a new archive.
+    ///
+    /// `exclude_source_path` matches RASMaker `-p`: strip `root` from entry paths.
+    /// When false (RASMaker default for relative sources), the source path prefix is kept
+    /// (e.g. packing `data/` yields `\data\...` names). Absolute sources require `-p`.
+    pub fn from_directory(
+        root: &Path,
+        seed: i32,
+        exclude_source_path: bool,
+    ) -> Result<Self, RasError> {
+        if !exclude_source_path && root.is_absolute() {
+            return Err(RasError::Msg(
+                "Error: Source path must be relative when \"-p\" option is not used.".into(),
+            ));
+        }
+        // Without `-p`, keep the source path in archive names (REA: "keeping the data\\ in names").
+        // `name_base` is the strip prefix: parent of `root`, or empty when `root` is a single component.
+        let name_base: PathBuf = if exclude_source_path {
+            root.to_path_buf()
+        } else {
+            root.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default()
+        };
+
         let mut dirs: BTreeMap<String, RasDirEntry> = BTreeMap::new();
         dirs.insert(
             "\\".into(),
@@ -287,12 +312,12 @@ impl RasArchive {
         let mut pending: Vec<(String, String, Vec<u8>)> = Vec::new();
 
         fn walk(
-            root: &Path,
+            name_base: &Path,
             dir: &Path,
             dirs: &mut BTreeMap<String, RasDirEntry>,
             pending: &mut Vec<(String, String, Vec<u8>)>,
         ) -> Result<(), RasError> {
-            let rel = dir.strip_prefix(root).unwrap_or(Path::new(""));
+            let rel = dir.strip_prefix(name_base).unwrap_or(Path::new(""));
             let win = rel_to_win_dir(rel);
             dirs.entry(win.clone()).or_insert_with(|| RasDirEntry {
                 name: win.clone(),
@@ -303,7 +328,7 @@ impl RasArchive {
             for ent in entries {
                 let ft = ent.file_type()?;
                 if ft.is_dir() {
-                    walk(root, &ent.path(), dirs, pending)?;
+                    walk(name_base, &ent.path(), dirs, pending)?;
                 } else if ft.is_file() {
                     let name = ent.file_name().to_string_lossy().into_owned();
                     validate_basename(&name)?;
@@ -313,7 +338,7 @@ impl RasArchive {
             Ok(())
         }
 
-        walk(root, root, &mut dirs, &mut pending)?;
+        walk(&name_base, root, &mut dirs, &mut pending)?;
 
         let dir_list: Vec<_> = dirs.into_values().collect();
         let index: BTreeMap<_, _> = dir_list

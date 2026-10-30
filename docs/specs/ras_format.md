@@ -109,11 +109,30 @@ Payloads follow immediately after both tables, in file-table order. Offset of fi
 
 ## RASMaker CLI (1.20 / Jul 4 2001)
 
+REA strings from `vendor/max-fx-tools/Rasmaker/RASMaker.exe` (sha256 `0020b019…884c`):
+
 ```
-RASMaker.exe -x archive.ras          # extract into cwd (creates data\...)
-RASMaker.exe -v archive.ras          # list
-RASMaker.exe -a [-p] [-c] src dest   # add / pack
+Usage: RASMaker [options] [source] [destination]
+  -x  extract files          → cwd (creates data\… from archive paths)
+  -v  view archive contents
+  -a  add files
+  -m  move files (deletes from source after add)
+  -c  compress all files (requires -a or -m)
+  -p  exclude source path (requires -a or -m)
 ```
+
+Examples from the binary:
+
+| Invocation | Meaning |
+|------------|---------|
+| `-a data data.ras` | Pack `data\`, **keep** `data\` in entry names (source must be relative) |
+| `-a -p e:\temp data.ras` | Pack under temp, **strip** that path from names |
+| `-x data.ras` | Extract into current directory |
+| `-v data.ras` | List |
+
+Absolute source without `-p` → error: `Source path must be relative when "-p" option is not used.`
+
+**openras** accepts the same flag form (`openras -v …`) in addition to subcommands `list` / `extract` / `pack`.
 
 ## Evidence
 

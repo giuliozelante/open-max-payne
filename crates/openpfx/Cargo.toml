@@ -1,0 +1,18 @@
+[package]
+name = "openpfx"
+version = "0.1.0"
+edition = "2021"
+description = "Clean-room ParticleFX PSE/RPS tooling for Max Payne 1 (draft)"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "openpfx"
+path = "src/main.rs"
+
+[lib]
+name = "openpfx"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"

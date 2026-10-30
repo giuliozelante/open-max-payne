@@ -2,6 +2,7 @@
 //! Spec: docs/specs/ras_format.md
 
 pub mod archive;
+pub mod cli_rasmaker;
 pub mod crypto;
 pub mod lzss;
 pub mod pathutil;

@@ -49,7 +49,9 @@ Done when (baseline — shipped):
   - [x] CI: OS matrix, CodeQL, Dependabot, release workflow
 
 Done when (north star — open):
-  - [ ] RASMaker flag parity documented + green on matrix
-  - [ ] At least one additional native MAX-FX tool beyond archiver
-  - [ ] Engine walking skeleton loads a BYOD level archive (REA-backed plan)
+  - [x] RASMaker flag parity documented + green on matrix
+  - [x] At least one additional native MAX-FX tool beyond archiver (`openpfx` dump)
+  - [x] Engine walking skeleton loads a BYOD archive (`maxfx-engine` + skeleton spec)
   - [ ] Play path can prefer native engine when ready; Wine remains fallback
+  - [ ] `openpfx` PSE→RPS export (`-e` parity) after RPS version REA
+  - [ ] Engine REA note naming real level-load call chain

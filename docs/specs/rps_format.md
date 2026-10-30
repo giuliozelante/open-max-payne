@@ -1,6 +1,8 @@
 # ParticleFX RPS / PSE — Working Spec (Phase 4)
 
-**Status:** Draft from fixtures + ParticleFX.exe still to be fully RE'd.
+**Status:** Draft. PSE dump in Rust `crates/openpfx`. Full serialize/export still REA-backed WIP.
+
+**REA artifact:** `vendor/max-fx-tools/ParticleFX_files/ParticleFX.exe` (sha256 `3ce05189…69c7`).
 
 ## Files
 
@@ -9,26 +11,44 @@
 | `.pse` | ParticleFX **editor** project (paths, graphs, emitter params) |
 | `.rps` | **Runtime** particle set cooked for the game |
 
-### PSE example (editor project `.pse`)
+## CLI (from ParticleFX.exe strings)
 
-Header words (LE):
+```
+-e    Export files (.pse -> .rps)
+```
 
-| Off | Value | Guess |
+MFC doc filter: `ParticleFX Files (*.pse)`. Runtime filter: `Runtime Particle Sets (*.rps)`.
+Export UI: `Export data to run particle system in other programs` (Ctrl+E).
+
+RPS load errors (version gate):
+
+```
+PS_ParticleSystem: Invalid File Version in %s
+Current: %8x  Expected: %8x
+PS_ParticleSystem: Invalid File Structure in %s
+```
+
+## PSE example (editor project `.pse`)
+
+Observed on `Bullet_Impact_default.pse` (local vendor fixture; not in git):
+
+| Off | Value | Notes |
 |-----|-------|-------|
-| 0 | `0x60` | Header/payload size or struct size |
-| 4 | `5` | Version / emitter count |
-| 8 | `100` (`0x64`) | |
-| 12 | `float 2.5` (`0x40200000`) | |
-| … | | |
-| later | ASCII path | `C:\Program Files\...` bitmap / tool paths |
+| 0 | `0x60` (96) | struct / block size guess |
+| 4 | `5` | version / count guess |
+| 8 | `0x23` (35) | varies by project |
+| 12 | float `2.5` | |
+| 16 | float `2.5` | |
+| later | ASCII | `C:\Program Files\MAX-FX Tools\...` paths, bitmap leaf names |
 
-Contains readable tokens: `PARTICLE`, `BITMAP`, etc. (editor-side).
+`openpfx dump-pse` prints these fields (synthetic unit test; no retail bytes in CI).
 
 ### RPS example (runtime `database/particles/.../*.rps`)
 
-Dense binary (~tens of KiB). Starts with small tagged ints/floats (`0x14` markers similar to MemoryFile tags). No plain ASCII paths; bitmaps referenced by cooked ids.
+Dense binary. No plain ASCII paths; bitmaps by cooked ids. Version checked as `%8x` against expected.
 
 ## Next
 
-1. REA on `ParticleFX.exe` serialize/load path.
-2. `tools/openpfx` — dump PSE params; compile PSE→RPS once format locked.
+1. REA: locate `-e` export path → `PS_ParticleSystem` write.
+2. `openpfx export` once RPS version magic is known from REA.
+3. Retire Python `tools/openpfx` once Rust CLI covers dump + export.
