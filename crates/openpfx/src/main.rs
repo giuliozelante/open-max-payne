@@ -202,7 +202,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 String::new()
             };
             println!(
-                "Wrote {} bytes root{} → {} (sampled curves; companion still stubbed)",
+                "Wrote {} bytes root{} → {} (sampled curves; candle-shaped companion zeros)",
                 bytes.len(),
                 tag,
                 output.display()
