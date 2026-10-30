@@ -63,6 +63,12 @@ pub fn looks_like_ldb_or_ai(data: &[u8]) -> bool {
     data.len() >= LDB_PREAMBLE.len() && data.starts_with(LDB_PREAMBLE)
 }
 
+/// MaxED MemoryFile-native `.ldb` prefix: tagged int `LDB_IMPORT_VERSION` (`0x14 0x20`).
+/// Retail RAS BYOD packages use [`LDB_PREAMBLE`] instead (see spec).
+pub fn looks_like_memory_file_ldb(data: &[u8]) -> bool {
+    data.len() >= 2 && data[0] == 0x14 && data[1] == LDB_IMPORT_VERSION as u8
+}
+
 /// One `>`-terminated record from a `.ldb` / `.ai` body (BYOD observation).
 ///
 /// Files start with [`LDB_PREAMBLE`], then a stream of payloads separated by
@@ -324,6 +330,8 @@ mod tests {
         assert!(looks_like_ldb_or_ai(&buf));
         assert!(!looks_like_ldb_or_ai(b"RAS\0"));
         assert_eq!(LDB_IMPORT_VERSION, 0x20);
+        assert!(looks_like_memory_file_ldb(&[0x14, 0x20, 0x00]));
+        assert!(!looks_like_memory_file_ldb(LDB_PREAMBLE));
     }
 
     #[test]

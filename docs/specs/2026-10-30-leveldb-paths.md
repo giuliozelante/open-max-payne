@@ -149,6 +149,25 @@ Constant: `maxfx_engine::LDB_IMPORT_VERSION` (`0x20`).
 view **after** record/chunk extraction, not to the raw file preamble. Bridging
 `>`-records → MemoryFile for that gate is the next REA step.
 
+## `X_LevelDBExportLevel` (MaxED.exe REA)
+
+| Item | Value |
+|------|-------|
+| RTTI | `.?AVX_LevelDBExportLevel@@` |
+| vtable | `0x67d3e4` |
+| Write slot (`+4`) | `0x5ebe10` |
+
+Write path:
+
+1. `operator<<(R_MemoryFile&, int const&)` with value **`0x20`**
+   (`rlmfc` `??6…ABH@Z` @ IAT `0x673e70`)
+2. Virtual-calls child exporters at `this+0x4/8/c/14` **slot +4** (export)
+
+So a MemoryFile-native `.ldb` from MaxED should begin `0x14 0x20` (1-byte int tag).
+Retail RAS BYOD blobs do **not** — they use the space/`>` outer framing instead
+(possible post-export pack, or a different cook path). Both observations stay in
+the spec until a round-trip MaxED export fixture is captured locally.
+
 ## MemoryFile ChunkHeader (rlmfc REA, issue #14)
 
 `createChunk(id, version)` writes:
