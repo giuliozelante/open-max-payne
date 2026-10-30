@@ -1,21 +1,24 @@
 # CLAUDE.md — Open Max Payne
 
-Standalone project: Max Payne 1 play + MAX-FX tools. **Baseline:** Linux Play + Rust `openras`. Win/mac Play, Blender, particles = planned/draft.
+Standalone project: Max Payne 1 play + MAX-FX tools → **OpenLara-style north star**
+(native engine + native tools, BYOD). **Baseline today:** Wine Play bridge + Rust
+`openras` / patcher / play. Engine = long arc; RASMaker parity next.
 
 ## Do
 
-- Keep pillars separate: Play / Content / Author / Studio
-- Spec + REA before claiming format details (`docs/specs/`)
+- Keep pillars separate: Play / Content / Author / Studio / Engine (long arc)
+- Spec + REA before claiming format or engine details (`docs/specs/`)
 - Never commit `vendor/`, game installs, `*.exe`/`*.dll`/`*.ras`/`*.mpm`, or proprietary SDKs
 - Prefer Studio (`./openmaxfx`) as the “for dummies” path
-- Prefer Rust crates (`openras`, `maxfx-patcher`, `maxfx-play`); no Python front door
+- Prefer Rust crates (`openras`, `maxfx-patcher`, `maxfx-play`, later engine); no Python front door
 - Studio Play/patch must call Rust crates — do not add Windows-required `.sh` paths
+- Near-term: RASMaker parity → more tools; engine only via signed REA increment plans
 
 ## Don’t
 
 - Ship Max Payne binaries or third-party mod asset trees
 - Treat this repo as a host for other games’/mods’ content
-- Invent Wise/InstallShield unpackers or experimental ASI loaders without a signed-off Inc 3 plan
+- Claim a playable native engine without a walking skeleton + REA-backed specs
 
 ## Key paths
 

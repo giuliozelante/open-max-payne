@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Product north star: OpenLara-style native **engine** + **MAX-FX tools** (BYOD);
+  Wine Play remains the bridge ([spec](docs/specs/2026-10-30-open-max-payne.md))
+
 ### Added
 
 - CI matrix (`ubuntu` / `windows` / `macos`) for library crates

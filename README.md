@@ -5,6 +5,10 @@
 Play **Max Payne 1** and use its **MAX-FX** toolchain on modern OSes.
 You need your own retail CD / install. This project does **not** redistribute the game.
 
+**North star (OpenLara model):** clean-room native **engine** + **MAX-FX tools** that
+read your BYOD data. Wine + original `MaxPayne.exe` is the bridge until the engine exists.
+Product spec: [docs/specs/2026-10-30-open-max-payne.md](docs/specs/2026-10-30-open-max-payne.md).
+
 ## Current baseline (honest)
 
 | Area | Status |
@@ -12,6 +16,7 @@ You need your own retail CD / install. This project does **not** redistribute th
 | **Play (Rust)** | `maxfx-play` — Wine win32 `pfx/` on Unix; native EXE on Windows; localized-safe stack |
 | **1.05 patcher** | `maxfx-patcher` — HTTPS + SHA-256 allowlist; refuses SFX installers |
 | **`openras` (Rust)** | **Alpha** — list / extract / pack RAS/MPM; synthetic CI tests |
+| **Native engine** | **Planned** — REA-backed; not started |
 | **Studio (Tauri)** | GUI front door (Launch/Stop process tracking) |
 | **`.sh` runtime** | Linux convenience only — not required on Windows |
 | **`openpfx` / particles** | Draft specification |
