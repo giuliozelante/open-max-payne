@@ -69,10 +69,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     RpsValue::F32 { value } => println!("  [{i}] f32 {value}"),
                     RpsValue::Str { value } => println!("  [{i}] str {value:?}"),
-                    RpsValue::Blob { len, jpeg_soi } => println!(
-                        "  [{i}] blob len={len}{}",
-                        if *jpeg_soi { " (jpeg)" } else { "" }
-                    ),
+                    RpsValue::Blob { data } => {
+                        let jpeg = data.len() >= 2 && data[0] == 0xff && data[1] == 0xd8;
+                        println!(
+                            "  [{i}] blob len={}{}",
+                            data.len(),
+                            if jpeg { " (jpeg)" } else { "" }
+                        );
+                    }
                     RpsValue::Vec3 { x, y, z } => println!("  [{i}] vec3 ({x}, {y}, {z})"),
                     RpsValue::Unknown { tag, at } => {
                         println!("  [{i}] unknown tag=0x{tag:02x} at={at}")

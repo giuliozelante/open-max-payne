@@ -20,7 +20,7 @@ pub enum RpsValue {
     U8 { tag: u8, value: u8 },
     F32 { value: f32 },
     Str { value: String },
-    Blob { len: usize, jpeg_soi: bool },
+    Blob { data: Vec<u8> },
     Vec3 { x: f32, y: f32, z: f32 },
     Unknown { tag: u8, at: usize },
 }
@@ -95,8 +95,9 @@ pub fn parse_rps(data: &[u8]) -> Result<RpsHeader, PfxError> {
                     values.push(RpsValue::Unknown { tag, at: i - 3 });
                     break;
                 }
-                let jpeg_soi = len >= 2 && data[i] == 0xff && data[i + 1] == 0xd8;
-                values.push(RpsValue::Blob { len, jpeg_soi });
+                values.push(RpsValue::Blob {
+                    data: data[i..i + len].to_vec(),
+                });
                 i += len;
             }
             TAG_VEC3 => {
@@ -120,6 +121,53 @@ pub fn parse_rps(data: &[u8]) -> Result<RpsHeader, PfxError> {
         values,
         bytes_consumed: i,
     })
+}
+
+/// Encode known tagged values back to bytes (stops at `Unknown`).
+pub fn encode_rps(values: &[RpsValue]) -> Result<Vec<u8>, PfxError> {
+    let mut out = Vec::new();
+    for v in values {
+        match v {
+            RpsValue::U8 { tag, value } => {
+                out.push(*tag);
+                out.push(*value);
+            }
+            RpsValue::F32 { value } => {
+                out.push(TAG_F32);
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+            RpsValue::Str { value } => {
+                let bytes = value.as_bytes();
+                if bytes.len() > 255 {
+                    return Err(PfxError::Msg("string longer than 255".into()));
+                }
+                out.push(TAG_STR);
+                out.push(TAG_U8_A);
+                out.push(bytes.len() as u8);
+                out.extend_from_slice(bytes);
+            }
+            RpsValue::Blob { data } => {
+                if data.len() > u16::MAX as usize {
+                    return Err(PfxError::Msg("blob longer than u16".into()));
+                }
+                out.push(TAG_BLOB);
+                out.extend_from_slice(&(data.len() as u16).to_le_bytes());
+                out.extend_from_slice(data);
+            }
+            RpsValue::Vec3 { x, y, z } => {
+                out.push(TAG_VEC3);
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
+                out.extend_from_slice(&z.to_le_bytes());
+            }
+            RpsValue::Unknown { tag, at } => {
+                return Err(PfxError::Msg(format!(
+                    "cannot encode unknown tag 0x{tag:02x} at {at}"
+                )));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Emit the common PSE→RPS tagged preamble for the flat header fields we understand.
@@ -227,13 +275,13 @@ mod tests {
         buf.extend_from_slice(jpeg);
         buf.push(0xff);
         let h = parse_rps(&buf).unwrap();
-        assert!(matches!(
-            &h.values[0],
-            RpsValue::Blob {
-                len: 4,
-                jpeg_soi: true
+        match &h.values[0] {
+            RpsValue::Blob { data } => {
+                assert_eq!(data, jpeg);
+                assert_eq!(&data[..2], b"\xff\xd8");
             }
-        ));
+            _ => panic!("expected blob"),
+        }
     }
 
     #[test]
@@ -249,5 +297,31 @@ mod tests {
                 value: 35
             }
         ));
+    }
+
+    #[test]
+    fn encode_roundtrips_mixed_tags() {
+        let values = vec![
+            RpsValue::U8 {
+                tag: TAG_U8_A,
+                value: 96,
+            },
+            RpsValue::F32 { value: 2.5 },
+            RpsValue::Str {
+                value: "a\\b.JPG".into(),
+            },
+            RpsValue::Blob {
+                data: b"\xff\xd8\xff\xd9".to_vec(),
+            },
+            RpsValue::Vec3 {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+            },
+        ];
+        let bytes = encode_rps(&values).unwrap();
+        let back = parse_rps(&bytes).unwrap();
+        assert_eq!(back.values, values);
+        assert_eq!(back.bytes_consumed, bytes.len());
     }
 }
