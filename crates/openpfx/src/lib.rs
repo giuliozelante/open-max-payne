@@ -10,20 +10,53 @@ use thiserror::Error;
 
 pub use curve_sample::{sample_linear, Keyframe as CurveKeyframe};
 
-/// Interpret [`PseCurveFloats::floats`] as interleaved `(t, v)` for one channel.
+/// Channel count from the first PSE curve header word (`FUN_00432fd0` `+0x08`).
+pub fn pse_curve_channels(parsed: &PseCurveFloats) -> usize {
+    let c = parsed.header_words[0] as usize;
+    c.clamp(1, 8)
+}
+
+/// Drop trailing denormals / NaNs that leak past the true keyframe run into PSE object padding.
+fn trim_curve_floats(floats: &[f32]) -> Vec<f32> {
+    let mut out = floats.to_vec();
+    while let Some(last) = out.last().copied() {
+        if last == 0.0 || (last.is_finite() && last.abs() >= 1e-30) {
+            break;
+        }
+        out.pop();
+    }
+    out
+}
+
+/// Interpret [`PseCurveFloats`] as keyframes.
+///
+/// Layout: `channels = header_words[0]`; each keyframe is `t` then `channels` values
+/// (BYOD Size m = 1ch `(t,v)`; Rgb color c = 3ch `(t,r,g,b)`). Floats are trimmed of
+/// denormal padding before pairing.
 pub fn pse_curve_to_keyframes(parsed: &PseCurveFloats) -> Result<Vec<CurveKeyframe>, PfxError> {
-    if !parsed.floats.len().is_multiple_of(2) {
+    let channels = pse_curve_channels(parsed);
+    let floats = trim_curve_floats(&parsed.floats);
+    let stride = 1 + channels;
+    if floats.len() < stride {
         return Err(PfxError::Msg(format!(
-            "curve {}: odd float count {}",
+            "curve {}: need ≥{stride} floats, got {}",
             parsed.name,
-            parsed.floats.len()
+            floats.len()
         )));
     }
-    let mut out = Vec::with_capacity(parsed.floats.len() / 2);
-    for pair in parsed.floats.as_chunks::<2>().0 {
+    let usable = floats.len() - (floats.len() % stride);
+    if usable == 0 {
+        return Err(PfxError::Msg(format!(
+            "curve {}: float count {} not usable for stride {stride}",
+            parsed.name,
+            floats.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(usable / stride);
+    for chunk in floats[..usable].chunks_exact(stride) {
         out.push(CurveKeyframe {
-            t: pair[0],
-            values: vec![pair[1]],
+            t: chunk[0],
+            values: chunk[1..].to_vec(),
         });
     }
     Ok(out)
@@ -141,9 +174,10 @@ pub struct PseCurveRef {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PseCurveFloats {
     pub name: String,
-    /// Seven LE `u32` words immediately after the name (semantics WIP).
+    /// Seven LE `u32` words immediately after the name.
+    /// Word0 = channel count (matches RPS curve header / `FUN_00432fd0` `+0x08`).
     pub header_words: [u32; 7],
-    /// LE `f32` values until the `50 50 50` sentinel (paired time/value in simple cases).
+    /// LE `f32` values until the `50 50 50` sentinel (`t` + `channels` values per keyframe).
     pub floats: Vec<f32>,
 }
 
@@ -159,7 +193,7 @@ pub fn parse_pse_curve_floats(data: &[u8], curve: &PseCurveRef) -> Option<PseCur
         i += 4;
     }
     let mut floats = Vec::new();
-    // Bound the run: PPP sentinel, next object header, or a hard cap.
+    // Bound the run: PPP sentinel, next object header, denormal/NaN padding, or cap.
     const MAX_FLOATS: usize = 64;
     while i + 4 <= data.len() && floats.len() < MAX_FLOATS {
         if data[i] == 0x50 && data[i + 1] == 0x50 && data[i + 2] == 0x50 {
@@ -168,14 +202,21 @@ pub fn parse_pse_curve_floats(data: &[u8], curve: &PseCurveRef) -> Option<PseCur
         if data[i..].starts_with(&[0x71, 0, 0, 0]) || data[i..].starts_with(&[0x30, 0, 0, 0]) {
             break;
         }
-        floats.push(f32::from_le_bytes(data[i..i + 4].try_into().ok()?));
+        let v = f32::from_le_bytes(data[i..i + 4].try_into().ok()?);
+        // PSE object padding after real keyframes is often denormal/NaN noise.
+        if !v.is_finite() || (v != 0.0 && v.abs() < 1e-30) {
+            break;
+        }
+        floats.push(v);
         i += 4;
     }
     if floats.is_empty() {
         return None;
     }
-    // Drop a trailing odd float if we stopped on a boundary mid-pair.
-    if floats.len() % 2 == 1 {
+    // Trim mid-keyframe leftovers using channel count from header word0.
+    let channels = (header_words[0] as usize).clamp(1, 8);
+    let stride = 1 + channels;
+    while !floats.is_empty() && floats.len() % stride != 0 {
         floats.pop();
     }
     if floats.is_empty() {
@@ -265,10 +306,12 @@ pub struct PseExportOptions {
     /// Append graph section with zero emitters (`0x31`/`1` + param + count `0`).
     pub empty_graph: bool,
     /// Append graph section + stub emitter-open (+ sampled/placeholder curves +
-    /// external texture ref + companion stub) per name.
+    /// texture path + companion stub) per name.
     pub emitter_stubs: Vec<String>,
-    /// Optional relative texture path per emitter (external ref, no JPEG bytes).
+    /// Optional relative texture path per emitter.
     pub texture_stubs: Vec<String>,
+    /// Optional JPEG/blob bytes per emitter (`None` → external ref int `0`).
+    pub texture_embeds: Vec<Option<Vec<u8>>>,
 }
 
 /// Like [`pse_to_rps_root`], with optional graph / emitter stubs.
@@ -287,12 +330,19 @@ pub fn pse_to_rps_export(h: &PseHeader, opts: &PseExportOptions) -> Result<Vec<u
     pse_to_rps_export_with_curves(h, opts, &[])
 }
 
+/// One sampled RPS curve grid (sample-major: for each sample, all channels).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SampledCurve {
+    pub channels: u8,
+    pub values: Vec<f32>,
+}
+
 /// Like [`pse_to_rps_export`], but `per_emitter_curves[i]` supplies up to four sampled
-/// grids (sample-major `f32` slices) for emitter stub `i`. Missing slots get placeholders.
+/// curves for emitter stub `i`. Missing slots get placeholders.
 pub fn pse_to_rps_export_with_curves(
     h: &PseHeader,
     opts: &PseExportOptions,
-    per_emitter_curves: &[Vec<Vec<f32>>],
+    per_emitter_curves: &[Vec<SampledCurve>],
 ) -> Result<Vec<u8>, PfxError> {
     use memory_file::MemoryFileWriter;
     fn u8_fit(v: u32, name: &str) -> Result<u8, PfxError> {
@@ -324,7 +374,8 @@ pub fn pse_to_rps_export_with_curves(
         })?;
         w.write_graph_section_open(n, 1.0, 0, 1, 0.1);
         for (ei, _name) in opts.emitter_stubs.iter().enumerate() {
-            // Candle-shaped stub; name not yet placed on the RPS wire (REA pending).
+            // Candle-shaped stub. Retail RPS has no emitter-name string on the wire
+            // (only texture path `0x0d` tags) — PSE names stay editor-side.
             w.write_emitter_open(0.0, 0, 1, 0.0, 0, 10.0, 0, 1, -3.0, 3.0, 2);
             let sampled = per_emitter_curves
                 .get(ei)
@@ -332,11 +383,22 @@ pub fn pse_to_rps_export_with_curves(
                 .unwrap_or(&[]);
             // Four curves required by FUN_00417570 before path embeds.
             for slot in 0..4 {
-                if let Some(grid) = sampled.get(slot) {
-                    let samples = u8::try_from(grid.len()).map_err(|_| {
-                        PfxError::Msg(format!("curve samples {} > 255", grid.len()))
+                if let Some(sc) = sampled.get(slot) {
+                    let ch = sc.channels;
+                    let need = ch as usize;
+                    if need == 0 || sc.values.len() % need != 0 {
+                        return Err(PfxError::Msg(format!(
+                            "curve slot {slot}: values {} not divisible by channels {ch}",
+                            sc.values.len()
+                        )));
+                    }
+                    let samples = u8::try_from(sc.values.len() / need).map_err(|_| {
+                        PfxError::Msg(format!(
+                            "curve samples {} > 255",
+                            sc.values.len() / need
+                        ))
                     })?;
-                    w.write_curve(1, samples, grid)?;
+                    w.write_curve(ch, samples, &sc.values)?;
                 } else if slot == 1 {
                     w.write_curve(1, 2, &[0.0, 0.0])?;
                 } else {
@@ -353,7 +415,12 @@ pub fn pse_to_rps_export_with_curves(
                 .get(ei)
                 .map(String::as_str)
                 .unwrap_or(r"stub\particle.JPG");
-            w.write_embedded_file(tex, None)?;
+            let embed = opts
+                .texture_embeds
+                .get(ei)
+                .and_then(|o| o.as_ref())
+                .map(|v| v.as_slice());
+            w.write_embedded_file(tex, embed)?;
             w.write_companion_stub()?;
         }
     } else if opts.empty_graph {
@@ -362,12 +429,12 @@ pub fn pse_to_rps_export_with_curves(
     Ok(w.into_bytes())
 }
 
-/// Build up to four sampled 1-channel grids for each emitter from PSE curve objects
-/// that fall between that emitter and the next.
+/// Build up to four sampled curves for each emitter from PSE curve objects
+/// that fall between that emitter and the next (channel count from header word0).
 pub fn sample_emitter_curves_from_pse(
     data: &[u8],
     sample_count: u8,
-) -> Result<Vec<Vec<Vec<f32>>>, PfxError> {
+) -> Result<Vec<Vec<SampledCurve>>, PfxError> {
     let emitters = scan_pse_emitters(data);
     let curves = scan_pse_curves(data);
     let mut out = Vec::with_capacity(emitters.len());
@@ -382,6 +449,7 @@ pub fn sample_emitter_curves_from_pse(
             let Some(parsed) = parse_pse_curve_floats(data, c) else {
                 continue;
             };
+            let channels = pse_curve_channels(&parsed);
             let Ok(kfs) = pse_curve_to_keyframes(&parsed) else {
                 continue;
             };
@@ -389,10 +457,15 @@ pub fn sample_emitter_curves_from_pse(
                 continue;
             }
             let t_max = kfs.last().map(|k| k.t).unwrap_or(1.0).max(1.0);
-            let Ok(grid) = sample_linear(&kfs, 1, 0.0, t_max, sample_count as usize) else {
+            let Ok(values) =
+                sample_linear(&kfs, channels, 0.0, t_max, sample_count as usize)
+            else {
                 continue;
             };
-            grids.push(grid);
+            let channels = u8::try_from(channels).map_err(|_| {
+                PfxError::Msg(format!("channels {channels} > 255"))
+            })?;
+            grids.push(SampledCurve { channels, values });
         }
         out.push(grids);
     }
@@ -525,5 +598,71 @@ mod tests {
         let grid = sample_linear(&kfs, 1, 0.0, 1.0, 2).unwrap();
         assert!((grid[0] - 1.0).abs() < 1e-5);
         assert!((grid[1] - 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rgb_curve_parses_three_channels_from_header_word0() {
+        let mut raw = vec![0u8; 36];
+        raw.extend_from_slice(&[0x71, 0, 0, 0, 3, 0, 0, 0, 1, b't', 11]);
+        raw.extend_from_slice(b"Rgb color c");
+        for w in [3u32, 0, 0, 3, 1, 1, 2] {
+            raw.extend_from_slice(&w.to_le_bytes());
+        }
+        // one keyframe: t=0, rgb=(10,20,30) then denormal padding then PPP
+        for v in [0.0f32, 10.0, 20.0, 30.0] {
+            raw.extend_from_slice(&v.to_le_bytes());
+        }
+        raw.extend_from_slice(&1e-40f32.to_le_bytes());
+        raw.extend_from_slice(&[0x50, 0x50, 0x50]);
+        let c = &scan_pse_curves(&raw)[0];
+        let parsed = parse_pse_curve_floats(&raw, c).unwrap();
+        assert_eq!(pse_curve_channels(&parsed), 3);
+        let kfs = pse_curve_to_keyframes(&parsed).unwrap();
+        assert_eq!(kfs.len(), 1);
+        assert_eq!(kfs[0].values, vec![10.0, 20.0, 30.0]);
+        let grid = sample_linear(&kfs, 3, 0.0, 1.0, 2).unwrap();
+        assert_eq!(grid.len(), 6); // sample-major: s0.rgb, s1.rgb
+        assert!((grid[0] - 10.0).abs() < 1e-5);
+        assert!((grid[2] - 30.0).abs() < 1e-5);
+        assert!((grid[3] - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn export_with_jpeg_embed_walks_as_blob() {
+        let h = PseHeader {
+            word0: 96,
+            word1: 5,
+            word2: 12,
+            float_a: 2.5,
+            word3: 10,
+            float_b: 2.5,
+            word4: 10,
+            flag_a: 0,
+            flag_b: 0,
+            ascii_paths: vec![],
+        };
+        let jpeg = vec![0xff, 0xd8, 0xff, 0xd9];
+        let bytes = pse_to_rps_export_with_curves(
+            &h,
+            &PseExportOptions {
+                emitter_stubs: vec!["Spark".into()],
+                texture_stubs: vec![r"fire\pflame.JPG".into()],
+                texture_embeds: vec![Some(jpeg.clone())],
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+        let walked = parse_rps(&bytes).unwrap();
+        let blob = walked.values.iter().find_map(|v| match v {
+            RpsValue::Blob { data } => Some(data.clone()),
+            _ => None,
+        });
+        assert_eq!(blob.as_deref(), Some(jpeg.as_slice()));
+        let path = walked.values.iter().find_map(|v| match v {
+            RpsValue::Str { value } => Some(value.as_str()),
+            _ => None,
+        });
+        assert_eq!(path, Some(r"fire\pflame.JPG"));
     }
 }

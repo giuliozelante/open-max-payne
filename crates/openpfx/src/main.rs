@@ -41,6 +41,9 @@ enum Cmd {
         /// Append graph + stub emitter-open per scanned PSE emitter name
         #[arg(long)]
         emitter_stubs: bool,
+        /// Embed this JPEG/TGA file into emitter 0 (BYOD local; proves `0x13` blob path)
+        #[arg(long)]
+        embed_jpeg: Option<PathBuf>,
     },
     /// Parse a retail `.rps` and write it back (encode parity check; BYOD local use)
     Repack {
@@ -141,6 +144,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             output,
             empty_graph,
             emitter_stubs,
+            embed_jpeg,
         } => {
             let data = fs::read(&pse)?;
             let h = openpfx::parse_pse(&data)?;
@@ -174,12 +178,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 Vec::new()
             };
+            let mut texture_embeds = Vec::new();
+            if let Some(path) = embed_jpeg {
+                let bytes = fs::read(&path)?;
+                texture_embeds.push(Some(bytes));
+            }
             let bytes = pse_to_rps_export_with_curves(
                 &h,
                 &PseExportOptions {
                     empty_graph: empty_graph && stubs.is_empty(),
                     emitter_stubs: stubs.clone(),
                     texture_stubs: textures,
+                    texture_embeds,
                 },
                 &sampled,
             )?;
@@ -192,7 +202,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 String::new()
             };
             println!(
-                "Wrote {} bytes root{} → {} (paths/embeds still stubbed)",
+                "Wrote {} bytes root{} → {} (sampled curves; companion still stubbed)",
                 bytes.len(),
                 tag,
                 output.display()

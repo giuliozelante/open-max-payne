@@ -183,6 +183,17 @@ The 16-space + `>` preamble is **not** a string constant in `MaxPayne.exe`,
 by an as-yet-unlocated cook/pretty path — not by `ExportLevel`'s tagged `0x20`
 writer alone.
 
+### `R_MemoryFile::AccessMethod` (rlmfc.dll)
+
+| Symbol | Notes |
+|--------|-------|
+| `getDefaultAccessMethod` / `setDefaultAccessMethod` | DLL global `@ VA 0x1003df4c`, **default `1`** |
+| `readTagged` / `writeTagged` | Tagged BasicType channel used by `operator<<`/`>>` |
+
+Default `1` is consistent with the tagged MemoryFile regime (`0x14`/`0x11`/…).
+No evidence yet that another AccessMethod emits the space/`>` BYOD outer framing —
+that cook still looks post-export (RAS pack or unlocated pretty-writer).
+
 ## MemoryFile ChunkHeader (rlmfc REA, issue #14)
 
 `createChunk(id, version)` writes:

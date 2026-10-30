@@ -96,12 +96,18 @@ RPS particle exports observed so far stay in the flat tagged regime.
 | `.pse` (editor) | Untagged LE `u32` pairs (`0x30`/`4` emitter, `0x71`/`3` curve, …) + `u8`-len names |
 | `.rps` (runtime) | MemoryFile int tags (`0x14 0x30`, `0x14 0x04`, …) |
 
-`scan_pse_emitters` harvests emitter names from the PSE raw pattern for export WIP.
+`scan_pse_emitters` harvests editor-side emitter names. Retail `.rps` does **not**
+carry those names on the wire (BYOD candle: only texture path `0x0d` strings + JPEG
+`0x13` blobs). Names stay a PSE/editor concern.
 
 **Curves:** PSE stores editor keyframes (name + control points after `0x71`/`3`).
 RPS stores a **sampled grid** written by `FUN_00432fd0` (channels × samples f32s)
-via evaluator `FUN_00432240`. Export stubs currently emit placeholder samples;
-full `-e` parity needs that sampler (or a fixture capture from retail `-e`).
+via evaluator `FUN_00432240`. Export stubs sample PSE floats with
+`sample_linear` using **header word0 as channel count** (Rgb color c → 3ch).
+Retail sampler fidelity (`FUN_00432240`) and Wine `-e` capture still open.
+
+**Textures:** `write_embedded_file` matches candle (`str` + JPEG blob, or int `0`
+external). CLI: `openpfx export-root --emitter-stubs --embed-jpeg FILE`.
 
 ### Curve object offsets (`FUN_00432fd0` / `FUN_00432240`, ParticleFX.exe)
 
@@ -122,12 +128,12 @@ Per keyframe (through list cursor): time at `*node`, channel values at
 
 After `0x71`/`3` + `u8` + `'t'` + name:
 
-1. Seven LE `u32` header words (semantics WIP; 4th often `2`/`3`)
-2. Run of LE `f32` until sentinel **`50 50 50`** (`PPP`)
-3. Simple 1-channel curves often store `[t0, v0, t1, v1, …]` (BYOD Size m:
-   `0,1, 0,2` — times may be relative/placeholder)
+1. Seven LE `u32` header words — **word0 = channel count** (1/2/3 observed)
+2. Run of LE `f32` until sentinel **`50 50 50`** (`PPP`) (trim denormal padding)
+3. Keyframes: `t` + `channels` values (Size m = `(t,v)`; Rgb = `(t,r,g,b)`)
 
-Rust: `scan_pse_curves` / `parse_pse_curve_floats` / `sample_linear`.
+Rust: `scan_pse_curves` / `parse_pse_curve_floats` / `pse_curve_to_keyframes` /
+`sample_linear` / `SampledCurve`.
 
 ### Version / structure gate (load)
 
