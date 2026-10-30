@@ -1,6 +1,6 @@
 use maxfx_engine::{
-    discover_ras_files, list_level_packages, looks_like_ldb_or_ai, open_archive, parse_levels_txt,
-    split_ldb_records,
+    discover_ras_files, list_level_packages, looks_like_ldb_or_ai, looks_like_memory_file_ldb,
+    open_archive, parse_levels_txt, split_ldb_records, LDB_IMPORT_VERSION,
 };
 use openras::RasArchive;
 use std::env;
@@ -19,8 +19,17 @@ fn main() -> ExitCode {
         if ext.eq_ignore_ascii_case("ldb") || ext.eq_ignore_ascii_case("ai") {
             return match std::fs::read(p) {
                 Ok(data) => {
+                    if looks_like_memory_file_ldb(&data) {
+                        println!(
+                            "{}: {} bytes, MemoryFile-native (version tag {:#x})",
+                            p.display(),
+                            data.len(),
+                            LDB_IMPORT_VERSION
+                        );
+                        return ExitCode::SUCCESS;
+                    }
                     if !looks_like_ldb_or_ai(&data) {
-                        eprintln!("error: missing LDB/AI preamble");
+                        eprintln!("error: missing LDB/AI preamble (and not 14 {:#x} MF head)", LDB_IMPORT_VERSION);
                         return ExitCode::FAILURE;
                     }
                     let recs = split_ldb_records(&data).unwrap();
