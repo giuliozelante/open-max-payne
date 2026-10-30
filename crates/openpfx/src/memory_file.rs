@@ -133,6 +133,7 @@ impl MemoryFileWriter {
     /// `FUN_0041ab00` field stream after the `0x60`/`5` header (no graphs).
     /// Layout matches BYOD candle bytes after the object header:
     /// `uint, f32, uint, f32, uint, int, int`.
+    #[allow(clippy::too_many_arguments)]
     pub fn write_particle_system_fields(
         &mut self,
         u_a: u8,
@@ -164,6 +165,50 @@ impl MemoryFileWriter {
     /// `FUN_00419be0` graph section header (`0x31` + count). Nested nodes omitted.
     pub fn write_graph_header(&mut self, count: u8) {
         self.write_object_header(obj::GRAPH, count);
+    }
+
+    /// `FUN_00432fd0` sampled curve: header `0x71`/`3` + channel count + sample count + f32 grid.
+    ///
+    /// `values` length must be `channels * samples` in sample-major order
+    /// (for each sample, emit all channels).
+    pub fn write_curve(
+        &mut self,
+        channels: u8,
+        samples: u8,
+        values: &[f32],
+    ) -> Result<(), PfxError> {
+        let need = channels as usize * samples as usize;
+        if values.len() != need {
+            return Err(PfxError::Msg(format!(
+                "curve needs {need} floats, got {}",
+                values.len()
+            )));
+        }
+        self.write_object_header(obj::CURVE, obj::CURVE_VER);
+        self.write_int_u8(channels);
+        self.write_int_u8(samples);
+        for v in values {
+            self.write_f32(*v);
+        }
+        Ok(())
+    }
+
+    /// `FUN_00418190` texture embed: relative path string + optional JPEG/blob bytes.
+    ///
+    /// When `data` is `Some`, matches the `param_3 == 0` branch (size +
+    /// `R_MemoryFile::write` → on-disk `0x13` blob). `None` writes int `0`
+    /// (external reference, no embed).
+    pub fn write_embedded_file(
+        &mut self,
+        relative_path: &str,
+        data: Option<&[u8]>,
+    ) -> Result<(), PfxError> {
+        self.write_str(relative_path)?;
+        match data {
+            Some(bytes) => self.write_blob(bytes)?,
+            None => self.write_int_u8(0),
+        }
+        Ok(())
     }
 }
 
@@ -202,6 +247,35 @@ mod tests {
         w.write_pse_preamble(96, 5, 12, 2.5, 10, 2.5).unwrap();
         let via_helper = crate::rps::pse_header_to_rps_preamble(96, 5, 12, 2.5, 10, 2.5).unwrap();
         assert_eq!(w.as_bytes(), via_helper.as_slice());
+    }
+
+    #[test]
+    fn curve_matches_candle_first_curve_header() {
+        let samples: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
+        let mut w = MemoryFileWriter::new();
+        w.write_curve(1, 16, &samples).unwrap();
+        let h = parse_rps(w.as_bytes()).unwrap();
+        assert!(matches!(
+            &h.values[0],
+            crate::rps::RpsValue::U8 {
+                value: 0x71,
+                ..
+            }
+        ));
+        assert!(matches!(&h.values[1], crate::rps::RpsValue::U8 { value: 3, .. }));
+        assert!(matches!(&h.values[2], crate::rps::RpsValue::U8 { value: 1, .. }));
+        assert!(matches!(&h.values[3], crate::rps::RpsValue::U8 { value: 16, .. }));
+        assert_eq!(h.values.len(), 4 + 16);
+    }
+
+    #[test]
+    fn embedded_file_writes_str_then_blob() {
+        let mut w = MemoryFileWriter::new();
+        w.write_embedded_file(r"fire\x.JPG", Some(b"\xff\xd8\xff\xd9"))
+            .unwrap();
+        let h = parse_rps(w.as_bytes()).unwrap();
+        assert!(matches!(&h.values[0], crate::rps::RpsValue::Str { value } if value == r"fire\x.JPG"));
+        assert!(matches!(&h.values[1], crate::rps::RpsValue::Blob { data } if data == b"\xff\xd8\xff\xd9"));
     }
 
     #[test]

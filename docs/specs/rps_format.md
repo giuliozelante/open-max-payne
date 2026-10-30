@@ -44,6 +44,10 @@ psysedit [-h] [-y] [-r] [-e filename(s)] [-d directory]
 | `FUN_00417570` | Emitter / node | type `0x30`, ver `4` (+ paths, curves) |
 | `FUN_00418fe0` | Companion block | type `0x40`, ver `2` |
 | `FUN_00432fd0` | Sampled curve | type `0x71`, ver `3` then f32 samples |
+| `FUN_00418190` | Embed texture | `operator<<(CString path)` + size/`MemoryFile::write` → str + blob |
+
+`FUN_00418190(mf, path, flag)`: loads file via `R_File::load`, writes relative path,
+then either embeds bytes (`flag==0`) or writes int `0` (no embed).
 
 `RLMFC.DLL::operator<<` overload → on-disk tags:
 
