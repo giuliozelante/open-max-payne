@@ -44,3 +44,4 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+rust_out
