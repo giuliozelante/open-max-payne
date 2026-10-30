@@ -11,14 +11,21 @@
 | `.pse` | ParticleFX **editor** project (paths, graphs, emitter params) |
 | `.rps` | **Runtime** particle set cooked for the game |
 
-## CLI (from ParticleFX.exe strings)
+## CLI (from ParticleFX.exe strings + help builder `FUN_00405a10`)
 
 ```
--e    Export files (.pse -> .rps)
+psysedit [-h] [-y] [-r] [-e filename(s)] [-d directory]
+  -h   Display this help
+  -y   Allow overwrite of existing files
+  -r   Override readonly flag of existing files
+  -e   Export files (.pse -> .rps)   # filename may contain wildcards; not recursive
+  -d   Export destination directory (must exist)
 ```
 
+Note: help says to combine `-y -r` when replacing readonly outputs.
 MFC doc filter: `ParticleFX Files (*.pse)`. Runtime filter: `Runtime Particle Sets (*.rps)`.
 Export UI: `Export data to run particle system in other programs` (Ctrl+E).
+Runtime particle code largely lives in `E2MFC.DLL` / `RLMFC.DLL` imports — export body REA should follow those next.
 
 RPS load errors (version gate):
 
