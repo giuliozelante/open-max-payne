@@ -178,6 +178,11 @@ Retail RAS BYOD blobs do **not** — they use the space/`>` outer framing instea
 (possible post-export pack, or a different cook path). Both observations stay in
 the spec until a round-trip MaxED export fixture is captured locally.
 
+The 16-space + `>` preamble is **not** a string constant in `MaxPayne.exe`,
+`MaxED.exe`, or `rlmfc.dll` (byte search negative). It is produced at write time
+by an as-yet-unlocated cook/pretty path — not by `ExportLevel`'s tagged `0x20`
+writer alone.
+
 ## MemoryFile ChunkHeader (rlmfc REA, issue #14)
 
 `createChunk(id, version)` writes:
