@@ -117,8 +117,9 @@ of **surf** records (`parse_ras_ldb_surfs_ex`):
 <compressed int> × 6
 ```
 
-Kind `0x13` = MemoryFile payload; schema is face **or** surf (try both). Further
-`1c 13` sections still WIP. ImportLevel `0x20` gate not yet located.
+Kind `0x13` = MemoryFile payload; try schemas in order: **faces**, **surfs**,
+**int list** (`parse_ras_ldb_ints_ex` — Startup §4 has 18944 ints). Further
+sections still WIP. ImportLevel `0x20` gate not yet located.
 
 ### Retail RAS `.ai`
 

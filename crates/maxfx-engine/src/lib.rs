@@ -258,6 +258,19 @@ pub struct RasLdbSurf {
     pub attrs: [i32; 6],
 }
 
+/// Parse `max` compressed ints from a kind-`0x13` body (BYOD Startup §4 index list).
+pub fn parse_ras_ldb_ints_ex(body: &[u8], max: usize) -> (Vec<i32>, usize) {
+    let mut out = Vec::with_capacity(max);
+    let mut i = 0;
+    while out.len() < max && i < body.len() {
+        match read_mf_i32(body, &mut i) {
+            Some(v) => out.push(v),
+            None => break,
+        }
+    }
+    (out, i)
+}
+
 /// Parse up to `max` surf records; returns `(records, bytes_consumed)`.
 pub fn parse_ras_ldb_surfs_ex(body: &[u8], max: usize) -> (Vec<RasLdbSurf>, usize) {
     let mut out = Vec::new();
@@ -382,10 +395,13 @@ pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
                 let n = sec.count as usize;
                 let (faces, face_bytes) = parse_ras_ldb_faces_ex(body, n);
                 let (surfs, surf_bytes) = parse_ras_ldb_surfs_ex(body, n);
+                let (ints, int_bytes) = parse_ras_ldb_ints_ex(body, n);
                 let consumed = if faces.len() == n {
                     face_bytes
                 } else if surfs.len() == n {
                     surf_bytes
+                } else if ints.len() == n {
+                    int_bytes
                 } else {
                     out.push(RasLdbSectionSpan {
                         offset: off,
