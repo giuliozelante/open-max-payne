@@ -394,9 +394,12 @@ pub fn ras_ldb_import_paths(data: &[u8], max: usize) -> Vec<String> {
             let len = slice[i + 2] as usize;
             let start = i + 3;
             if start + len <= slice.len() {
-                let s = String::from_utf8_lossy(&slice[start..start + len]).into_owned();
-                if s.chars().any(|c| c.is_ascii_alphanumeric()) {
-                    out.push(s);
+                let bytes = &slice[start..start + len];
+                if bytes.iter().all(|&b| (0x20..=0x7e).contains(&b)) {
+                    let s = String::from_utf8(bytes.to_vec()).unwrap_or_default();
+                    if s.contains('\\') || s.contains('/') || s.contains('.') {
+                        out.push(s);
+                    }
                 }
                 i = start + len;
                 continue;
