@@ -157,11 +157,29 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 Vec::new()
             };
+            let textures = if emitter_stubs {
+                h.ascii_paths
+                    .iter()
+                    .filter(|p| {
+                        let u = p.to_ascii_uppercase();
+                        u.ends_with(".JPG") || u.ends_with(".TGA") || u.ends_with(".BMP")
+                    })
+                    .map(|p| {
+                        p.rsplit(['\\', '/'])
+                            .next()
+                            .unwrap_or("particle.JPG")
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             let bytes = pse_to_rps_export_with_curves(
                 &h,
                 &PseExportOptions {
                     empty_graph: empty_graph && stubs.is_empty(),
                     emitter_stubs: stubs.clone(),
+                    texture_stubs: textures,
                 },
                 &sampled,
             )?;

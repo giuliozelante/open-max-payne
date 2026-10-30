@@ -264,9 +264,11 @@ pub fn pse_to_rps_root(h: &PseHeader) -> Result<Vec<u8>, PfxError> {
 pub struct PseExportOptions {
     /// Append graph section with zero emitters (`0x31`/`1` + param + count `0`).
     pub empty_graph: bool,
-    /// Append graph section + stub emitter-open (+ 4 minimal curves + companion open)
-    /// per name. **Not** game-complete — texture embeds / companion body incomplete.
+    /// Append graph section + stub emitter-open (+ sampled/placeholder curves +
+    /// external texture ref + companion stub) per name.
     pub emitter_stubs: Vec<String>,
+    /// Optional relative texture path per emitter (external ref, no JPEG bytes).
+    pub texture_stubs: Vec<String>,
 }
 
 /// Like [`pse_to_rps_root`], with optional graph / emitter stubs.
@@ -342,7 +344,16 @@ pub fn pse_to_rps_export_with_curves(
                     w.write_curve(1, 16, &c16)?;
                 }
             }
-            // Texture/path list omitted; zero companion body (FUN_00418fe0 order).
+            // Candle: four small ints then texture embed(s) before companion.
+            for _ in 0..4 {
+                w.write_int_u8(1);
+            }
+            let tex = opts
+                .texture_stubs
+                .get(ei)
+                .map(String::as_str)
+                .unwrap_or(r"stub\particle.JPG");
+            w.write_embedded_file(tex, None)?;
             w.write_companion_stub()?;
         }
     } else if opts.empty_graph {
