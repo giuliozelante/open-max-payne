@@ -118,6 +118,17 @@ Per keyframe (through list cursor): time at `*node`, channel values at
 `node+4+channel*4`. Sampler walks keyframes until `time >= t`, then interpolates
 (`FUN_00431dd0` / `FUN_004320b0` / `FUN_00433b60`).
 
+### PSE curve on-disk (editor)
+
+After `0x71`/`3` + `u8` + `'t'` + name:
+
+1. Seven LE `u32` header words (semantics WIP; 4th often `2`/`3`)
+2. Run of LE `f32` until sentinel **`50 50 50`** (`PPP`)
+3. Simple 1-channel curves often store `[t0, v0, t1, v1, …]` (BYOD Size m:
+   `0,1, 0,2` — times may be relative/placeholder)
+
+Rust: `scan_pse_curves` / `parse_pse_curve_floats` / `sample_linear`.
+
 ### Version / structure gate (load)
 
 `FUN_00422050` (`operator>>` pair):

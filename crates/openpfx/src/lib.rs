@@ -9,6 +9,25 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use curve_sample::{sample_linear, Keyframe as CurveKeyframe};
+
+/// Interpret [`PseCurveFloats::floats`] as interleaved `(t, v)` for one channel.
+pub fn pse_curve_to_keyframes(parsed: &PseCurveFloats) -> Result<Vec<CurveKeyframe>, PfxError> {
+    if parsed.floats.len() % 2 != 0 {
+        return Err(PfxError::Msg(format!(
+            "curve {}: odd float count {}",
+            parsed.name,
+            parsed.floats.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(parsed.floats.len() / 2);
+    for pair in parsed.floats.chunks_exact(2) {
+        out.push(CurveKeyframe {
+            t: pair[0],
+            values: vec![pair[1]],
+        });
+    }
+    Ok(out)
+}
 pub use memory_file::{obj as rps_obj, MemoryFileWriter};
 pub use rps::{
     encode_rps, parse_rps, pse_header_to_rps_preamble, read_rps, roundtrip_rps, RpsHeader, RpsValue,
@@ -422,5 +441,10 @@ mod tests {
         assert_eq!(parsed.floats.len(), 4);
         assert!((parsed.floats[1] - 1.0).abs() < 1e-5);
         assert!((parsed.floats[3] - 4.0).abs() < 1e-5);
+        let kfs = pse_curve_to_keyframes(&parsed).unwrap();
+        assert_eq!(kfs.len(), 2);
+        let grid = sample_linear(&kfs, 1, 0.0, 1.0, 2).unwrap();
+        assert!((grid[0] - 1.0).abs() < 1e-5);
+        assert!((grid[1] - 4.0).abs() < 1e-5);
     }
 }
