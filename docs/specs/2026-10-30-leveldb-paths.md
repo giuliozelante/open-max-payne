@@ -99,6 +99,18 @@ Top-level sections share tag byte **`0x1c`** + kind byte + LE `u16` count:
 `LDB_RAS_MAGIC` = LE u16 for `1c 12`. Helpers: `parse_ras_ldb_section_at`,
 `parse_ras_ldb_header`, `count_ras_ldb_leading_vec3`, `ras_ldb_count_section_end`.
 
+Kind `0x13` body (Startup): openpfx MemoryFile walk of the first 64 KiB has no
+unknown tags. Repeating face-like groups:
+
+```
+14 <i0>  14 <i1>  14 <i2>   # vertex indices into the 0x12 cloud?
+13 <u16>                    # compressed int (e.g. 804)
+16 <vec3>  16 <vec3>        # normal + point
+```
+
+`count` ≈ group count (Startup 19149; ~47 B/group toward the next `1c 12`).
+ImportLevel `0x20` gate not yet located in this stream.
+
 ### Retail RAS `.ai`
 
 Starts as a MemoryFile tag stream (`0x14 …`), e.g. Tutorial.ai:
