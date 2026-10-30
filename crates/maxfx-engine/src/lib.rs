@@ -250,6 +250,49 @@ pub fn parse_ras_ldb_faces(body: &[u8], max: usize) -> Vec<RasLdbFace> {
     parse_ras_ldb_faces_ex(body, max).0
 }
 
+/// Kind-`0x13` record: normal + point + six compressed ints (BYOD Startup §3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RasLdbSurf {
+    pub normal: [f32; 3],
+    pub point: [f32; 3],
+    pub attrs: [i32; 6],
+}
+
+/// Parse up to `max` surf records; returns `(records, bytes_consumed)`.
+pub fn parse_ras_ldb_surfs_ex(body: &[u8], max: usize) -> (Vec<RasLdbSurf>, usize) {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while out.len() < max && i < body.len() {
+        let start = i;
+        let Some(normal) = read_mf_vec3(body, &mut i) else {
+            break;
+        };
+        let Some(point) = read_mf_vec3(body, &mut i) else {
+            break;
+        };
+        let mut attrs = [0i32; 6];
+        let mut ok = true;
+        for a in &mut attrs {
+            match read_mf_i32(body, &mut i) {
+                Some(v) => *a = v,
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok || i == start {
+            break;
+        }
+        out.push(RasLdbSurf {
+            normal,
+            point,
+            attrs,
+        });
+    }
+    (out, i)
+}
+
 /// Like [`parse_ras_ldb_faces`], also returning bytes consumed from `body`.
 pub fn parse_ras_ldb_faces_ex(body: &[u8], max: usize) -> (Vec<RasLdbFace>, usize) {
     let mut out = Vec::new();
@@ -336,9 +379,14 @@ pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
             }
             LDB_SECTION_KIND_MF => {
                 let body = &data[off + 4..];
-                let (faces, consumed) = parse_ras_ldb_faces_ex(body, sec.count as usize);
-                if faces.len() != sec.count as usize {
-                    // Unknown 0x13 schema — stop before this section.
+                let n = sec.count as usize;
+                let (faces, face_bytes) = parse_ras_ldb_faces_ex(body, n);
+                let (surfs, surf_bytes) = parse_ras_ldb_surfs_ex(body, n);
+                let consumed = if faces.len() == n {
+                    face_bytes
+                } else if surfs.len() == n {
+                    surf_bytes
+                } else {
                     out.push(RasLdbSectionSpan {
                         offset: off,
                         kind: sec.kind,
@@ -346,7 +394,7 @@ pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
                         end: off,
                     });
                     break;
-                }
+                };
                 let end = off + 4 + consumed;
                 out.push(RasLdbSectionSpan {
                     offset: off,
@@ -843,6 +891,26 @@ mod tests {
         assert_eq!(spans[1].count, 1);
         assert_eq!(spans[1].offset, face_start);
         assert_eq!(spans[2].end, spans[2].offset); // stop marker
+    }
+
+    #[test]
+    fn parses_surf_records() {
+        let mut body = Vec::new();
+        body.push(0x16);
+        for v in [1.0f32, 0.0, 0.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        body.push(0x16);
+        for v in [-1.5f32, 2.5, 6.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [0u8, 6, 1, 6, 0, 6] {
+            body.extend_from_slice(&[0x14, v]);
+        }
+        let (surfs, n) = parse_ras_ldb_surfs_ex(&body, 1);
+        assert_eq!(surfs.len(), 1);
+        assert_eq!(n, body.len());
+        assert_eq!(surfs[0].attrs, [0, 6, 1, 6, 0, 6]);
     }
 
     #[test]

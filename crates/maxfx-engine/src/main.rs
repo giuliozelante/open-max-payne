@@ -74,7 +74,7 @@ fn main() -> ExitCode {
                             for s in &spans {
                                 let label = match s.kind {
                                     LDB_SECTION_KIND_VEC3 => "vec3",
-                                    LDB_SECTION_KIND_MF if s.end > s.offset => "faces",
+                                    LDB_SECTION_KIND_MF if s.end > s.offset => "mf-ok",
                                     LDB_SECTION_KIND_MF => "mf-stop",
                                     _ => "other",
                                 };
