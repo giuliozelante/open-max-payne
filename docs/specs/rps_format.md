@@ -103,8 +103,10 @@ carry those names on the wire (BYOD candle: only texture path `0x0d` strings + J
 **Curves:** PSE stores editor keyframes (name + control points after `0x71`/`3`).
 RPS stores a **sampled grid** written by `FUN_00432fd0` (channels × samples f32s)
 via evaluator `FUN_00432240`. Export stubs sample PSE floats with
-`sample_linear` using **header word0 as channel count** (Rgb color c → 3ch).
-Retail sampler fidelity (`FUN_00432240`) and Wine `-e` capture still open.
+`sample_linear` using **header word0 = channels**, **word6 = keyframe count**.
+BYOD Examples layout is **times then values** (`t[0..kf)` + values, with short
+Rgb/Emission floats broadcast as gray/scalars). Interleaved `(t,ch…)` remains a
+fallback. Wine `-e` still hangs under staging; game-accept still open.
 
 **Textures:** `write_embedded_file` matches candle (`str` + JPEG blob, or int `0`
 external). CLI: `openpfx export-root --emitter-stubs --embed-jpeg FILE`.
@@ -128,9 +130,10 @@ Per keyframe (through list cursor): time at `*node`, channel values at
 
 After `0x71`/`3` + `u8` + `'t'` + name:
 
-1. Seven LE `u32` header words — **word0 = channel count** (1/2/3 observed)
+1. Seven LE `u32` header words — **word0 = channel count**, **word6 = keyframe count**
 2. Run of LE `f32` until sentinel **`50 50 50`** (`PPP`) (trim denormal padding)
-3. Keyframes: `t` + `channels` values (Size m = `(t,v)`; Rgb = `(t,r,g,b)`)
+3. Keyframes: times-first `t×kf` then values (`kf×ch` or `kf` scalars broadcast);
+   interleaved `(t,ch…)` fallback when times-first does not fit
 
 Rust: `scan_pse_curves` / `parse_pse_curve_floats` / `pse_curve_to_keyframes` /
 `sample_linear` / `SampledCurve`.

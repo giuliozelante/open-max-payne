@@ -28,14 +28,63 @@ fn trim_curve_floats(floats: &[f32]) -> Vec<f32> {
     out
 }
 
+fn times_monotonic(times: &[f32]) -> bool {
+    times.windows(2).all(|w| w[1] >= w[0])
+}
+
 /// Interpret [`PseCurveFloats`] as keyframes.
 ///
-/// Layout: `channels = header_words[0]`; each keyframe is `t` then `channels` values
-/// (BYOD Size m = 1ch `(t,v)`; Rgb color c = 3ch `(t,r,g,b)`). Floats are trimmed of
-/// denormal padding before pairing.
+/// `channels = header_words[0]`, `keyframe_count = header_words[6]` when non-zero.
+/// BYOD Examples curves store **times then values**: `t[0..kf)` followed by either
+/// `kf * channels` channel values or `kf` scalars broadcast to all channels
+/// (Rgb often ships as gray endpoints). Falls back to interleaved `(t, ch…)` when
+/// the times-first layout does not fit.
 pub fn pse_curve_to_keyframes(parsed: &PseCurveFloats) -> Result<Vec<CurveKeyframe>, PfxError> {
     let channels = pse_curve_channels(parsed);
     let floats = trim_curve_floats(&parsed.floats);
+    let kf = parsed.header_words[6] as usize;
+
+    if kf >= 1 {
+        let full = kf + kf * channels;
+        let broadcast = kf * 2;
+        if floats.len() >= full {
+            let times = &floats[..kf];
+            if times_monotonic(times) {
+                let mut out = Vec::with_capacity(kf);
+                let vals = &floats[kf..full];
+                for i in 0..kf {
+                    let start = i * channels;
+                    out.push(CurveKeyframe {
+                        t: times[i],
+                        values: vals[start..start + channels].to_vec(),
+                    });
+                }
+                return Ok(out);
+            }
+        }
+        if floats.len() >= broadcast {
+            let times = &floats[..kf];
+            let interleaved_ok = channels == 1
+                && floats.len() >= kf * 2
+                && times_monotonic(
+                    &(0..kf)
+                        .map(|i| floats[i * 2])
+                        .collect::<Vec<_>>(),
+                );
+            if times_monotonic(times) && (channels > 1 || !interleaved_ok) {
+                let mut out = Vec::with_capacity(kf);
+                for i in 0..kf {
+                    let s = floats[kf + i];
+                    out.push(CurveKeyframe {
+                        t: times[i],
+                        values: vec![s; channels],
+                    });
+                }
+                return Ok(out);
+            }
+        }
+    }
+
     let stride = 1 + channels;
     if floats.len() < stride {
         return Err(PfxError::Msg(format!(
@@ -635,30 +684,51 @@ mod tests {
     }
 
     #[test]
-    fn rgb_curve_parses_three_channels_from_header_word0() {
+    fn rgb_curve_broadcasts_gray_endpoints_when_short() {
+        // BYOD Examples: times [0,1] + scalar [0,255] → 3ch broadcast (word6=kf=2).
         let mut raw = vec![0u8; 36];
         raw.extend_from_slice(&[0x71, 0, 0, 0, 3, 0, 0, 0, 1, b't', 11]);
         raw.extend_from_slice(b"Rgb color c");
         for w in [3u32, 0, 0, 3, 1, 1, 2] {
             raw.extend_from_slice(&w.to_le_bytes());
         }
-        // one keyframe: t=0, rgb=(10,20,30) then denormal padding then PPP
-        for v in [0.0f32, 10.0, 20.0, 30.0] {
+        for v in [0.0f32, 1.0, 0.0, 255.0] {
             raw.extend_from_slice(&v.to_le_bytes());
         }
-        raw.extend_from_slice(&1e-40f32.to_le_bytes());
         raw.extend_from_slice(&[0x50, 0x50, 0x50]);
         let c = &scan_pse_curves(&raw)[0];
         let parsed = parse_pse_curve_floats(&raw, c).unwrap();
         assert_eq!(pse_curve_channels(&parsed), 3);
         let kfs = pse_curve_to_keyframes(&parsed).unwrap();
-        assert_eq!(kfs.len(), 1);
-        assert_eq!(kfs[0].values, vec![10.0, 20.0, 30.0]);
+        assert_eq!(kfs.len(), 2);
+        assert_eq!(kfs[0].values, vec![0.0, 0.0, 0.0]);
+        assert_eq!(kfs[1].values, vec![255.0, 255.0, 255.0]);
         let grid = sample_linear(&kfs, 3, 0.0, 1.0, 2).unwrap();
-        assert_eq!(grid.len(), 6); // sample-major: s0.rgb, s1.rgb
-        assert!((grid[0] - 10.0).abs() < 1e-5);
-        assert!((grid[2] - 30.0).abs() < 1e-5);
-        assert!((grid[3] - 10.0).abs() < 1e-5);
+        assert_eq!(grid.len(), 6);
+        assert!((grid[0] - 0.0).abs() < 1e-5);
+        assert!((grid[5] - 255.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn size_curve_uses_times_then_values() {
+        // BYOD Fire_Medium Size m: [0,1,0,2] → (t=0,v=0), (t=1,v=2)
+        let mut raw = vec![0u8; 36];
+        raw.extend_from_slice(&[0x71, 0, 0, 0, 3, 0, 0, 0, 1, b't', 6]);
+        raw.extend_from_slice(b"Size m");
+        for w in [1u32, 0, 0, 3, 1, 1, 2] {
+            raw.extend_from_slice(&w.to_le_bytes());
+        }
+        for v in [0.0f32, 1.0, 0.0, 2.0] {
+            raw.extend_from_slice(&v.to_le_bytes());
+        }
+        raw.extend_from_slice(&[0x50, 0x50, 0x50]);
+        let c = &scan_pse_curves(&raw)[0];
+        let kfs = pse_curve_to_keyframes(&parse_pse_curve_floats(&raw, c).unwrap()).unwrap();
+        assert_eq!(kfs.len(), 2);
+        assert!((kfs[0].t - 0.0).abs() < 1e-5 && (kfs[0].values[0] - 0.0).abs() < 1e-5);
+        assert!((kfs[1].t - 1.0).abs() < 1e-5 && (kfs[1].values[0] - 2.0).abs() < 1e-5);
+        let grid = sample_linear(&kfs, 1, 0.0, 1.0, 3).unwrap();
+        assert!((grid[1] - 1.0).abs() < 1e-5);
     }
 
     #[test]
