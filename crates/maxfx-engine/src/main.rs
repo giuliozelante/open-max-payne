@@ -1,4 +1,5 @@
-use maxfx_engine::{discover_ras_files, open_archive};
+use maxfx_engine::{discover_ras_files, list_level_packages, open_archive};
+use openras::RasArchive;
 use std::env;
 use std::path::Path;
 use std::process::ExitCode;
@@ -34,12 +35,28 @@ fn main() -> ExitCode {
             }
         };
     }
-    match open_archive(p) {
-        Ok(a) => {
-            println!(
-                "{}: {} files, {} dirs, ver={} compat={}",
-                a.label, a.file_count, a.dir_count, a.version, a.compatibility
-            );
+    match RasArchive::read(p) {
+        Ok(arc) => {
+            match open_archive(p) {
+                Ok(a) => println!(
+                    "{}: {} files, {} dirs, ver={} compat={}",
+                    a.label, a.file_count, a.dir_count, a.version, a.compatibility
+                ),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+            let pkgs = list_level_packages(&arc);
+            if !pkgs.is_empty() {
+                println!("level packages ({}):", pkgs.len());
+                for pkg in pkgs {
+                    match &pkg.ai {
+                        Some(ai) => println!("  {} + {}", pkg.ldb, ai),
+                        None => println!("  {} (no .ai)", pkg.ldb),
+                    }
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {

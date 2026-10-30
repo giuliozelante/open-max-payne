@@ -45,6 +45,50 @@ pub fn open_archive(path: &Path) -> Result<EngineArchive, EngineError> {
     })
 }
 
+/// Level package entries inside an opened `x_level*.ras` (paths use archive win form).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelPackage {
+    pub ldb: String,
+    pub ai: Option<String>,
+}
+
+/// Pair `.ldb` / `.ai` basenames under `\\data\\database\\levels\\` (BYOD probe helper).
+pub fn list_level_packages(arc: &RasArchive) -> Vec<LevelPackage> {
+    let mut ldbs: Vec<String> = Vec::new();
+    let mut ais: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for f in &arc.files {
+        let dname = arc
+            .directories
+            .get(f.dir_index as usize)
+            .map(|d| d.name.as_str())
+            .unwrap_or("\\");
+        let full = format!("{dname}{}", f.name);
+        let lower = full.to_ascii_lowercase();
+        if !lower.contains("\\data\\database\\levels\\") {
+            continue;
+        }
+        if lower.ends_with(".ldb") {
+            ldbs.push(full);
+        } else if lower.ends_with(".ai") {
+            let key = lower.trim_end_matches(".ai").to_string();
+            ais.insert(key, full);
+        }
+    }
+    ldbs.sort();
+    ldbs.into_iter()
+        .map(|ldb| {
+            let key = ldb
+                .to_ascii_lowercase()
+                .trim_end_matches(".ldb")
+                .to_string();
+            LevelPackage {
+                ai: ais.get(&key).cloned(),
+                ldb,
+            }
+        })
+        .collect()
+}
+
 /// Discover `*.ras` / `*.RAS` under `dir` — mirrors `R_File::loadArchives` FindFirstFile glob
 /// (order is filesystem-dependent, same as the retail loader).
 pub fn discover_ras_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, EngineError> {
@@ -99,6 +143,51 @@ mod tests {
         assert_eq!(opened.file_count, 1);
         assert_eq!(opened.compatibility, 3);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_level_packages_pairs_ldb_ai() {
+        let arc = RasArchive {
+            seed: 1,
+            version: 1.2,
+            compatibility: 3,
+            directories: vec![
+                RasDirEntry {
+                    name: "\\".into(),
+                    timestamp: [0; 16],
+                },
+                RasDirEntry {
+                    name: "\\data\\database\\levels\\part1\\".into(),
+                    timestamp: [0; 16],
+                },
+            ],
+            files: vec![
+                RasFileEntry {
+                    name: "Part1_Level1.ldb".into(),
+                    dir_index: 1,
+                    data: b"LDB".to_vec(),
+                    compression_mode: MODE_STORED,
+                    compressed_data: None,
+                    unknown_0: 0,
+                    unknown_1: 0,
+                    timestamp: [0; 16],
+                },
+                RasFileEntry {
+                    name: "Part1_Level1.ai".into(),
+                    dir_index: 1,
+                    data: b"AI".to_vec(),
+                    compression_mode: MODE_STORED,
+                    compressed_data: None,
+                    unknown_0: 0,
+                    unknown_1: 0,
+                    timestamp: [0; 16],
+                },
+            ],
+        };
+        let pkgs = list_level_packages(&arc);
+        assert_eq!(pkgs.len(), 1);
+        assert!(pkgs[0].ldb.ends_with("Part1_Level1.ldb"));
+        assert!(pkgs[0].ai.as_ref().unwrap().ends_with("Part1_Level1.ai"));
     }
 
     #[test]
