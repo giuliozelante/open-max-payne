@@ -38,7 +38,8 @@ Observed on `Bullet_Impact_default.pse` (local vendor fixture; not in git):
 | 4 | `5` | version / count guess |
 | 8 | `0x23` (35) | varies by project |
 | 12 | float `2.5` | |
-| 16 | float `2.5` | |
+| 16 | `0x0A` (10) | u32 — **not** a float |
+| 20 | float `2.5` | |
 | later | ASCII | `C:\Program Files\MAX-FX Tools\...` paths, bitmap leaf names |
 
 `openpfx dump-pse` prints these fields (synthetic unit test; no retail bytes in CI).

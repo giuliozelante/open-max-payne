@@ -35,7 +35,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.cmd {
         Cmd::DumpPse { path } => {
             let h = read_pse(&path)?;
-            println!("word0={} word1={} word2={}", h.word0, h.word1, h.word2);
+            println!(
+                "word0={} word1={} word2={} word3={}",
+                h.word0, h.word1, h.word2, h.word3
+            );
             println!("float_a={} float_b={}", h.float_a, h.float_b);
             println!("paths ({}):", h.ascii_paths.len());
             for p in &h.ascii_paths {

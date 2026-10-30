@@ -27,13 +27,24 @@ In / out:
 
 Level DB load tokens (exe strings): `X_LEVELDB_RC_LOAD`, `X_LEVELDB_LC_LOAD`, `X_LEVELDB_MC_LOAD`, `X_LEVELDB_SMC_LOAD`, `X_LEVELDB_FSMC_LOAD`, `X_LEVELDB_DMC_LOAD`, `X_LEVELDB_SLC_LOAD`, `X_LEVELDB_TI_LOAD`.
 
-Next REA increments (Ghidra timed out on full exe this session — resume with `rl.dll` first):
-  1. Decompile `R_File::loadArchives` — which `.ras` names are mounted and in what order
-  2. Trace one `X_LEVELDB_*_LOAD` into file paths inside the archive
-  3. Minimal draw: one room wireframe from extracted assets
+### `R_File::loadArchives` (`rl.dll` `0x1000e8f0`) — decompiled
+
+Behaviour (REA pseudocode + data bytes):
+
+1. `setArchiveHandling(this, 1)`
+2. Copy `\` into `m_path` (`DAT_10049604` = `"\\"`)
+3. `FindFirstFileA("*.RAS", …)` (`DAT_100495fc` = `"*.RAS"`) under that path
+4. For each hit: append `R_RASArchive` to `RASArchiveList`, call `loadArchiveHeader(this, entry, cFileName)`
+5. If `sm_strSecondaryArchiveSearchPath` is non-empty: append `"*.RAS"` and `FindFirstFileA` there too (mod / override path)
+
+**There is no hardcoded `x_level1.ras` list in `loadArchives`.** Mount order = Win32 find enumeration order for `*.RAS` in the game directory (plus optional secondary path). Localized `x_<lang>.ras` is picked up the same way.
+
+Next REA increments:
+  1. Trace one `X_LEVELDB_*_LOAD` into in-archive paths
+  2. Minimal draw: one room wireframe from extracted assets
 
 Done when:
   - [x] Crate + `open_archive` + synthetic test
   - [x] REA-backed note naming archive mount + level-load tokens
   - [x] CLI `maxfx-engine <archive.ras>` prints summary
-  - [ ] Decompiled `loadArchives` call chain + ordered RAS list
+  - [x] Decompiled `loadArchives`: mount = `FindFirstFile("*.RAS")` (+ optional secondary path)

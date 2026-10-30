@@ -55,4 +55,4 @@ Done when (north star — open):
   - [ ] Play path can prefer native engine when ready; Wine remains fallback
   - [ ] `openpfx` PSE→RPS export (`-e` parity) after RPS version REA
   - [x] Engine REA note naming archive mount + level-load tokens
-  - [ ] Decompiled `R_File::loadArchives` ordered RAS list
+  - [x] Decompiled `R_File::loadArchives` → `FindFirstFile("*.RAS")` (+ secondary path)
