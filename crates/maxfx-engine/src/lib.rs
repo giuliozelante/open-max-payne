@@ -810,6 +810,29 @@ pub fn parse_ras_ldb_import_point_stream_at(
         i = read_point_body(data, i)?;
         n += 1;
     }
+    // Trailing uncounted bodies (same shape, optional leading id).
+    loop {
+        let mark = i;
+        if matches!(data.get(i), Some(0x14 | 0x13 | 0x12 | 0x02)) {
+            if read_mf_i32(data, &mut i).is_none() {
+                i = mark;
+                break;
+            }
+        }
+        match read_point_body(data, i) {
+            Some(next) => {
+                i = next;
+                n += 1;
+            }
+            None => {
+                i = mark;
+                break;
+            }
+        }
+        if n > 500_000 {
+            break;
+        }
+    }
     Some((n as u32, i))
 }
 
@@ -822,10 +845,37 @@ fn read_point_body(data: &[u8], mut i: usize) -> Option<usize> {
         return None;
     }
     i += 1 + 8;
-    if data.get(i) != Some(&0x03) {
-        return None;
+    // Trailer field uses several MemoryFile int/uint encodings.
+    match data.get(i).copied() {
+        Some(0x03) => {
+            // raw i32 (tag 0x03 is also u32-4 in RPS; here it's signed i32)
+            if i + 5 > data.len() {
+                return None;
+            }
+            i += 5;
+        }
+        Some(0x02) | Some(0x14) | Some(0x13) | Some(0x12) => {
+            read_mf_i32(data, &mut i)?;
+        }
+        Some(0x0f) => {
+            // u32-3
+            if i + 4 > data.len() {
+                return None;
+            }
+            i += 4;
+        }
+        Some(0x10) => {
+            // u32-2
+            if i + 3 > data.len() {
+                return None;
+            }
+            i += 3;
+        }
+        Some(0x11) => {
+            read_mf_uint_u8(data, &mut i)?;
+        }
+        _ => return None,
     }
-    i += 1 + 4; // i32
     if data.get(i) != Some(&LDB_MF_BOOL_TAG) {
         return None;
     }
