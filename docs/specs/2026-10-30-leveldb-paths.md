@@ -108,7 +108,17 @@ Payloads are densely padded with `0x20`. Helpers:
 | `.ldb` | ~15 MiB | ~238k | Same `>` framing; even more space-heavy early on |
 
 **Not** a flat MemoryFile stream (skipping spaces still hits non-tag opcodes immediately).
-Opcode / section semantics need `X_LevelDBImportLevel` (or a `*_LOAD` handler) decompile.
+
+### `.ai` lead probes (part0_level1)
+
+| Lead | Approx count | Notes |
+|------|--------------|-------|
+| `0x89` | ~110 | dominant; opcode TBD |
+| `0x14` | ~72 | MemoryFile int tag as first dense byte |
+| `0xc7` | ~6 | `c7 <sub> <tail…>`; helper `LdbRecord::as_ai_c7` |
+| `0x80` | singleton rows | often 1-byte records |
+
+Opcode / section semantics still need importer decompile beyond the version gate.
 
 ## Done / next
 

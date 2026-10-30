@@ -84,6 +84,28 @@ pub fn classify_ldb_lead(lead: u8) -> &'static str {
     }
 }
 
+/// BYOD `.ai` probe: records whose space-stripped payload starts `c7 <u8>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiC7Record {
+    pub sub: u8,
+    /// Bytes after `c7 <sub>` (often MemoryFile-tagged).
+    pub tail: Vec<u8>,
+}
+
+impl LdbRecord {
+    /// Parse as `c7` opcode record if the dense payload matches.
+    pub fn as_ai_c7(&self) -> Option<AiC7Record> {
+        let s = self.space_stripped();
+        if s.len() < 2 || s[0] != 0xc7 {
+            return None;
+        }
+        Some(AiC7Record {
+            sub: s[1],
+            tail: s[2..].to_vec(),
+        })
+    }
+}
+
 /// One `>`-terminated record from a `.ldb` / `.ai` body (BYOD observation).
 ///
 /// Files start with [`LDB_PREAMBLE`], then a stream of payloads separated by
@@ -354,13 +376,16 @@ mod tests {
     #[test]
     fn split_ldb_records_on_gt_after_preamble() {
         let mut buf = Vec::from(LDB_PREAMBLE);
-        buf.extend_from_slice(b"  \xc7  \x14\n  >");
+        buf.extend_from_slice(b"  \xc7  \x00  \x14\n  >");
         buf.extend_from_slice(b"abc>");
         buf.extend_from_slice(b"tail");
         let recs = split_ldb_records(&buf).unwrap();
         assert_eq!(recs.len(), 3);
         assert_eq!(recs[0].lead_byte(), Some(0xc7));
-        assert_eq!(recs[0].space_stripped(), vec![0xc7, 0x14, 0x0a]);
+        assert_eq!(recs[0].space_stripped(), vec![0xc7, 0x00, 0x14, 0x0a]);
+        let c7 = recs[0].as_ai_c7().unwrap();
+        assert_eq!(c7.sub, 0);
+        assert_eq!(c7.tail, vec![0x14, 0x0a]);
         assert_eq!(recs[1].raw, b"abc");
         assert_eq!(recs[2].raw, b"tail");
         assert!(split_ldb_records(b"nope").is_none());
