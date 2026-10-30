@@ -102,6 +102,12 @@ pub struct PseEmitterRef {
     pub name: String,
 }
 
+/// Count raw `0x71`/`3` curve object headers in a `.pse` (editor keyframe blocks).
+pub fn scan_pse_curve_count(data: &[u8]) -> usize {
+    const CURVE: &[u8] = &[0x71, 0, 0, 0, 3, 0, 0, 0];
+    data.windows(CURVE.len()).filter(|w| *w == CURVE).count()
+}
+
 /// Scan `.pse` bytes for emitter object headers and their names.
 pub fn scan_pse_emitters(data: &[u8]) -> Vec<PseEmitterRef> {
     const EMIT: &[u8] = &[0x30, 0, 0, 0, 4, 0, 0, 0, 0x20, 0, 0, 0, 3, 0, 0, 0];
@@ -302,5 +308,8 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].name, "Spark");
         assert_eq!(found[1].name, "Dust");
+        let mut with_curve = buf.clone();
+        with_curve.extend_from_slice(&[0x71, 0, 0, 0, 3, 0, 0, 0]);
+        assert_eq!(scan_pse_curve_count(&with_curve), 1);
     }
 }

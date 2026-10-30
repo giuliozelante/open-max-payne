@@ -98,6 +98,11 @@ RPS particle exports observed so far stay in the flat tagged regime.
 
 `scan_pse_emitters` harvests emitter names from the PSE raw pattern for export WIP.
 
+**Curves:** PSE stores editor keyframes (name + control points after `0x71`/`3`).
+RPS stores a **sampled grid** written by `FUN_00432fd0` (channels × samples f32s)
+via evaluator `FUN_00432240`. Export stubs currently emit placeholder samples;
+full `-e` parity needs that sampler (or a fixture capture from retail `-e`).
+
 ### Version / structure gate (load)
 
 `FUN_00422050` (`operator>>` pair):
