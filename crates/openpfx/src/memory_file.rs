@@ -227,42 +227,43 @@ impl MemoryFileWriter {
         self.write_object_header(obj::COMPANION_INNER, obj::COMPANION_INNER_VER);
     }
 
-    /// Zero-filled companion body matching `FUN_00418fe0` + `FUN_00415d00` field order
-    /// (curves/vec3/floats/ints). Texture path list before companion is still omitted.
+    /// Zero-filled companion body shaped like BYOD candle (`FUN_00418fe0` /
+    /// `FUN_00415d00` field order). Curve channel/sample counts match candle;
+    /// values are zeros (not sampled from PSE).
     pub fn write_companion_stub(&mut self) -> Result<(), PfxError> {
         self.write_companion_open();
         self.write_companion_inner_open();
-        let c2 = [0.0f32, 0.0];
+        // Inner: 2ch×2, 2ch×2, 2ch×2, 3ch×2
+        let z2 = [0.0f32; 4];
+        let z3 = [0.0f32; 6];
+        for _ in 0..3 {
+            self.write_curve(2, 2, &z2)?;
+        }
+        self.write_curve(3, 2, &z3)?;
+        self.write_vec3(0.0, 0.0, 0.0);
+        self.write_vec3(0.0, 0.0, 0.0);
+        self.write_vec3(0.0, 0.0, 0.0);
         for _ in 0..4 {
-            self.write_curve(1, 2, &c2)?;
-        }
-        // FUN_00415d00 after 4 curves:
-        self.write_vec3(0.0, 0.0, 0.0);
-        self.write_vec3(0.0, 0.0, 0.0);
-        self.write_vec3(0.0, 0.0, 0.0);
-        self.write_f32(0.0);
-        self.write_f32(0.0);
-        self.write_f32(0.0);
-        self.write_f32(0.0);
-        self.write_int_u8(0);
-        self.write_int_u8(0);
-        self.write_int_u8(0);
-        self.write_vec3(0.0, 0.0, 0.0);
-        self.write_f32(0.0);
-        self.write_f32(0.0);
-        self.write_int_u8(0);
-        self.write_f32(0.0);
-        self.write_f32(0.0);
-        self.write_vec3(0.0, 0.0, 0.0);
-        self.write_vec3(0.0, 0.0, 0.0);
-        // FUN_00418fe0 after inner:
-        for _ in 0..2 {
-            self.write_curve(1, 2, &c2)?;
+            self.write_f32(0.0);
         }
         self.write_int_u8(0);
-        for _ in 0..2 {
-            self.write_curve(1, 2, &c2)?;
+        self.write_int_u8(0);
+        self.write_int_u8(0);
+        self.write_vec3(0.0, 0.0, 0.0);
+        for _ in 0..5 {
+            self.write_f32(0.0);
         }
+        self.write_vec3(0.0, 0.0, 0.0);
+        self.write_vec3(0.0, 0.0, 0.0);
+        // Outer companion after inner: 2ch×2, 2ch×16, int, 3ch×16, 1ch×16, f32, vec3
+        self.write_curve(2, 2, &z2)?;
+        let z2_16 = vec![0.0f32; 32];
+        self.write_curve(2, 16, &z2_16)?;
+        self.write_int_u8(0);
+        let z3_16 = vec![0.0f32; 48];
+        self.write_curve(3, 16, &z3_16)?;
+        let z1_16 = vec![0.0f32; 16];
+        self.write_curve(1, 16, &z1_16)?;
         self.write_f32(0.0);
         self.write_vec3(0.0, 0.0, 0.0);
         Ok(())
@@ -469,7 +470,20 @@ mod tests {
             &h.values[3],
             crate::rps::RpsValue::U8 { value: 5, .. }
         ));
-        assert!(h.bytes_consumed == w.as_bytes().len());
+        // First inner curve: channels=2 samples=2 (candle-shaped)
+        assert!(matches!(
+            &h.values[4],
+            crate::rps::RpsValue::U8 { value: 0x71, .. }
+        ));
+        assert!(matches!(
+            &h.values[6],
+            crate::rps::RpsValue::U8 { value: 2, .. }
+        ));
+        assert!(matches!(
+            &h.values[7],
+            crate::rps::RpsValue::U8 { value: 2, .. }
+        ));
+        assert_eq!(h.bytes_consumed, w.as_bytes().len());
     }
 
     #[test]
