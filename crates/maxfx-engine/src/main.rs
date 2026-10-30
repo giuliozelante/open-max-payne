@@ -163,7 +163,7 @@ fn main() -> ExitCode {
                                                     "  import lightmaps @{cend:#x}: count={lc} end={lend:#x}"
                                                 );
                                                 if let Some((exits, eend)) =
-                                                    parse_ras_ldb_import_exits_at(&data, lend, 12)
+                                                    parse_ras_ldb_import_exits_at(&data, lend, 64)
                                                 {
                                                     let with_pos =
                                                         exits.iter().filter(|e| e.pos.is_some()).count();

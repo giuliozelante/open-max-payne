@@ -782,11 +782,7 @@ pub struct RasLdbImportExit {
     pub pos: Option<[f32; 3]>,
 }
 
-fn peek_exit_at(data: &[u8], i: usize) -> bool {
-    let mut j = i;
-    if read_mf_i32(data, &mut j).is_none() {
-        return false;
-    }
+fn is_exit_name_at(data: &[u8], j: usize) -> bool {
     if j + 3 >= data.len() || data[j] != 0x0d || data[j + 1] != 0x14 {
         return false;
     }
@@ -801,14 +797,29 @@ fn peek_exit_at(data: &[u8], i: usize) -> bool {
         && bytes.iter().all(|&b| (0x20..=0x7e).contains(&b))
 }
 
-fn skip_until_next_exit(data: &[u8], i: &mut usize, limit: usize) {
-    let start = *i;
-    while *i < data.len() && *i < start + limit {
-        if peek_exit_at(data, *i) {
-            return;
-        }
-        *i += 1;
+fn skip_exit_nest_markers(data: &[u8], j: &mut usize) {
+    while data.get(*j) == Some(&0x1c) {
+        *j += 1;
     }
+}
+
+fn peek_exit_at(data: &[u8], i: usize) -> bool {
+    let mut j = i;
+    skip_exit_nest_markers(data, &mut j);
+    // One or more leading ints (nest markers allowed between), then `::` name.
+    let mut saw_int = false;
+    for _ in 0..8 {
+        skip_exit_nest_markers(data, &mut j);
+        if is_exit_name_at(data, j) {
+            return saw_int;
+        }
+        if read_mf_i32(data, &mut j).is_none() {
+            return false;
+        }
+        saw_int = true;
+    }
+    skip_exit_nest_markers(data, &mut j);
+    saw_int && is_exit_name_at(data, j)
 }
 
 /// Parse ImportExit records after lightmaps: `id` int, `::` name, optional room
@@ -825,10 +836,29 @@ pub fn parse_ras_ldb_import_exits_at(
     let mut i = offset;
     let mut out = Vec::new();
     while out.len() < max && peek_exit_at(data, i) {
-        let Some(id) = read_mf_i32(data, &mut i) else {
+        let record_start = i;
+        skip_exit_nest_markers(data, &mut i);
+        let mut id = 0i32;
+        let mut got_id = false;
+        for _ in 0..8 {
+            skip_exit_nest_markers(data, &mut i);
+            if is_exit_name_at(data, i) {
+                break;
+            }
+            let Some(v) = read_mf_i32(data, &mut i) else {
+                break;
+            };
+            if !got_id {
+                id = v;
+                got_id = true;
+            }
+        }
+        if !got_id || !is_exit_name_at(data, i) {
+            i = record_start;
             break;
-        };
+        }
         let Some(name) = read_mf_str(data, &mut i) else {
+            i = record_start;
             break;
         };
         let mut corners = 0u8;
@@ -876,39 +906,37 @@ pub fn parse_ras_ldb_import_exits_at(
         if peek_exit_at(data, i) {
             continue;
         }
-        // Advance through nested 0x1c / ints only until the next exit; do not
-        // scan thousands of bytes past the exit list into lights/BSP.
+        // Hunt next exit by `::` name; stop on post-exit `0x15` float stream.
         let before = i;
-        skip_until_next_exit(data, &mut i, 512);
-        if !peek_exit_at(data, i) {
-            i = before;
-            // Soft-skip nested tags after this exit without leaving the nest.
-            let nest = i;
-            while i < data.len() && i < nest + 256 {
-                if peek_exit_at(data, i) {
-                    break;
-                }
-                match data[i] {
-                    0x1c => i += 1,
-                    0x14 | 0x13 | 0x12 | 0x02 => {
-                        if read_mf_i32(data, &mut i).is_none() {
-                            break;
-                        }
-                    }
-                    0x0d => {
-                        if read_mf_str(data, &mut i).is_none() {
-                            break;
-                        }
-                    }
-                    0x11 => {
-                        if read_mf_uint_u8(data, &mut i).is_none() {
-                            break;
-                        }
-                    }
-                    _ => break,
-                }
+        let mut found = None;
+        let lim = i.saturating_add(8192).min(data.len());
+        let mut j = i;
+        while j < lim {
+            // Post-exit stream: `15 <f32> <f32> 15 <f32> <f32> 03 <i32> 0e <u8>`
+            if j + 20 <= data.len()
+                && data[j] == 0x15
+                && data[j + 5] == 0x15
+                && data[j + 10] == 0x03
+                && data[j + 15] == 0x0e
+            {
+                break;
             }
-            if !peek_exit_at(data, i) {
+            if is_exit_name_at(data, j) {
+                let back = before.max(j.saturating_sub(32));
+                for s in (back..=j).rev() {
+                    if peek_exit_at(data, s) {
+                        found = Some(s);
+                        break;
+                    }
+                }
+                break;
+            }
+            j += 1;
+        }
+        match found {
+            Some(s) => i = s,
+            None => {
+                i = before;
                 break;
             }
         }
