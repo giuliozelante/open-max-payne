@@ -122,8 +122,32 @@ Opcode / section semantics need `X_LevelDBImportLevel` (or a `*_LOAD` handler) d
 ### Issue #14 (chunks)
 - [x] `>`-record split + space-strip probe + CLI histogram
 - [x] REA: `R_MemoryFile::createChunk` / `openChunk` / `closeChunk` (`rlmfc.dll`)
-- [ ] Decompile `X_LevelDBImportLevel` / `*_LOAD` → opcode map (MaxPayne.exe string/xref timeouts)
+- [x] REA: `X_LevelDBImportLevel` vtable + version gate (see below)
+- [ ] Full opcode / section map inside records
 - [ ] Typed section decode inside records
+
+## `X_LevelDBImportLevel` (MaxPayne.exe REA)
+
+| Item | Value |
+|------|-------|
+| RTTI | `.?AVX_LevelDBImportLevel@@` @ VA `0x887388` |
+| COL | `0x7ed5d8` |
+| vtable | `0x7d1ff8` |
+| Slot 0 (version gate) | `0x5ec350` |
+
+Slot 0 (disasm + IAT):
+
+1. `operator>>(R_MemoryFile&, int&)` (`rlmfc`)
+2. Compare to **`0x20`** (32)
+3. On mismatch: `R_Exception` + `"X_LevelDB Wrong version, expected %d, found %d!"`
+4. On match: virtual-calls child importers at `this+0x4`, `+0x8`, `+0xc`, `+0x14` with the same `R_MemoryFile*`
+
+Constant: `maxfx_engine::LDB_IMPORT_VERSION` (`0x20`).
+
+**Note:** BYOD `.ldb`/`.ai` roots still begin with space-padded `>` records (dense head
+`3e …`, not `14 20`). The `0x20` gate almost certainly applies to a MemoryFile
+view **after** record/chunk extraction, not to the raw file preamble. Bridging
+`>`-records → MemoryFile for that gate is the next REA step.
 
 ## MemoryFile ChunkHeader (rlmfc REA, issue #14)
 

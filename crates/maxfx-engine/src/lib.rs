@@ -55,6 +55,10 @@ pub struct LevelPackage {
 /// Observed BYOD `.ldb` / `.ai` file preamble: 16 × `0x20` then ASCII `>` (`0x3e`).
 pub const LDB_PREAMBLE: &[u8] = b"                >"; // 16 spaces + '>'
 
+/// `X_LevelDBImportLevel` MemoryFile version gate (`operator>>` int must be this).
+/// REA: MaxPayne.exe `0x5ec350` vs string `X_LevelDB Wrong version, expected %d…`.
+pub const LDB_IMPORT_VERSION: u32 = 0x20;
+
 pub fn looks_like_ldb_or_ai(data: &[u8]) -> bool {
     data.len() >= LDB_PREAMBLE.len() && data.starts_with(LDB_PREAMBLE)
 }
@@ -319,6 +323,7 @@ mod tests {
         buf.extend_from_slice(&[0x00, 0x01, 0x02]);
         assert!(looks_like_ldb_or_ai(&buf));
         assert!(!looks_like_ldb_or_ai(b"RAS\0"));
+        assert_eq!(LDB_IMPORT_VERSION, 0x20);
     }
 
     #[test]
