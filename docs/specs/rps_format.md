@@ -42,8 +42,8 @@ psysedit [-h] [-y] [-r] [-e filename(s)] [-d directory]
 | `FUN_00419be0` | Graph section | type `0x31`, ver `1`, then param block, then **emitter-count** int |
 | `FUN_00414d20` | Shared param block | type `0x20`, ver `3` |
 | `FUN_00417570` | Emitter / node | type `0x30`, ver `4` (+ paths, curves) |
-| `FUN_00418fe0` | Companion block | type `0x40`, ver `2` |
-| `FUN_00415d00` | Companion inner | type `0x21`, ver `5` (+ curves/vec3) |
+| `FUN_00418fe0` | Companion block | type `0x40`, ver `2` → inner → 2 curves, int, 2 curves, f32, vec3 |
+| `FUN_00415d00` | Companion inner | type `0x21`, ver `5` → 4 curves, 3×vec3, floats/ints, more vec3 |
 | `FUN_00432fd0` | Sampled curve | type `0x71`, ver `3` then f32 samples |
 | `FUN_00418190` | Embed texture | `operator<<(CString path)` + size/`MemoryFile::write` → str + blob |
 

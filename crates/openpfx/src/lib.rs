@@ -203,9 +203,8 @@ pub fn pse_to_rps_export(h: &PseHeader, opts: &PseExportOptions) -> Result<Vec<u
             w.write_curve(1, 2, &[0.0, 0.0])?;
             w.write_curve(1, 16, &c16)?;
             w.write_curve(1, 16, &c16)?;
-            // Texture/path list omitted → companion header only (incomplete vs retail).
-            w.write_companion_open();
-            w.write_companion_inner_open();
+            // Texture/path list omitted; zero companion body (FUN_00418fe0 order).
+            w.write_companion_stub()?;
         }
     } else if opts.empty_graph {
         w.write_graph_section_open(0, 1.0, 0, 1, 0.1);

@@ -227,6 +227,47 @@ impl MemoryFileWriter {
         self.write_object_header(obj::COMPANION_INNER, obj::COMPANION_INNER_VER);
     }
 
+    /// Zero-filled companion body matching `FUN_00418fe0` + `FUN_00415d00` field order
+    /// (curves/vec3/floats/ints). Texture path list before companion is still omitted.
+    pub fn write_companion_stub(&mut self) -> Result<(), PfxError> {
+        self.write_companion_open();
+        self.write_companion_inner_open();
+        let c2 = [0.0f32, 0.0];
+        for _ in 0..4 {
+            self.write_curve(1, 2, &c2)?;
+        }
+        // FUN_00415d00 after 4 curves:
+        self.write_vec3(0.0, 0.0, 0.0);
+        self.write_vec3(0.0, 0.0, 0.0);
+        self.write_vec3(0.0, 0.0, 0.0);
+        self.write_f32(0.0);
+        self.write_f32(0.0);
+        self.write_f32(0.0);
+        self.write_f32(0.0);
+        self.write_int_u8(0);
+        self.write_int_u8(0);
+        self.write_int_u8(0);
+        self.write_vec3(0.0, 0.0, 0.0);
+        self.write_f32(0.0);
+        self.write_f32(0.0);
+        self.write_int_u8(0);
+        self.write_f32(0.0);
+        self.write_f32(0.0);
+        self.write_vec3(0.0, 0.0, 0.0);
+        self.write_vec3(0.0, 0.0, 0.0);
+        // FUN_00418fe0 after inner:
+        for _ in 0..2 {
+            self.write_curve(1, 2, &c2)?;
+        }
+        self.write_int_u8(0);
+        for _ in 0..2 {
+            self.write_curve(1, 2, &c2)?;
+        }
+        self.write_f32(0.0);
+        self.write_vec3(0.0, 0.0, 0.0);
+        Ok(())
+    }
+
     /// Emitter object open (`FUN_00417570`): `0x30`/`4` + param block + scalar fields before curves.
     ///
     /// Seven scalars after the nested param block (BYOD candle):
@@ -405,6 +446,30 @@ mod tests {
         assert!(
             matches!(&h.values[1], crate::rps::RpsValue::Blob { data } if data == b"\xff\xd8\xff\xd9")
         );
+    }
+
+    #[test]
+    fn companion_stub_starts_with_40_2_then_21_5() {
+        let mut w = MemoryFileWriter::new();
+        w.write_companion_stub().unwrap();
+        let h = parse_rps(w.as_bytes()).unwrap();
+        assert!(matches!(
+            &h.values[0],
+            crate::rps::RpsValue::U8 { value: 0x40, .. }
+        ));
+        assert!(matches!(
+            &h.values[1],
+            crate::rps::RpsValue::U8 { value: 2, .. }
+        ));
+        assert!(matches!(
+            &h.values[2],
+            crate::rps::RpsValue::U8 { value: 0x21, .. }
+        ));
+        assert!(matches!(
+            &h.values[3],
+            crate::rps::RpsValue::U8 { value: 5, .. }
+        ));
+        assert!(h.bytes_consumed == w.as_bytes().len());
     }
 
     #[test]
