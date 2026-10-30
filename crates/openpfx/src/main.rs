@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
-use openpfx::{pse_header_to_rps_preamble, read_pse, read_rps, roundtrip_rps, RpsValue};
+use openpfx::{
+    pse_header_to_rps_preamble, pse_to_rps_root, read_pse, read_rps, roundtrip_rps, RpsValue,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -23,6 +25,12 @@ enum Cmd {
     DumpRps { path: PathBuf },
     /// Write PSE flat-header fields as an RPS tagged preamble (graphs not included)
     ExportPreamble {
+        pse: PathBuf,
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+    },
+    /// Export PSE root object fields to RPS (graphs / emitters still omitted)
+    ExportRoot {
         pse: PathBuf,
         #[arg(short = 'o', long)]
         output: PathBuf,
@@ -51,8 +59,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Cmd::DumpPse { path } => {
             let h = read_pse(&path)?;
             println!(
-                "word0={} word1={} word2={} word3={}",
-                h.word0, h.word1, h.word2, h.word3
+                "word0={} word1={} word2={} word3={} word4={} flags={}/{}",
+                h.word0, h.word1, h.word2, h.word3, h.word4, h.flag_a, h.flag_b
             );
             println!("float_a={} float_b={}", h.float_a, h.float_b);
             println!("paths ({}):", h.ascii_paths.len());
@@ -98,6 +106,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             fs::write(&output, &bytes)?;
             println!(
                 "Wrote {} bytes preamble → {} (particle graphs NOT exported yet)",
+                bytes.len(),
+                output.display()
+            );
+        }
+        Cmd::ExportRoot { pse, output } => {
+            let h = read_pse(&pse)?;
+            let bytes = pse_to_rps_root(&h)?;
+            fs::write(&output, &bytes)?;
+            println!(
+                "Wrote {} bytes root → {} (graphs/emitters NOT exported yet)",
                 bytes.len(),
                 output.display()
             );

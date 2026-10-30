@@ -80,13 +80,18 @@ and `T_Graph: Invalid File Version…` (graph object gate).
 
 | Off | Type | Notes |
 |-----|------|-------|
-| 0 | u32 | often `96` (`0x60`) |
-| 4 | u32 | often `5` |
-| 8 | u32 | varies (e.g. `35`) |
+| 0 | u32 | often `96` (`0x60`) — load-gate type |
+| 4 | u32 | often `5` — load-gate version |
+| 8 | u32 | varies (e.g. `35` / `50`) → RPS uint |
 | 12 | f32 | e.g. `2.5` |
-| 16 | u32 | e.g. `10` — **not** a float |
+| 16 | u32 | e.g. `10` — **not** a float → RPS uint |
 | 20 | f32 | e.g. `2.5` |
-| later | ASCII | absolute tool/bitmap paths |
+| 24 | u32 | e.g. `10` → RPS uint (`FUN_0041ab00` field) |
+| 28 | u32 | flag → RPS int |
+| 32 | u32 | flag → RPS int |
+| later | mixed | gravity / paths / graphs (WIP) |
+
+`openpfx export-root` emits the `0x60`/`5` object + these fields (no graphs).
 
 ## RPS tagged stream (BYOD)
 
