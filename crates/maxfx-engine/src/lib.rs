@@ -52,21 +52,90 @@ pub struct LevelPackage {
     pub ai: Option<String>,
 }
 
-/// Observed BYOD `.ldb` / `.ai` file preamble: 16 × `0x20` then ASCII `>` (`0x3e`).
+/// Legacy probe: 16 × `0x20` then ASCII `>` (`0x3e`).
+///
+/// **Retracted for retail RAS extracts** (front_end / part levels): those `.ldb`
+/// files start with [`LDB_RAS_MAGIC`] and `.ai` with MemoryFile `0x14` tags.
+/// `0x3e` inside `.ai` is often a float byte, not a record delimiter. Kept for
+/// synthetic tests and any still-unseen cook path.
 pub const LDB_PREAMBLE: &[u8] = b"                >"; // 16 spaces + '>'
+
+/// Retail RAS `.ldb` magic (LE `u16` at offset 0). Observed on Startup/Tutorial/
+/// end_combat front_end levels: bytes `1c 12`.
+pub const LDB_RAS_MAGIC: u16 = 0x121c;
+
+/// Byte length of the RAS `.ldb` head before the first `0x16` vec3 tag:
+/// `magic_u16` + `u16` + `u8`.
+pub const LDB_RAS_HEADER_LEN: usize = 5;
 
 /// `X_LevelDBImportLevel` MemoryFile version gate (`operator>>` int must be this).
 /// REA: MaxPayne.exe `0x5ec350` vs string `X_LevelDB Wrong version, expected %d…`.
 pub const LDB_IMPORT_VERSION: u32 = 0x20;
 
+/// True for any currently recognized level blob layout.
 pub fn looks_like_ldb_or_ai(data: &[u8]) -> bool {
-    data.len() >= LDB_PREAMBLE.len() && data.starts_with(LDB_PREAMBLE)
+    looks_like_ras_ldb(data)
+        || looks_like_memory_file_ai(data)
+        || looks_like_memory_file_ldb(data)
+        || (data.len() >= LDB_PREAMBLE.len() && data.starts_with(LDB_PREAMBLE))
+}
+
+/// Retail RAS `.ldb`: LE u16 [`LDB_RAS_MAGIC`] (`1c 12`).
+pub fn looks_like_ras_ldb(data: &[u8]) -> bool {
+    data.len() >= 2 && u16::from_le_bytes([data[0], data[1]]) == LDB_RAS_MAGIC
+}
+
+/// Parsed RAS `.ldb` head.
+///
+/// When `flag == 0`, `count` equals the number of leading `0x16` vec3 tags
+/// (BYOD Startup/end_combat). When `flag == 1` (Tutorial), `count` is smaller
+/// than the contiguous vec3 run — semantics still WIP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RasLdbHeader {
+    pub magic: u16,
+    pub count: u16,
+    pub flag: u8,
+}
+
+pub fn parse_ras_ldb_header(data: &[u8]) -> Option<RasLdbHeader> {
+    if data.len() < LDB_RAS_HEADER_LEN || !looks_like_ras_ldb(data) {
+        return None;
+    }
+    Some(RasLdbHeader {
+        magic: u16::from_le_bytes([data[0], data[1]]),
+        count: u16::from_le_bytes([data[2], data[3]]),
+        flag: data[4],
+    })
+}
+
+/// Byte offset just past the RAS header + `header.count` vec3 tags (13 bytes each).
+pub fn ras_ldb_count_section_end(header: &RasLdbHeader) -> usize {
+    LDB_RAS_HEADER_LEN + header.count as usize * 13
+}
+
+/// Count contiguous `0x16` + 12-byte float triples after the RAS header.
+pub fn count_ras_ldb_leading_vec3(data: &[u8]) -> usize {
+    if data.len() < LDB_RAS_HEADER_LEN {
+        return 0;
+    }
+    let mut i = LDB_RAS_HEADER_LEN;
+    let mut n = 0;
+    while i + 13 <= data.len() && data[i] == 0x16 {
+        n += 1;
+        i += 13;
+    }
+    n
 }
 
 /// MaxED MemoryFile-native `.ldb` prefix: tagged int `LDB_IMPORT_VERSION` (`0x14 0x20`).
-/// Retail RAS BYOD packages use [`LDB_PREAMBLE`] instead (see spec).
 pub fn looks_like_memory_file_ldb(data: &[u8]) -> bool {
     data.len() >= 2 && data[0] == 0x14 && data[1] == LDB_IMPORT_VERSION as u8
+}
+
+/// Retail RAS `.ai`: MemoryFile int tag stream (first byte `0x14`). BYOD Tutorial.ai
+/// opens `14 7b 14 0a …` (ints 123 / 10) — not the ImportLevel `0x20` gate.
+pub fn looks_like_memory_file_ai(data: &[u8]) -> bool {
+    data.len() >= 2 && data[0] == 0x14 && data[1] != LDB_IMPORT_VERSION as u8
 }
 
 /// Best-effort label for a space-stripped record lead byte (BYOD `.ai` histogram).
@@ -147,7 +216,8 @@ impl LdbRecord {
 /// Returns `None` if the preamble does not match. The preamble's own trailing
 /// `>` starts the first record boundary (empty leading chunk is dropped).
 pub fn split_ldb_records(data: &[u8]) -> Option<Vec<LdbRecord>> {
-    if !looks_like_ldb_or_ai(data) {
+    // Legacy cook only — do not use on RAS `0x121c` / MF `.ai` blobs.
+    if data.len() < LDB_PREAMBLE.len() || !data.starts_with(LDB_PREAMBLE) {
         return None;
     }
     let body = &data[LDB_PREAMBLE.len()..]; // after first '>'
@@ -383,6 +453,46 @@ mod tests {
         magic.extend_from_slice(b"\x89\x6a\x93\x7a\x00>");
         let recs = split_ldb_records(&magic).unwrap();
         assert!(recs[0].is_ai_89_magic());
+    }
+
+    #[test]
+    fn ras_ldb_magic_and_leading_vec3_run() {
+        // Synthetic: 1c 12 | ab cd | 00 | 16 + 3×f32 | 16 + 3×f32 | 09 …
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&LDB_RAS_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&0xcdabu16.to_le_bytes());
+        buf.push(0);
+        for _ in 0..2 {
+            buf.push(0x16);
+            buf.extend_from_slice(&1.0f32.to_le_bytes());
+            buf.extend_from_slice(&2.0f32.to_le_bytes());
+            buf.extend_from_slice(&3.0f32.to_le_bytes());
+        }
+        buf.push(0x09);
+        assert!(looks_like_ras_ldb(&buf));
+        assert!(looks_like_ldb_or_ai(&buf));
+        let h = parse_ras_ldb_header(&buf).unwrap();
+        assert_eq!(h.magic, LDB_RAS_MAGIC);
+        assert_eq!(h.count, 0xcdab);
+        assert_eq!(h.flag, 0);
+        assert_eq!(count_ras_ldb_leading_vec3(&buf), 2);
+        // flag=0: declared count matches contiguous run when we build it that way
+        let mut tight = Vec::new();
+        tight.extend_from_slice(&LDB_RAS_MAGIC.to_le_bytes());
+        tight.extend_from_slice(&2u16.to_le_bytes());
+        tight.push(0);
+        for _ in 0..2 {
+            tight.push(0x16);
+            tight.extend_from_slice(&0f32.to_le_bytes());
+            tight.extend_from_slice(&0f32.to_le_bytes());
+            tight.extend_from_slice(&0f32.to_le_bytes());
+        }
+        tight.push(0x1c); // next section often reuses magic high byte
+        let ht = parse_ras_ldb_header(&tight).unwrap();
+        assert_eq!(ht.count as usize, count_ras_ldb_leading_vec3(&tight));
+        assert_eq!(ras_ldb_count_section_end(&ht), tight.len() - 1);
+        assert!(looks_like_memory_file_ai(&[0x14, 0x7b, 0x14, 0x0a]));
+        assert!(!looks_like_memory_file_ai(&[0x14, 0x20]));
     }
 
     #[test]

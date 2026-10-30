@@ -81,44 +81,45 @@ Tokens sit in `.rdata` after `MP_GM_LEVEL_INIT1`. Mapping from `X_LevelDBImport*
 Also present: `X_LevelDBImportLevel` (top-level), `ImportBSP`, `ImportCharacter`,
 `ImportTrigger`, `ImportStartpoint`, `ImportExit`, `ImportLevelItem`, …
 
-## `.ldb` / `.ai` preamble + records (BYOD, issue #14)
+## `.ldb` / `.ai` layouts (BYOD RAS extract, issue #14)
 
-Both `.ldb` and `.ai` from `x_level1.ras` share:
+**Correction (2026-10-30):** the earlier “16 spaces + `>` then `>`-records” reading is
+**not** what retail RAS level blobs use. Front-end extracts
+(`Startup_level.ldb`, `Tutorial.ldb`/`.ai`, …) show:
+
+### Retail RAS `.ldb`
 
 ```
-16 × 0x20   then   0x3E ('>')
+1c 12          LE u16 magic = 0x121c   (maxfx_engine::LDB_RAS_MAGIC)
+NN NN          LE u16 count
+FF             u8 flag (0 or 1 observed)
+16 <3×f32> × N run of MemoryFile vec3 tags (0x16)
 ```
 
-Constant in code: `maxfx_engine::LDB_PREAMBLE` / `looks_like_ldb_or_ai`.
+When **flag = 0**, `count` equals the contiguous leading vec3 run length
+(Startup_level / end_combat). After that run the next byte is often `0x1c`
+(start of another `1c 12 …` section). When **flag = 1** (Tutorial), `count` is
+smaller than the contiguous `0x16` run — layout WIP.
 
-### Record framing
+Helpers: `looks_like_ras_ldb` / `parse_ras_ldb_header` /
+`count_ras_ldb_leading_vec3` / `ras_ldb_count_section_end`.
 
-After that first `>`, the body is a stream of **payloads separated by `>`**.
-Payloads are densely padded with `0x20`. Helpers:
+### Retail RAS `.ai`
 
-- `split_ldb_records` → `Vec<LdbRecord>`
-- `LdbRecord::space_stripped` / `lead_byte` for opcode probing
-- CLI: `maxfx-engine path/to/file.ldb` (or `.ai`) prints record count + lead-byte histogram
+Starts as a MemoryFile tag stream (`0x14 …`), e.g. Tutorial.ai:
+`14 7b 14 0a 14 00 14 00 09 …` (ints 123 / 10 / 0 / 0, then floats).
+Helper: `looks_like_memory_file_ai`. **Not** the ImportLevel `0x14 0x20` gate.
 
-### Observations (part0_level1)
+Caveat: a naïve `>` split mis-fires on float bytes (`…99 99 3e` = 0.3f).
 
-| File | Size | `>` records (approx) | Notes |
-|------|------|----------------------|-------|
-| `.ai` | ~45 KiB | ~435 | Space-stripped leads include `0x89`, `0x14`, `0x55`, …; some records start `c7 …` then MemoryFile-like `14`/`09`/`16` |
-| `.ldb` | ~15 MiB | ~238k | Same `>` framing; even more space-heavy early on |
+### Legacy space/`>` probe
 
-**Not** a flat MemoryFile stream (skipping spaces still hits non-tag opcodes immediately).
+`LDB_PREAMBLE` + `split_ldb_records` remain for synthetic tests / any still-unseen
+cook path. Do not treat them as the retail RAS layout.
 
-### `.ai` lead probes (part0_level1)
+### MaxED MemoryFile `.ldb`
 
-| Lead | Approx count | Notes |
-|------|--------------|-------|
-| `0x89` | ~110 | often `89 6a 93 7a` magic then mixed/`14`/`16` tags (`is_ai_89_magic`) |
-| `0x14` | ~72 | MemoryFile int tag as first dense byte |
-| `0xc7` | ~6 | `c7 <sub> <tail…>`; helper `LdbRecord::as_ai_c7` |
-| `0x80` | singleton rows | often 1-byte records |
-
-Opcode / section semantics still need importer decompile beyond the version gate.
+Tagged int `0x14 0x20` (`LDB_IMPORT_VERSION`) — see ExportLevel below.
 
 ## Done / next
 
@@ -130,11 +131,11 @@ Opcode / section semantics still need importer decompile beyond the version gate
 - [x] `levels.txt` → archive path construction + parser/tests
 
 ### Issue #14 (chunks)
-- [x] `>`-record split + space-strip probe + CLI histogram
+- [x] Retract false space/`>` primary framing; document RAS `0x121c` + MF `.ai`
 - [x] REA: `R_MemoryFile::createChunk` / `openChunk` / `closeChunk` (`rlmfc.dll`)
 - [x] REA: `X_LevelDBImportLevel` vtable + version gate (see below)
-- [ ] Full opcode / section map inside records
-- [ ] Typed section decode inside records
+- [ ] Map post-vec3 `.ldb` body → ImportLevel / ImportBSP
+- [ ] Full MemoryFile walk of `.ai` (fix early blob false-positive)
 
 ## `X_LevelDBImportLevel` (MaxPayne.exe REA)
 
@@ -154,10 +155,10 @@ Slot 0 (disasm + IAT):
 
 Constant: `maxfx_engine::LDB_IMPORT_VERSION` (`0x20`).
 
-**Note:** BYOD `.ldb`/`.ai` roots still begin with space-padded `>` records (dense head
-`3e …`, not `14 20`). The `0x20` gate almost certainly applies to a MemoryFile
-view **after** record/chunk extraction, not to the raw file preamble. Bridging
-`>`-records → MemoryFile for that gate is the next REA step.
+**Note:** Retail RAS `.ldb` roots use magic `0x121c` + vec3 run, not `14 20`.
+The ImportLevel `0x20` gate likely applies to a nested MemoryFile section (or
+MaxED-native exports), not the raw RAS `.ldb` head. Locating that nested stream
+inside the post-vec3 body is the next REA step.
 
 ## `X_LevelDBExportLevel` (MaxED.exe REA)
 

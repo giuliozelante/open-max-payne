@@ -1,7 +1,8 @@
 use maxfx_engine::{
-    classify_ldb_lead, discover_ras_files, list_level_packages, looks_like_ldb_or_ai,
-    looks_like_memory_file_ldb, open_archive, parse_levels_txt, split_ldb_records,
-    LDB_IMPORT_VERSION,
+    classify_ldb_lead, count_ras_ldb_leading_vec3, discover_ras_files, list_level_packages,
+    looks_like_ldb_or_ai, looks_like_memory_file_ai, looks_like_memory_file_ldb,
+    looks_like_ras_ldb, open_archive, parse_levels_txt, parse_ras_ldb_header, split_ldb_records,
+    LDB_IMPORT_VERSION, LDB_RAS_MAGIC,
 };
 use openras::RasArchive;
 use std::env;
@@ -20,25 +21,49 @@ fn main() -> ExitCode {
         if ext.eq_ignore_ascii_case("ldb") || ext.eq_ignore_ascii_case("ai") {
             return match std::fs::read(p) {
                 Ok(data) => {
+                    if looks_like_ras_ldb(&data) {
+                        let h = parse_ras_ldb_header(&data).unwrap();
+                        let nvec = count_ras_ldb_leading_vec3(&data);
+                        println!(
+                            "{}: {} bytes, RAS .ldb magic {:#x} count={} flag={} leading_vec3={} (count_match={})",
+                            p.display(),
+                            data.len(),
+                            h.magic,
+                            h.count,
+                            h.flag,
+                            nvec,
+                            h.flag == 0 && h.count as usize == nvec
+                        );
+                        return ExitCode::SUCCESS;
+                    }
                     if looks_like_memory_file_ldb(&data) {
                         println!(
-                            "{}: {} bytes, MemoryFile-native (version tag {:#x})",
+                            "{}: {} bytes, MemoryFile-native ImportLevel (version tag {:#x})",
                             p.display(),
                             data.len(),
                             LDB_IMPORT_VERSION
                         );
                         return ExitCode::SUCCESS;
                     }
+                    if looks_like_memory_file_ai(&data) {
+                        println!(
+                            "{}: {} bytes, MemoryFile-tagged .ai (head 0x14 {:#x})",
+                            p.display(),
+                            data.len(),
+                            data[1]
+                        );
+                        return ExitCode::SUCCESS;
+                    }
                     if !looks_like_ldb_or_ai(&data) {
                         eprintln!(
-                            "error: missing LDB/AI preamble (and not 14 {:#x} MF head)",
-                            LDB_IMPORT_VERSION
+                            "error: unrecognized level blob (want RAS {:#x}, MF 14 {:#x}, or legacy space/>)",
+                            LDB_RAS_MAGIC, LDB_IMPORT_VERSION
                         );
                         return ExitCode::FAILURE;
                     }
                     let recs = split_ldb_records(&data).unwrap();
                     println!(
-                        "{}: {} bytes, {} >-records after preamble",
+                        "{}: {} bytes, {} >-records after legacy preamble",
                         p.display(),
                         data.len(),
                         recs.len()
