@@ -91,13 +91,74 @@ pub fn parse_pse(data: &[u8]) -> Result<PseHeader, PfxError> {
     })
 }
 
+/// Emitter stub found by scanning raw LE object headers in a `.pse`.
+///
+/// Editor format stores type/version as untagged `u32` pairs (not MemoryFile tags).
+/// Pattern (BYOD `Bullet_Impact_default.pse`): `0x30`/`4` + `0x20`/`3` + two `u32` +
+/// `u8` length-prefixed ASCII name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PseEmitterRef {
+    pub offset: usize,
+    pub name: String,
+}
+
+/// Scan `.pse` bytes for emitter object headers and their names.
+pub fn scan_pse_emitters(data: &[u8]) -> Vec<PseEmitterRef> {
+    const EMIT: &[u8] = &[0x30, 0, 0, 0, 4, 0, 0, 0, 0x20, 0, 0, 0, 3, 0, 0, 0];
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + EMIT.len() + 8 < data.len() {
+        if &data[i..i + EMIT.len()] != EMIT {
+            i += 1;
+            continue;
+        }
+        let name_at = i + EMIT.len() + 8; // skip two u32 after param header
+        if name_at >= data.len() {
+            break;
+        }
+        let len = data[name_at] as usize;
+        let start = name_at + 1;
+        if start + len > data.len() {
+            i += 1;
+            continue;
+        }
+        let name = String::from_utf8_lossy(&data[start..start + len]).into_owned();
+        if name.chars().all(|c| c.is_ascii_graphic() || c == ' ') && !name.is_empty() {
+            out.push(PseEmitterRef { offset: i, name });
+        }
+        i += EMIT.len();
+    }
+    out
+}
+
 /// PSE flat fields → RPS root object through pre-graph ints (`FUN_0041ab00` before graphs).
 pub fn pse_to_rps_root(h: &PseHeader) -> Result<Vec<u8>, PfxError> {
     pse_to_rps_root_into(h, false)
 }
 
-/// Like [`pse_to_rps_root`], optionally appending an empty graph header (`0x31`/`0`).
+/// Options for [`pse_to_rps_root_into`].
+#[derive(Debug, Clone, Default)]
+pub struct PseExportOptions {
+    /// Append graph header `0x31`/`0` with no nodes.
+    pub empty_graph: bool,
+    /// Append graph header + one stub emitter-open per name (scalars from candle REA;
+    /// **not** game-complete — curves/paths still missing).
+    pub emitter_stubs: Vec<String>,
+}
+
+/// Like [`pse_to_rps_root`], with optional graph / emitter stubs.
 pub fn pse_to_rps_root_into(h: &PseHeader, empty_graph: bool) -> Result<Vec<u8>, PfxError> {
+    pse_to_rps_export(
+        h,
+        &PseExportOptions {
+            empty_graph,
+            ..Default::default()
+        },
+    )
+}
+
+/// PSE → RPS root (+ optional graph/emitter stubs).
+pub fn pse_to_rps_export(h: &PseHeader, opts: &PseExportOptions) -> Result<Vec<u8>, PfxError> {
     use memory_file::MemoryFileWriter;
     fn u8_fit(v: u32, name: &str) -> Result<u8, PfxError> {
         u8::try_from(v).map_err(|_| PfxError::Msg(format!("{name}={v} does not fit u8 tag")))
@@ -122,7 +183,16 @@ pub fn pse_to_rps_root_into(h: &PseHeader, empty_graph: bool) -> Result<Vec<u8>,
         u8_fit(h.flag_a, "flag_a")?,
         u8_fit(h.flag_b, "flag_b")?,
     );
-    if empty_graph {
+    if !opts.emitter_stubs.is_empty() {
+        let n = u8::try_from(opts.emitter_stubs.len()).map_err(|_| {
+            PfxError::Msg(format!("too many emitters ({})", opts.emitter_stubs.len()))
+        })?;
+        w.write_graph_header(n);
+        for _name in &opts.emitter_stubs {
+            // Candle-shaped stub; name not yet placed on the RPS wire (REA pending).
+            w.write_emitter_open(0.0, 0, 1, 0.0, 0, 10.0, 0, 1, -3.0, 3.0, 2);
+        }
+    } else if opts.empty_graph {
         w.write_graph_header(0);
     }
     Ok(w.into_bytes())
@@ -184,5 +254,38 @@ mod tests {
         let with_graph = pse_to_rps_root_into(&h, true).unwrap();
         assert!(with_graph.starts_with(expected));
         assert_eq!(&with_graph[expected.len()..], &[0x14, 0x31, 0x14, 0]);
+        let with_stubs = pse_to_rps_export(
+            &h,
+            &PseExportOptions {
+                emitter_stubs: vec!["Spark".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(with_stubs.starts_with(expected));
+        assert_eq!(
+            &with_stubs[expected.len()..expected.len() + 4],
+            &[0x14, 0x31, 0x14, 1]
+        );
+        assert!(with_stubs.len() > expected.len() + 4);
+    }
+
+    #[test]
+    fn scan_pse_emitters_finds_name_after_param_header() {
+        let mut buf = vec![0u8; 36]; // flat header padding
+        buf.extend_from_slice(&[0x30, 0, 0, 0, 4, 0, 0, 0, 0x20, 0, 0, 0, 3, 0, 0, 0]);
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.push(5);
+        buf.extend_from_slice(b"Spark");
+        buf.extend_from_slice(&[0x30, 0, 0, 0, 4, 0, 0, 0, 0x20, 0, 0, 0, 3, 0, 0, 0]);
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.push(4);
+        buf.extend_from_slice(b"Dust");
+        let found = scan_pse_emitters(&buf);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].name, "Spark");
+        assert_eq!(found[1].name, "Dust");
     }
 }

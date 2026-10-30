@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use openpfx::{
-    pse_header_to_rps_preamble, pse_to_rps_root_into, read_pse, read_rps, roundtrip_rps, RpsValue,
+    pse_header_to_rps_preamble, pse_to_rps_export, read_pse, read_rps, roundtrip_rps,
+    scan_pse_emitters, PseExportOptions, RpsValue,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -37,6 +38,9 @@ enum Cmd {
         /// Append empty graph header `0x31`/`0` (structural stub)
         #[arg(long)]
         empty_graph: bool,
+        /// Append graph + stub emitter-open per scanned PSE emitter name
+        #[arg(long)]
+        emitter_stubs: bool,
     },
     /// Parse a retail `.rps` and write it back (encode parity check; BYOD local use)
     Repack {
@@ -60,12 +64,18 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.cmd {
         Cmd::DumpPse { path } => {
-            let h = read_pse(&path)?;
+            let data = fs::read(&path)?;
+            let h = openpfx::parse_pse(&data)?;
             println!(
                 "word0={} word1={} word2={} word3={} word4={} flags={}/{}",
                 h.word0, h.word1, h.word2, h.word3, h.word4, h.flag_a, h.flag_b
             );
             println!("float_a={} float_b={}", h.float_a, h.float_b);
+            let emitters = scan_pse_emitters(&data);
+            println!("emitters ({}):", emitters.len());
+            for e in &emitters {
+                println!("  @{:#x} {}", e.offset, e.name);
+            }
             println!("paths ({}):", h.ascii_paths.len());
             for p in &h.ascii_paths {
                 println!("  {p}");
@@ -97,6 +107,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
                     RpsValue::Vec3 { x, y, z } => println!("  [{i}] vec3 ({x}, {y}, {z})"),
+                    RpsValue::Chunk { id, version, size } => {
+                        println!("  [{i}] chunk id={id:#x} ver={version} size={size}")
+                    }
                     RpsValue::Unknown { tag, at } => {
                         println!("  [{i}] unknown tag=0x{tag:02x} at={at}")
                     }
@@ -119,14 +132,37 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             pse,
             output,
             empty_graph,
+            emitter_stubs,
         } => {
-            let h = read_pse(&pse)?;
-            let bytes = pse_to_rps_root_into(&h, empty_graph)?;
+            let data = fs::read(&pse)?;
+            let h = openpfx::parse_pse(&data)?;
+            let stubs = if emitter_stubs {
+                scan_pse_emitters(&data)
+                    .into_iter()
+                    .map(|e| e.name)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let bytes = pse_to_rps_export(
+                &h,
+                &PseExportOptions {
+                    empty_graph: empty_graph && stubs.is_empty(),
+                    emitter_stubs: stubs.clone(),
+                },
+            )?;
             fs::write(&output, &bytes)?;
+            let tag = if !stubs.is_empty() {
+                format!("+{}-emitter-stubs", stubs.len())
+            } else if empty_graph {
+                "+empty-graph".into()
+            } else {
+                String::new()
+            };
             println!(
-                "Wrote {} bytes root{} → {} (emitters/curves NOT exported yet)",
+                "Wrote {} bytes root{} → {} (curves/paths NOT exported yet)",
                 bytes.len(),
-                if empty_graph { "+empty-graph" } else { "" },
+                tag,
                 output.display()
             );
         }

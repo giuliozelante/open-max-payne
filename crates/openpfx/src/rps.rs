@@ -12,6 +12,9 @@ pub const TAG_F32: u8 = 0x09;
 pub const TAG_STR: u8 = 0x0d;
 /// Vec3: `0x16` + 3 × LE f32 (BYOD frequency analysis across `x_data.ras` RPS files).
 pub const TAG_VEC3: u8 = 0x16;
+/// Chunk header: `0x0c` + id_u32 + version_u32 + size_u32 (`R_MemoryFile::createChunk`).
+/// `size` is total bytes including the tag + 12-byte header (`payload = size - 0x0d`).
+pub const TAG_CHUNK: u8 = 0x0c;
 
 /// Signed int size-compression tags (RLMFC `operator<<(mf, int)`).
 pub const TAG_I32_1: u8 = 0x14; // == TAG_U8_A
@@ -27,8 +30,8 @@ pub const TAG_U32_4: u8 = 0x03;
 
 /// Tags that begin a MemoryFile typed value (not raw embedded payload).
 const KNOWN_TAGS: &[u8] = &[
-    TAG_I32_4, TAG_U32_4, 0x07, TAG_F32, TAG_STR, TAG_U32_3, TAG_U32_2, TAG_U8_B, TAG_I32_3,
-    TAG_I32_2, TAG_U8_A, 0x15, TAG_VEC3, 0x17,
+    TAG_I32_4, TAG_U32_4, 0x07, TAG_F32, TAG_CHUNK, TAG_STR, TAG_U32_3, TAG_U32_2, TAG_U8_B,
+    TAG_I32_3, TAG_I32_2, TAG_U8_A, 0x15, TAG_VEC3, 0x17,
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +62,12 @@ pub enum RpsValue {
         x: f32,
         y: f32,
         z: f32,
+    },
+    /// `R_MemoryFile` chunk header (payload follows; walker does not auto-skip).
+    Chunk {
+        id: u32,
+        version: u32,
+        size: u32,
     },
     Unknown {
         tag: u8,
@@ -225,6 +234,17 @@ pub fn parse_rps(data: &[u8]) -> Result<RpsHeader, PfxError> {
                 values.push(RpsValue::Str { value });
                 i += len;
             }
+            TAG_CHUNK => {
+                if i + 12 > data.len() {
+                    values.push(RpsValue::Unknown { tag, at: i - 1 });
+                    break;
+                }
+                let id = u32::from_le_bytes(data[i..i + 4].try_into().unwrap());
+                let version = u32::from_le_bytes(data[i + 4..i + 8].try_into().unwrap());
+                let size = u32::from_le_bytes(data[i + 8..i + 12].try_into().unwrap());
+                values.push(RpsValue::Chunk { id, version, size });
+                i += 12;
+            }
             TAG_VEC3 => {
                 if i + 12 > data.len() {
                     values.push(RpsValue::Unknown { tag, at: i - 1 });
@@ -318,6 +338,12 @@ pub fn encode_rps(values: &[RpsValue]) -> Result<Vec<u8>, PfxError> {
                 out.extend_from_slice(&x.to_le_bytes());
                 out.extend_from_slice(&y.to_le_bytes());
                 out.extend_from_slice(&z.to_le_bytes());
+            }
+            RpsValue::Chunk { id, version, size } => {
+                out.push(TAG_CHUNK);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.extend_from_slice(&version.to_le_bytes());
+                out.extend_from_slice(&size.to_le_bytes());
             }
             RpsValue::Unknown { tag, at } => {
                 return Err(PfxError::Msg(format!(
@@ -424,6 +450,27 @@ mod tests {
             &h.values[0],
             RpsValue::Vec3 { x, y, z } if *x == 0.0 && *y == 1.0 && *z == 2.0
         ));
+    }
+
+    #[test]
+    fn walks_chunk_header_tag() {
+        // size = 0x0d (tag+header only) + 4 payload bytes → total 0x11
+        let mut buf = vec![TAG_CHUNK];
+        buf.extend_from_slice(&0x1234u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&0x11u32.to_le_bytes());
+        buf.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let h = parse_rps(&buf).unwrap();
+        assert!(matches!(
+            h.values[0],
+            RpsValue::Chunk {
+                id: 0x1234,
+                version: 1,
+                size: 0x11
+            }
+        ));
+        // walker stops at raw payload (not a tag)
+        assert!(matches!(h.values[1], RpsValue::Unknown { tag: 0xaa, .. }));
     }
 
     #[test]

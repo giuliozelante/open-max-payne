@@ -201,6 +201,16 @@ impl MemoryFileWriter {
         self.write_object_header(obj::GRAPH, count);
     }
 
+    /// Companion block open (`FUN_00418fe0`): type `0x40` / ver `2`.
+    pub fn write_companion_open(&mut self) {
+        self.write_object_header(obj::COMPANION, obj::COMPANION_VER);
+    }
+
+    /// Companion inner open (`FUN_00415d00`): type `0x21` / ver `5`.
+    pub fn write_companion_inner_open(&mut self) {
+        self.write_object_header(obj::COMPANION_INNER, obj::COMPANION_INNER_VER);
+    }
+
     /// Emitter object open (`FUN_00417570`): `0x30`/`4` + param block + scalar fields before curves.
     ///
     /// Seven scalars after the nested param block (BYOD candle):

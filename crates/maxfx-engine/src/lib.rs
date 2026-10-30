@@ -64,8 +64,11 @@ pub fn looks_like_ldb_or_ai(data: &[u8]) -> bool {
 /// Files start with [`LDB_PREAMBLE`], then a stream of payloads separated by
 /// ASCII `>` (`0x3e`). Payloads are **space-padded** (`0x20`); after stripping
 /// spaces, retail `.ai` records often begin with opcode-like bytes (e.g. `0xc7`)
-/// and embed MemoryFile-style tags (`0x14` / `0x09` / `0x16`). Full opcode map
-/// still needs `X_LevelDBImportLevel` REA (issue #14).
+/// and embed MemoryFile-style tags (`0x14` / `0x09` / `0x16`).
+///
+/// Root framing is **not** `R_MemoryFile` chunk tag `0x0c` (rlmfc REA; see
+/// `docs/specs/2026-10-30-leveldb-paths.md`). Opcode map still needs
+/// `X_LevelDBImportLevel` REA (issue #14).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LdbRecord {
     /// Bytes between the previous `>` and this record's terminating `>` (exclusive of `>`).

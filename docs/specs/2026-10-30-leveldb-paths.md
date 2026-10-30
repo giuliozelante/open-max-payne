@@ -121,5 +121,31 @@ Opcode / section semantics need `X_LevelDBImportLevel` (or a `*_LOAD` handler) d
 
 ### Issue #14 (chunks)
 - [x] `>`-record split + space-strip probe + CLI histogram
-- [ ] Decompile `X_LevelDBImportLevel` / `*_LOAD` → opcode map
+- [x] REA: `R_MemoryFile::createChunk` / `openChunk` / `closeChunk` (`rlmfc.dll`)
+- [ ] Decompile `X_LevelDBImportLevel` / `*_LOAD` → opcode map (MaxPayne.exe string/xref timeouts)
 - [ ] Typed section decode inside records
+
+## MemoryFile ChunkHeader (rlmfc REA, issue #14)
+
+`createChunk(id, version)` writes:
+
+| Field | Wire |
+|-------|------|
+| tag | `0x0c` (`writeTagged` BasicType) |
+| id | `u32` LE |
+| version | `u32` LE |
+| size | `u32` LE — **total** chunk bytes including tag+header; patched by `closeChunk` |
+
+`openChunk` does `readTag(0xc)` + `read(12)`, then payload length = `size - 0x0d`.
+
+**BYOD `.ldb` / `.ai` root is not this framing.** Scans for valid `0x0c`+header on
+`part0_level1.ai` / `.ldb` found **zero** rooted chunks. Top-level remains
+space-padded `>` records; tag `0x0c` may appear nested later inside importer
+payloads. Rust walker: `openpfx::RpsValue::Chunk` / `TAG_CHUNK`.
+
+### Space padding note
+
+Between `>` delimiters, `0x20` bytes act as padding around significant tokens
+(non-space runs stay contiguous, e.g. `14 0a`). Space-stripping is the right
+dense view for opcode probes; it is not a MemoryFile stream by itself
+(lead bytes like `0xc7` / `0xcb` / `0xf7` before any `0x14` tags).

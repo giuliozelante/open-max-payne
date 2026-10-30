@@ -85,6 +85,19 @@ Retail candle stays in the 1-byte int/uint regime (`0x14`/`0x11`).
 Mirrored in Rust: `openpfx::MemoryFileWriter` + `parse_rps` multi-byte int/uint
 tags (`0x13`/`0x12`/`0x02`, `0x10`/`0x0f`/`0x03`).
 
+**Chunk** (`createChunk`): tag `0x0c` + 12-byte header (`id`, `version`, `size`);
+`size` includes tag+header (`payload = size - 0x0d`). Used by LevelDB importers;
+RPS particle exports observed so far stay in the flat tagged regime.
+
+### PSE vs RPS object headers
+
+| Format | Object type/version |
+|--------|---------------------|
+| `.pse` (editor) | Untagged LE `u32` pairs (`0x30`/`4` emitter, `0x71`/`3` curve, …) + `u8`-len names |
+| `.rps` (runtime) | MemoryFile int tags (`0x14 0x30`, `0x14 0x04`, …) |
+
+`scan_pse_emitters` harvests emitter names from the PSE raw pattern for export WIP.
+
 ### Version / structure gate (load)
 
 `FUN_00422050` (`operator>>` pair):
