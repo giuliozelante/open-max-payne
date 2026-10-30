@@ -3,9 +3,7 @@
 //!
 //! Spec: docs/specs/rps_format.md
 
-use crate::rps::{
-    TAG_BLOB, TAG_F32, TAG_STR, TAG_U8_A, TAG_U8_B, TAG_VEC3,
-};
+use crate::rps::{TAG_BLOB, TAG_F32, TAG_STR, TAG_U8_A, TAG_U8_B, TAG_VEC3};
 use crate::PfxError;
 
 /// Object-type markers written as `operator<<(mf, &typeId)` then a version/count int.
@@ -257,14 +255,20 @@ mod tests {
         let h = parse_rps(w.as_bytes()).unwrap();
         assert!(matches!(
             &h.values[0],
-            crate::rps::RpsValue::U8 {
-                value: 0x71,
-                ..
-            }
+            crate::rps::RpsValue::U8 { value: 0x71, .. }
         ));
-        assert!(matches!(&h.values[1], crate::rps::RpsValue::U8 { value: 3, .. }));
-        assert!(matches!(&h.values[2], crate::rps::RpsValue::U8 { value: 1, .. }));
-        assert!(matches!(&h.values[3], crate::rps::RpsValue::U8 { value: 16, .. }));
+        assert!(matches!(
+            &h.values[1],
+            crate::rps::RpsValue::U8 { value: 3, .. }
+        ));
+        assert!(matches!(
+            &h.values[2],
+            crate::rps::RpsValue::U8 { value: 1, .. }
+        ));
+        assert!(matches!(
+            &h.values[3],
+            crate::rps::RpsValue::U8 { value: 16, .. }
+        ));
         assert_eq!(h.values.len(), 4 + 16);
     }
 
@@ -274,8 +278,12 @@ mod tests {
         w.write_embedded_file(r"fire\x.JPG", Some(b"\xff\xd8\xff\xd9"))
             .unwrap();
         let h = parse_rps(w.as_bytes()).unwrap();
-        assert!(matches!(&h.values[0], crate::rps::RpsValue::Str { value } if value == r"fire\x.JPG"));
-        assert!(matches!(&h.values[1], crate::rps::RpsValue::Blob { data } if data == b"\xff\xd8\xff\xd9"));
+        assert!(
+            matches!(&h.values[0], crate::rps::RpsValue::Str { value } if value == r"fire\x.JPG")
+        );
+        assert!(
+            matches!(&h.values[1], crate::rps::RpsValue::Blob { data } if data == b"\xff\xd8\xff\xd9")
+        );
     }
 
     #[test]
@@ -288,8 +296,8 @@ mod tests {
         w.write_param_block(1.0, 0, 1, 0.1);
         let expected: &[u8] = &[
             0x14, 0x60, 0x14, 0x05, 0x11, 12, 0x09, 0x00, 0x00, 0x20, 0x40, 0x11, 10, 0x09, 0x00,
-            0x00, 0x20, 0x40, 0x11, 10, 0x14, 0, 0x14, 0, 0x14, 0x31, 0x14, 1, 0x14, 0x20, 0x14,
-            3, 0x09, 0x00, 0x00, 0x80, 0x3f, 0x14, 0, 0x14, 1, 0x09, 0xcd, 0xcc, 0xcc, 0x3d,
+            0x00, 0x20, 0x40, 0x11, 10, 0x14, 0, 0x14, 0, 0x14, 0x31, 0x14, 1, 0x14, 0x20, 0x14, 3,
+            0x09, 0x00, 0x00, 0x80, 0x3f, 0x14, 0, 0x14, 1, 0x09, 0xcd, 0xcc, 0xcc, 0x3d,
         ];
         assert_eq!(w.as_bytes(), expected);
     }

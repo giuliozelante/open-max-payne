@@ -1,6 +1,4 @@
-use maxfx_engine::{
-    discover_ras_files, list_level_packages, open_archive, parse_levels_txt,
-};
+use maxfx_engine::{discover_ras_files, list_level_packages, open_archive, parse_levels_txt};
 use openras::RasArchive;
 use std::env;
 use std::path::Path;
