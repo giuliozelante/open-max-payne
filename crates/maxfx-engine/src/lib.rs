@@ -524,7 +524,10 @@ pub fn parse_ras_ldb_import_materials_at(
     }
     let mut i = offset + 1;
     let count = read_mf_i32(data, &mut i)? as u32;
-    let _unknown = read_mf_i32(data, &mut i)?;
+    // First list (after textures) has an extra int before `0x25`; nested lists do not.
+    if data.get(i) != Some(&LDB_IMPORT_MATERIAL_TAG) {
+        let _unknown = read_mf_i32(data, &mut i)?;
+    }
     let mut out = Vec::new();
     let mut parsed = 0u32;
     while parsed < count {
