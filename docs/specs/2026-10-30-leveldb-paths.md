@@ -93,7 +93,7 @@ Top-level sections share tag byte **`0x1c`** + kind byte + LE `u16` count:
 
 | Kind | Bytes | Body |
 |------|-------|------|
-| `0x12` | `1c 12 NN NN FF` | `FF` flag + `NN` × (`0x16` + 3×f32). Flag 0 ⇒ count matches run; next section follows. |
+| `0x12` | `1c 12 NN NN FF` | `FF` flag + contiguous `0x16` vec3 run. Flag 0 ⇒ `NN` equals run length; flag 1 (Tutorial) ⇒ run is longer than `NN` — always advance by the contiguous run. |
 | `0x13` | `1c 13 NN NN` | No flag byte; MemoryFile tags (`14 …`) — Startup section-2. |
 
 `LDB_RAS_MAGIC` = LE u16 for `1c 12`. Helpers: `parse_ras_ldb_section_at`,
