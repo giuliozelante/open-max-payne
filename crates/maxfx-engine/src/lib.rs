@@ -922,6 +922,21 @@ mod tests {
     }
 
     #[test]
+    fn finds_import_level_after_geometry() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&LDB_RAS_MAGIC.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(0);
+        // empty face section count 0
+        data.push(LDB_SECTION_TAG);
+        data.push(LDB_SECTION_KIND_MF);
+        data.extend_from_slice(&0u16.to_le_bytes());
+        let at = data.len();
+        data.extend_from_slice(&[0x14, LDB_IMPORT_VERSION as u8, 0x14, 1]);
+        assert_eq!(ras_ldb_after_geometry(&data), Some(at));
+    }
+
+    #[test]
     fn parses_surf_records() {
         let mut body = Vec::new();
         body.push(0x16);
