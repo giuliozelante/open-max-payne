@@ -4,10 +4,11 @@ use maxfx_engine::{
     looks_like_ras_ldb, open_archive, parse_levels_txt, parse_ras_ldb_faces,
     parse_ras_ldb_header, parse_ras_ldb_import_exits_at, parse_ras_ldb_import_lightmaps_at,
     parse_ras_ldb_import_material_categories_at, parse_ras_ldb_import_materials_at,
-    parse_ras_ldb_import_character_head_at, parse_ras_ldb_import_mesh_attribs_at,
-    parse_ras_ldb_import_mesh_polys_at, parse_ras_ldb_import_point_stream_at,
-    parse_ras_ldb_import_static_mesh_at, parse_ras_ldb_import_textures,
-    parse_ras_ldb_section_at, ras_ldb_import_jumppoint_names_at,
+    parse_ras_ldb_import_character_head_at, parse_ras_ldb_import_lights_at,
+    parse_ras_ldb_import_mesh_attribs_at, parse_ras_ldb_import_mesh_polys_at,
+    parse_ras_ldb_import_point_stream_at, parse_ras_ldb_import_static_mesh_at,
+    parse_ras_ldb_import_textures, parse_ras_ldb_section_at,
+    ras_ldb_import_jumppoint_names_at,
     ras_ldb_after_geometry,
     ras_ldb_after_import_materials, ras_ldb_count_section_end, ras_ldb_first_mf_section_body,
     ras_ldb_import_paths, ras_ldb_import_stats, ras_ldb_vec3_section_end, split_ldb_records,
@@ -254,6 +255,22 @@ fn main() -> ExitCode {
                                                                 );
                                                                 for jn in &jumps {
                                                                     println!("    jump {jn}");
+                                                                }
+                                                            } else if let Some((lc, lights, lend)) =
+                                                                parse_ras_ldb_import_lights_at(
+                                                                    &data, mesh_off, 8,
+                                                                )
+                                                            {
+                                                                println!(
+                                                                    "  import lights @{mesh_off:#x}: count={lc} shown={} end={lend:#x}",
+                                                                    lights.len()
+                                                                );
+                                                                for lit in &lights {
+                                                                    let [x, y, z] = lit.pos;
+                                                                    println!(
+                                                                        "    light {} subtype={} params={} pos=({x:.1},{y:.1},{z:.1})",
+                                                                        lit.name, lit.subtype, lit.param_count
+                                                                    );
                                                                 }
                                                             }
                                                     }

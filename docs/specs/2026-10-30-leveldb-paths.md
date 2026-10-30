@@ -171,10 +171,12 @@ clouds + `0x1a` mat3 + pos. Startup #1 @ `0x1197022` (50 pts); #2 form B
 + hdr1 + `point_ref, verts(3..=16), normal, u8, 0, attr, f32, f32, 0, index`
 (Startup #2 → 21081 polys). Optional **mesh attribs**
 (`parse_ras_ldb_import_mesh_attribs_at`): `0x1f` + count + `(id, vec3)×count`
-(not `0x25` materials) then next mesh. After meshes: **character head**
+(not `0x25` materials) then next mesh. After meshes: Startup **character head**
 (`parse_ras_ldb_import_character_head_at`) empty `0x1f` + `0` + count, then
 `::…Jumppoint…` / room entity graph with dual `0x1a` xforms + `DO_*` hooks
-(full walk still open).
+(full walk still open). Tutorial: **lights** (`parse_ras_ldb_import_lights_at`)
+count + dual name + dual `0x1a` + subtype + empty str + `0x19` mat3 + 10×`0x09`
+(21 lights → teleports).
 
 ### Retail RAS `.ai`
 

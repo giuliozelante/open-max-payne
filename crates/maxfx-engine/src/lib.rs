@@ -874,6 +874,79 @@ pub fn parse_ras_ldb_import_mesh_attribs_at(
     Some((count, out, i))
 }
 
+/// One ImportLight-like record after the static-mesh chain (BYOD Tutorial).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RasLdbImportLight {
+    pub name: String,
+    pub pos: [f32; 3],
+    pub subtype: i32,
+    pub param_count: u32,
+}
+
+/// Parse `count` + light records: dual name, dual `0x1a` xform, subtype int,
+/// empty str, raw `0x19` mat3, then ten `0x09` floats (BYOD Tutorial).
+pub fn parse_ras_ldb_import_lights_at(
+    data: &[u8],
+    offset: usize,
+    max: usize,
+) -> Option<(u32, Vec<RasLdbImportLight>, usize)> {
+    let mut i = offset;
+    let count = read_mf_i32(data, &mut i)? as u32;
+    if count == 0 || count > 100_000 {
+        return None;
+    }
+    // First record must look like Light:: / dual string + 0x1a.
+    if data.get(i) != Some(&0x0d) {
+        return None;
+    }
+    let mut out = Vec::new();
+    for n in 0..count {
+        let name = read_mf_str(data, &mut i)?;
+        let _name2 = read_mf_str(data, &mut i)?;
+        if data.get(i) != Some(&0x1a) || i + 1 + 36 + 12 > data.len() {
+            return None;
+        }
+        i += 1 + 36;
+        let pos = [
+            f32::from_le_bytes(data[i..i + 4].try_into().ok()?),
+            f32::from_le_bytes(data[i + 4..i + 8].try_into().ok()?),
+            f32::from_le_bytes(data[i + 8..i + 12].try_into().ok()?),
+        ];
+        i += 12;
+        if data.get(i) != Some(&0x1a) || i + 1 + 48 > data.len() {
+            return None;
+        }
+        i += 1 + 48; // second xform
+        let subtype = read_mf_i32(data, &mut i)?;
+        let empty = read_mf_str(data, &mut i)?;
+        if !empty.is_empty() {
+            return None;
+        }
+        if data.get(i) != Some(&0x19) || i + 1 + 36 > data.len() {
+            return None;
+        }
+        i += 1 + 36;
+        let mut params = 0u32;
+        while data.get(i) == Some(&0x09) && i + 5 <= data.len() {
+            i += 5;
+            params += 1;
+        }
+        if params == 0 {
+            return None;
+        }
+        if out.len() < max {
+            out.push(RasLdbImportLight {
+                name,
+                pos,
+                subtype,
+                param_count: params,
+            });
+        }
+        let _ = n;
+    }
+    Some((count, out, i))
+}
+
 /// Head of the post-mesh character/jumppoint block (BYOD Startup).
 ///
 /// Layout: empty `0x1f`, int `0`, count, then named entities (`0d 14` paths,
@@ -2030,6 +2103,39 @@ mod tests {
         mats.extend_from_slice(&[0x14, 1]);
         mats.push(LDB_IMPORT_MATERIAL_TAG);
         assert!(parse_ras_ldb_import_mesh_attribs_at(&mats, 0).is_none());
+    }
+
+    #[test]
+    fn parses_import_lights() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x14, 1]); // count
+        for _ in 0..2 {
+            body.extend_from_slice(&[0x0d, 0x14, 8]);
+            body.extend_from_slice(b"Light::0");
+        }
+        for _ in 0..2 {
+            body.push(0x1a);
+            for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 3.0, 4.0, 5.0] {
+                body.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        body.extend_from_slice(&[0x14, 3, 0x0d, 0x14, 0]);
+        body.push(0x19);
+        for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        for _ in 0..10 {
+            body.push(0x09);
+            body.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+        body.extend_from_slice(&[0x14, 20]); // next section
+        let (count, lights, end) = parse_ras_ldb_import_lights_at(&body, 0, 4).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(lights[0].name, "Light::0");
+        assert_eq!(lights[0].pos, [3.0, 4.0, 5.0]);
+        assert_eq!(lights[0].subtype, 3);
+        assert_eq!(lights[0].param_count, 10);
+        assert_eq!(body[end], 0x14);
     }
 
     #[test]
