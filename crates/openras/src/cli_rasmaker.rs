@@ -227,7 +227,13 @@ mod tests {
 
     #[test]
     fn reject_absolute_without_p() {
-        let err = parse_rasmaker(&args(&["-a", "/tmp/x", "out.ras"])).unwrap_err();
+        // Path::is_absolute is OS-specific (`/tmp` is not absolute on Windows).
+        let abs = if cfg!(windows) {
+            r"C:\temp\x"
+        } else {
+            "/tmp/x"
+        };
+        let err = parse_rasmaker(&args(&["-a", abs, "out.ras"])).unwrap_err();
         assert!(err.to_string().contains("must be relative"));
     }
 
