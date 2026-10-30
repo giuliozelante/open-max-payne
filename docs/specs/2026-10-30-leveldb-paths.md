@@ -141,9 +141,9 @@ repeat N:
 
 Helpers: `parse_ras_ldb_import_textures`, then
 `parse_ras_ldb_import_materials_at` (`0x1f` list + `0x25` name/texture/index —
-`X_LevelDBImportMaterial`). Startup may nest another `0x1f` list immediately
-after (category/container — RTTI `ImportMaterialCategory`). Further
-ImportBSP/Character/… still open.
+`X_LevelDBImportMaterial`). Startup nests a second `0x1f` list (no padding int). After both lists, a
+different schema begins (`14 <n>` then name/int/paths, and `0x0e` bytes that may
+be bool tags). Further ImportBSP/Character/… still open.
 
 ### Retail RAS `.ai`
 
