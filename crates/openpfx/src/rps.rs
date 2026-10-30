@@ -12,6 +12,8 @@ pub const TAG_F32: u8 = 0x09;
 pub const TAG_STR: u8 = 0x0d;
 /// Blob: `0x13` + u16_le length + bytes (often embedded JPEG `FFD8…`).
 pub const TAG_BLOB: u8 = 0x13;
+/// Vec3: `0x16` + 3 × LE f32 (BYOD frequency analysis across `x_data.ras` RPS files).
+pub const TAG_VEC3: u8 = 0x16;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RpsValue {
@@ -19,6 +21,7 @@ pub enum RpsValue {
     F32 { value: f32 },
     Str { value: String },
     Blob { len: usize, jpeg_soi: bool },
+    Vec3 { x: f32, y: f32, z: f32 },
     Unknown { tag: u8, at: usize },
 }
 
@@ -43,7 +46,7 @@ pub fn parse_rps(data: &[u8]) -> Result<RpsHeader, PfxError> {
     }
     let mut values = Vec::new();
     let mut i = 0;
-    while i < data.len() && values.len() < 256 {
+    while i < data.len() && values.len() < 100_000 {
         let tag = data[i];
         i += 1;
         match tag {
@@ -95,6 +98,17 @@ pub fn parse_rps(data: &[u8]) -> Result<RpsHeader, PfxError> {
                 let jpeg_soi = len >= 2 && data[i] == 0xff && data[i + 1] == 0xd8;
                 values.push(RpsValue::Blob { len, jpeg_soi });
                 i += len;
+            }
+            TAG_VEC3 => {
+                if i + 12 > data.len() {
+                    values.push(RpsValue::Unknown { tag, at: i - 1 });
+                    break;
+                }
+                let x = f32::from_le_bytes(data[i..i + 4].try_into().unwrap());
+                let y = f32::from_le_bytes(data[i + 4..i + 8].try_into().unwrap());
+                let z = f32::from_le_bytes(data[i + 8..i + 12].try_into().unwrap());
+                values.push(RpsValue::Vec3 { x, y, z });
+                i += 12;
             }
             _ => {
                 values.push(RpsValue::Unknown { tag, at: i - 1 });
@@ -189,6 +203,20 @@ mod tests {
         buf.push(0xff);
         let h = parse_rps(&buf).unwrap();
         assert!(matches!(&h.values[1], RpsValue::Str { value } if value == "hello"));
+    }
+
+    #[test]
+    fn walks_vec3_tag() {
+        let mut buf = vec![TAG_VEC3];
+        for f in [0.0f32, 1.0, 2.0] {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+        buf.push(0xff);
+        let h = parse_rps(&buf).unwrap();
+        assert!(matches!(
+            &h.values[0],
+            RpsValue::Vec3 { x, y, z } if *x == 0.0 && *y == 1.0 && *z == 2.0
+        ));
     }
 
     #[test]

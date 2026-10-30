@@ -59,7 +59,7 @@ Observed tags (consistent across multiple `x_data.ras` samples):
 | `0x09` | 4 × LE f32 | float |
 | `0x0d` | `14 <len>` + bytes | relative path string (e.g. `fire\candleflame2\pflame.JPG`) |
 | `0x13` | u16_le length + bytes | embedded blob (often JPEG starting `FFD8`) |
-| `0x16` | TBD | appears after particle params; e.g. `16 00 00 00 00` + floats — not walked yet |
+| `0x16` | 3 × LE f32 | vec3 (very common: `(0,0,0)`, `(0,1,0)`, …) |
 
 Common prefix (candle / light examples):
 

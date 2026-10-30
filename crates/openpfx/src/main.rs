@@ -73,6 +73,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         "  [{i}] blob len={len}{}",
                         if *jpeg_soi { " (jpeg)" } else { "" }
                     ),
+                    RpsValue::Vec3 { x, y, z } => println!("  [{i}] vec3 ({x}, {y}, {z})"),
                     RpsValue::Unknown { tag, at } => {
                         println!("  [{i}] unknown tag=0x{tag:02x} at={at}")
                     }
