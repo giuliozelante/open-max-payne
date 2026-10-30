@@ -164,7 +164,9 @@ Linked exits often alternate with/without AABB. Immediately after:
 nest `0x1c` + ints, `0x12` even count, subtype int, then `count/2` bodies
 (`15 f32 f32 15 f32 f32 03 i32 0e u8`; first lacks id). Startup 65107 bodies
 → `0xfdd873` (+ trailing bodies → Startup `0x1197022` / Tutorial `0xb8ea3b`).
-Next: ints + `0x11` + many `0x16` vec3s (possible ImportBSP / mesh). Still open.
+**Static mesh-like** (`parse_ras_ldb_import_static_mesh_at`): `a`,`b`, u8 `n`,
+`n` vec3s, nest `0x1c` + `n` vec3s, `0x1a` mat3, pos. First Startup object @
+`0x1197022` (50 pts → pos). Further mesh/BSP list still open.
 
 ### Retail RAS `.ai`
 

@@ -766,6 +766,57 @@ pub fn parse_ras_ldb_import_lightmaps_at(data: &[u8], offset: usize) -> Option<(
     Some((count, i))
 }
 
+/// One dual-vec3-cloud object after the point stream (likely ImportStaticMesh).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RasLdbImportStaticMesh {
+    pub a: i32,
+    pub b: i32,
+    pub point_count: u8,
+    pub pos: [f32; 3],
+}
+
+/// Parse a dual point-cloud + `0x1a` mat3 + pos record at `offset`.
+pub fn parse_ras_ldb_import_static_mesh_at(
+    data: &[u8],
+    offset: usize,
+) -> Option<(RasLdbImportStaticMesh, usize)> {
+    let mut i = offset;
+    let a = read_mf_i32(data, &mut i)?;
+    let b = read_mf_i32(data, &mut i)?;
+    let n = read_mf_uint_u8(data, &mut i)?;
+    for _ in 0..n {
+        read_mf_vec3(data, &mut i)?;
+    }
+    if data.get(i) != Some(&0x1c) {
+        return None;
+    }
+    i += 1;
+    let n2 = read_mf_i32(data, &mut i)? as u8;
+    if n2 != n {
+        return None;
+    }
+    for _ in 0..n2 {
+        read_mf_vec3(data, &mut i)?;
+    }
+    if data.get(i) != Some(&0x1a) || i + 1 + 36 + 12 > data.len() {
+        return None;
+    }
+    i += 1 + 36;
+    let x = f32::from_le_bytes(data[i..i + 4].try_into().ok()?);
+    let y = f32::from_le_bytes(data[i + 4..i + 8].try_into().ok()?);
+    let z = f32::from_le_bytes(data[i + 8..i + 12].try_into().ok()?);
+    i += 12;
+    Some((
+        RasLdbImportStaticMesh {
+            a,
+            b,
+            point_count: n,
+            pos: [x, y, z],
+        },
+        i,
+    ))
+}
+
 /// Skip-walk the post-exit `0x15` point stream (likely lights/triggers).
 ///
 /// Layout after ImportExit: nest `0x1c` + ints, then `0x12` count (even;
@@ -1695,6 +1746,38 @@ mod tests {
             ras_ldb_import_exit_names_at(&body2, 0, 8),
             vec!["::start::Exit0", "::help::Exit1"]
         );
+    }
+
+    #[test]
+    fn parses_import_static_mesh_clouds() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x14, 4, 0x14, 10, 0x11, 2]); // a,b,n=2
+        for _ in 0..2 {
+            body.push(0x16);
+            for v in [1.0f32, 2.0, 3.0] {
+                body.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        body.extend_from_slice(&[0x1c, 0x14, 2]); // nest count=2
+        for _ in 0..2 {
+            body.push(0x16);
+            for v in [4.0f32, 5.0, 6.0] {
+                body.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        body.push(0x1a);
+        for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [7.0f32, 8.0, 9.0] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        let (mesh, end) = parse_ras_ldb_import_static_mesh_at(&body, 0).unwrap();
+        assert_eq!(mesh.a, 4);
+        assert_eq!(mesh.b, 10);
+        assert_eq!(mesh.point_count, 2);
+        assert_eq!(mesh.pos, [7.0, 8.0, 9.0]);
+        assert_eq!(end, body.len());
     }
 
     #[test]
