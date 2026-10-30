@@ -103,6 +103,21 @@ RPS stores a **sampled grid** written by `FUN_00432fd0` (channels × samples f32
 via evaluator `FUN_00432240`. Export stubs currently emit placeholder samples;
 full `-e` parity needs that sampler (or a fixture capture from retail `-e`).
 
+### Curve object offsets (`FUN_00432fd0` / `FUN_00432240`, ParticleFX.exe)
+
+| Off | Role |
+|-----|------|
+| `+0x08` | channel count (`int`) |
+| `+0x0c` | sort-channels flag |
+| `+0x30` / `+0x34` | sample time range min / max (`float`) |
+| `+0x4c` | sample count along time |
+| `+0x54`… | keyframe container (STL-ish; iterators `FUN_00410410` / `FUN_00414000`) |
+| `+0x68` | keyframe count |
+
+Per keyframe (through list cursor): time at `*node`, channel values at
+`node+4+channel*4`. Sampler walks keyframes until `time >= t`, then interpolates
+(`FUN_00431dd0` / `FUN_004320b0` / `FUN_00433b60`).
+
 ### Version / structure gate (load)
 
 `FUN_00422050` (`operator>>` pair):
