@@ -109,11 +109,14 @@ fn main() -> ExitCode {
                                             t.path, t.flag, t.blob_len, t.jpeg
                                         );
                                     }
-                                    if let Some((mc, mats, _)) =
-                                        parse_ras_ldb_import_materials_at(&data, tex_end, 5)
+                                    let mut mat_off = tex_end;
+                                    let mut mat_pass = 0;
+                                    while let Some((mc, mats, mend)) =
+                                        parse_ras_ldb_import_materials_at(&data, mat_off, 5)
                                     {
+                                        mat_pass += 1;
                                         println!(
-                                            "  import materials: declared={mc} shown={}",
+                                            "  import materials[{mat_pass}] @{mat_off:#x}: declared={mc} shown={} end={mend:#x}",
                                             mats.len()
                                         );
                                         for m in &mats {
@@ -121,6 +124,13 @@ fn main() -> ExitCode {
                                                 "    {} → {} (#{})",
                                                 m.name, m.texture, m.index
                                             );
+                                        }
+                                        if mend <= mat_off {
+                                            break;
+                                        }
+                                        mat_off = mend;
+                                        if mat_pass >= 4 {
+                                            break;
                                         }
                                     }
                                 } else {
