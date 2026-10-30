@@ -5,6 +5,10 @@ edition = "2021"
 description = "Native Max Payne 1 engine walking skeleton (OpenLara-style BYOD) — not playable yet"
 license = "MIT OR Apache-2.0"
 
+[[bin]]
+name = "maxfx-engine"
+path = "src/main.rs"
+
 [lib]
 name = "maxfx_engine"
 path = "src/lib.rs"

@@ -54,4 +54,5 @@ Done when (north star — open):
   - [x] Engine walking skeleton loads a BYOD archive (`maxfx-engine` + skeleton spec)
   - [ ] Play path can prefer native engine when ready; Wine remains fallback
   - [ ] `openpfx` PSE→RPS export (`-e` parity) after RPS version REA
-  - [ ] Engine REA note naming real level-load call chain
+  - [x] Engine REA note naming archive mount + level-load tokens
+  - [ ] Decompiled `R_File::loadArchives` ordered RAS list
