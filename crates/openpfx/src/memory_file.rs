@@ -129,6 +129,42 @@ impl MemoryFileWriter {
         self.write_f32(float_b);
         Ok(())
     }
+
+    /// `FUN_0041ab00` field stream after the `0x60`/`5` header (no graphs).
+    /// Layout matches BYOD candle bytes after the object header:
+    /// `uint, f32, uint, f32, uint, int, int`.
+    pub fn write_particle_system_fields(
+        &mut self,
+        u_a: u8,
+        f_a: f32,
+        u_b: u8,
+        f_b: f32,
+        u_c: u8,
+        i_a: u8,
+        i_b: u8,
+    ) {
+        self.write_uint_u8(u_a);
+        self.write_f32(f_a);
+        self.write_uint_u8(u_b);
+        self.write_f32(f_b);
+        self.write_uint_u8(u_c);
+        self.write_int_u8(i_a);
+        self.write_int_u8(i_b);
+    }
+
+    /// `FUN_00414d20` shared param block.
+    pub fn write_param_block(&mut self, f_a: f32, i_a: u8, i_b: u8, f_b: f32) {
+        self.write_object_header(obj::PARAM_BLOCK, obj::PARAM_BLOCK_VER);
+        self.write_f32(f_a);
+        self.write_int_u8(i_a);
+        self.write_int_u8(i_b);
+        self.write_f32(f_b);
+    }
+
+    /// `FUN_00419be0` graph section header (`0x31` + count). Nested nodes omitted.
+    pub fn write_graph_header(&mut self, count: u8) {
+        self.write_object_header(obj::GRAPH, count);
+    }
 }
 
 #[cfg(test)]
@@ -166,5 +202,21 @@ mod tests {
         w.write_pse_preamble(96, 5, 12, 2.5, 10, 2.5).unwrap();
         let via_helper = crate::rps::pse_header_to_rps_preamble(96, 5, 12, 2.5, 10, 2.5).unwrap();
         assert_eq!(w.as_bytes(), via_helper.as_slice());
+    }
+
+    #[test]
+    fn candle_prefix_through_graph_header() {
+        // fire_candle_flame_large_1.rps values[0..12] (BYOD; not committed).
+        let mut w = MemoryFileWriter::new();
+        w.write_object_header(obj::PARTICLE_SYSTEM, obj::PARTICLE_SYSTEM_VER);
+        w.write_particle_system_fields(12, 2.5, 10, 2.5, 10, 0, 0);
+        w.write_graph_header(1);
+        w.write_param_block(1.0, 0, 1, 0.1);
+        let expected: &[u8] = &[
+            0x14, 0x60, 0x14, 0x05, 0x11, 12, 0x09, 0x00, 0x00, 0x20, 0x40, 0x11, 10, 0x09, 0x00,
+            0x00, 0x20, 0x40, 0x11, 10, 0x14, 0, 0x14, 0, 0x14, 0x31, 0x14, 1, 0x14, 0x20, 0x14,
+            3, 0x09, 0x00, 0x00, 0x80, 0x3f, 0x14, 0, 0x14, 1, 0x09, 0xcd, 0xcc, 0xcc, 0x3d,
+        ];
+        assert_eq!(w.as_bytes(), expected);
     }
 }
