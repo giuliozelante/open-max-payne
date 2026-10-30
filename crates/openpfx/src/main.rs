@@ -157,7 +157,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Vec::new()
             };
             let sampled = if emitter_stubs {
-                sample_emitter_curves_from_pse(&data, 16)?
+                // BYOD retail RPS curves commonly use 32 samples (`FUN_00432fd0` +0x4c).
+                sample_emitter_curves_from_pse(&data, 32)?
             } else {
                 Vec::new()
             };
