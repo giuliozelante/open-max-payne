@@ -183,9 +183,9 @@ count + dual name + dual `0x1a` + subtype + empty str + `0x19` mat3 + 10×`0x09`
 Starts as a MemoryFile tag stream (`0x14 …`), e.g. Tutorial.ai:
 `14 7b 14 0a 14 00 14 00 09 …` (ints 123 / 10 / 0 / 0).
 `parse_ras_ai_preamble`: 4×f32, gravity vec3 `(0,-20,0)`, 3×f32, ints, first
-`0x1a` xform; then `soft_walk_mf_tags` for coverage. No `0d 14` strings in
-Tutorial.ai (binary FSM). Helper: `looks_like_memory_file_ai`. **Not** the
-ImportLevel `0x14 0x20` gate.
+`0x1a` xform. `soft_walk_mf_tags` (adds `0x15`/`0x19`/`0x1c`/`0x1f`) reaches
+**EOF** on Tutorial.ai (~35k tags). Semantic FSM decode still open. Helper:
+`looks_like_memory_file_ai`. **Not** the ImportLevel `0x14 0x20` gate.
 
 Caveat: a naïve `>` split mis-fires on float bytes (`…99 99 3e` = 0.3f).
 
@@ -211,8 +211,9 @@ Tagged int `0x14 0x20` (`LDB_IMPORT_VERSION`) — see ExportLevel below.
 - [x] Retract false space/`>` primary framing; document RAS `0x121c` + MF `.ai`
 - [x] REA: `R_MemoryFile::createChunk` / `openChunk` / `closeChunk` (`rlmfc.dll`)
 - [x] REA: `X_LevelDBImportLevel` vtable + version gate (see below)
-- [ ] Map post-vec3 `.ldb` body → ImportLevel / ImportBSP
-- [ ] Full MemoryFile walk of `.ai` (fix early blob false-positive)
+- [x] Map post-vec3 ImportLevel stream through textures→materials→cats→lightmaps→exits→points→static meshes (+polys/attribs)→lights/character head
+- [x] Soft MemoryFile walk of Tutorial.ai to EOF (semantic FSM still open)
+- [ ] Nested character/teleport entity graph + ImportBSP if distinct from mesh polys
 
 ## `X_LevelDBImportLevel` (MaxPayne.exe REA)
 

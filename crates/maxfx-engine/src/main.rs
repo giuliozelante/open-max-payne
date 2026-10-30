@@ -324,10 +324,11 @@ fn main() -> ExitCode {
                         }
                         if let Some((pend, grav)) = parse_ras_ai_preamble(&data) {
                             let [gx, gy, gz] = grav;
-                            let (n, wend) = soft_walk_mf_tags(&data, pend, 4096);
+                            let (n, wend) = soft_walk_mf_tags(&data, pend, 500_000);
                             println!(
-                                "  ai preamble end={pend:#x} gravity=({gx:.1},{gy:.1},{gz:.1}) soft_tags={n} walk_end={wend:#x}/{:#x}",
-                                data.len()
+                                "  ai preamble end={pend:#x} gravity=({gx:.1},{gy:.1},{gz:.1}) soft_tags={n} walk_end={wend:#x}/{:#x}{}",
+                                data.len(),
+                                if wend == data.len() { " (EOF)" } else { "" }
                             );
                         }
                         return ExitCode::SUCCESS;

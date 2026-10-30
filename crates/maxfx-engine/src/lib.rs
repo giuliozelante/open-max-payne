@@ -1535,6 +1535,9 @@ pub fn parse_ras_ai_preamble(data: &[u8]) -> Option<(usize, [f32; 3])> {
 }
 
 /// Soft-count known MemoryFile tags from `offset` until an unknown byte.
+///
+/// Tag sizes match ImportLevel / Tutorial.ai BYOD (incl. raw `0x19` mat3,
+/// `0x15` dual-f32, nest `0x1c` / list `0x1f`). Tutorial.ai walks to EOF.
 pub fn soft_walk_mf_tags(data: &[u8], offset: usize, max: usize) -> (usize, usize) {
     let mut i = offset;
     let mut n = 0usize;
@@ -1546,7 +1549,10 @@ pub fn soft_walk_mf_tags(data: &[u8], offset: usize, max: usize) -> (usize, usiz
             0x02 => i + 5,
             0x09 => i + 5,
             0x16 => i + 13,
+            0x15 => i + 1 + 8,
+            0x19 => i + 1 + 36,
             0x1a => i + 1 + 48,
+            0x1c | 0x1f => i + 1,
             0x0d if i + 2 < data.len() && data[i + 1] == 0x14 => {
                 let len = data[i + 2] as usize;
                 i + 3 + len
@@ -2484,6 +2490,18 @@ mod tests {
         assert_eq!(body[end], 0xff);
         let (n, _) = soft_walk_mf_tags(&body, 0, 32);
         assert!(n >= 8);
+        // 0x19 mat3 + 0x15 dual-f32 + nest tags walk cleanly
+        let mut ext = body.clone();
+        ext.pop(); // drop 0xff
+        ext.push(0x19);
+        ext.extend_from_slice(&[0u8; 36]);
+        ext.push(0x15);
+        ext.extend_from_slice(&[0u8; 8]);
+        ext.push(0x1c);
+        ext.push(0x1f);
+        let (n2, end2) = soft_walk_mf_tags(&ext, 0, 64);
+        assert!(n2 > n);
+        assert_eq!(end2, ext.len());
     }
 
     #[test]
