@@ -465,15 +465,17 @@ fn read_mf_str(data: &[u8], i: &mut usize) -> Option<String> {
 /// Parse the texture list that follows ImportLevel version (`14 20` then count int).
 ///
 /// Each entry: `0x0d` path, `0x11` flag, compressed-int length + raw bytes.
+/// Returns `(count, textures, byte_offset_after_list)`.
 pub fn parse_ras_ldb_import_textures(
     data: &[u8],
     max: usize,
-) -> Option<(u32, Vec<RasLdbImportTexture>)> {
+) -> Option<(u32, Vec<RasLdbImportTexture>, usize)> {
     let at = ras_ldb_after_geometry(data)?;
     let mut i = at + 2; // skip 14 20
     let count = read_mf_i32(data, &mut i)? as u32;
     let mut out = Vec::new();
-    while out.len() < max && out.len() < count as usize {
+    let mut parsed = 0u32;
+    while parsed < count {
         let path = read_mf_str(data, &mut i)?;
         let flag = read_mf_uint_u8(data, &mut i)?;
         let blob_len = read_mf_i32(data, &mut i)? as usize;
@@ -482,14 +484,70 @@ pub fn parse_ras_ldb_import_textures(
         }
         let jpeg = blob_len >= 2 && data[i] == 0xff && data[i + 1] == 0xd8;
         i += blob_len;
-        out.push(RasLdbImportTexture {
-            path,
-            flag,
-            blob_len,
-            jpeg,
-        });
+        parsed += 1;
+        if out.len() < max {
+            out.push(RasLdbImportTexture {
+                path,
+                flag,
+                blob_len,
+                jpeg,
+            });
+        }
     }
-    Some((count, out))
+    if parsed != count {
+        return None;
+    }
+    Some((count, out, i))
+}
+
+/// Material object tag observed after the ImportLevel texture list (`X_LevelDBImportMaterial`).
+pub const LDB_IMPORT_MATERIAL_TAG: u8 = 0x25;
+
+/// Container/list marker before material count (BYOD Startup).
+pub const LDB_IMPORT_MATERIAL_LIST_TAG: u8 = 0x1f;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasLdbImportMaterial {
+    pub name: String,
+    pub texture: String,
+    pub index: i32,
+}
+
+/// Parse material list starting at `offset` (expects `0x1f` then count ints + `0x25` records).
+pub fn parse_ras_ldb_import_materials_at(
+    data: &[u8],
+    offset: usize,
+    max: usize,
+) -> Option<(u32, Vec<RasLdbImportMaterial>, usize)> {
+    if offset >= data.len() || data[offset] != LDB_IMPORT_MATERIAL_LIST_TAG {
+        return None;
+    }
+    let mut i = offset + 1;
+    let count = read_mf_i32(data, &mut i)? as u32;
+    let _unknown = read_mf_i32(data, &mut i)?;
+    let mut out = Vec::new();
+    let mut parsed = 0u32;
+    while parsed < count {
+        if i >= data.len() || data[i] != LDB_IMPORT_MATERIAL_TAG {
+            break;
+        }
+        i += 1;
+        let name = read_mf_str(data, &mut i)?;
+        let texture = read_mf_str(data, &mut i)?;
+        let index = read_mf_i32(data, &mut i)?;
+        parsed += 1;
+        if out.len() < max {
+            out.push(RasLdbImportMaterial {
+                name,
+                texture,
+                index,
+            });
+        }
+    }
+    if parsed != count {
+        return None;
+    }
+    Some((count, out, i))
 }
 
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
@@ -1073,12 +1131,31 @@ mod tests {
         data.extend_from_slice(&[0x11, 4]);
         data.extend_from_slice(&[0x14, 4]); // blob len
         data.extend_from_slice(&[0xff, 0xd8, 0xff, 0xd9]);
-        let (n, texs) = parse_ras_ldb_import_textures(&data, 8).unwrap();
+        let (n, texs, end) = parse_ras_ldb_import_textures(&data, 8).unwrap();
         assert_eq!(n, 1);
         assert_eq!(texs[0].path, "a.JPG");
         assert_eq!(texs[0].flag, 4);
         assert!(texs[0].jpeg);
         assert_eq!(texs[0].blob_len, 4);
+        assert_eq!(end, data.len());
+    }
+
+    #[test]
+    fn parses_import_materials() {
+        let mut body = Vec::new();
+        body.push(LDB_IMPORT_MATERIAL_LIST_TAG);
+        body.extend_from_slice(&[0x14, 1, 0x14, 0]); // count=1 unknown=0
+        body.push(LDB_IMPORT_MATERIAL_TAG);
+        body.extend_from_slice(&[0x0d, 0x14, 3]);
+        body.extend_from_slice(b"mat");
+        body.extend_from_slice(&[0x0d, 0x14, 5]);
+        body.extend_from_slice(b"t.JPG");
+        body.extend_from_slice(&[0x14, 7]);
+        let (n, mats, _) = parse_ras_ldb_import_materials_at(&body, 0, 4).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(mats[0].name, "mat");
+        assert_eq!(mats[0].texture, "t.JPG");
+        assert_eq!(mats[0].index, 7);
     }
 
     #[test]

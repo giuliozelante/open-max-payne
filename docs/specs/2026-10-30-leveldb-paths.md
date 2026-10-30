@@ -139,7 +139,9 @@ repeat N:
   <compressed int> len + raw  # often JPEG FFD8…FFD9
 ```
 
-Helper: `parse_ras_ldb_import_textures`. Further ImportBSP/Character/… still open.
+Helpers: `parse_ras_ldb_import_textures`, then
+`parse_ras_ldb_import_materials_at` (`0x1f` list + `0x25` name/texture/index —
+`X_LevelDBImportMaterial`). Further ImportBSP/Character/… still open.
 
 ### Retail RAS `.ai`
 

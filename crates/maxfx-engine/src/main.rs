@@ -2,7 +2,8 @@ use maxfx_engine::{
     classify_ldb_lead, count_ras_ldb_leading_vec3, discover_ras_files, list_level_packages,
     looks_like_ldb_or_ai, looks_like_memory_file_ai, looks_like_memory_file_ldb,
     looks_like_ras_ldb, open_archive, parse_levels_txt, parse_ras_ldb_faces,
-    parse_ras_ldb_header, parse_ras_ldb_import_textures, parse_ras_ldb_section_at,
+    parse_ras_ldb_header, parse_ras_ldb_import_materials_at, parse_ras_ldb_import_textures,
+    parse_ras_ldb_section_at,
     ras_ldb_after_geometry, ras_ldb_count_section_end, ras_ldb_first_mf_section_body,
     ras_ldb_import_paths, ras_ldb_import_stats, ras_ldb_vec3_section_end,
     split_ldb_records, walk_ras_ldb_known_sections,
@@ -95,11 +96,11 @@ fn main() -> ExitCode {
                                 if let Some((np, nj)) = ras_ldb_import_stats(&data) {
                                     println!("  import stream: {np} paths, {nj} JPEG SOIs");
                                 }
-                                if let Some((tex_count, texs)) =
+                                if let Some((tex_count, texs, tex_end)) =
                                     parse_ras_ldb_import_textures(&data, 5)
                                 {
                                     println!(
-                                        "  import textures: declared={tex_count} shown={}",
+                                        "  import textures: declared={tex_count} shown={} end={tex_end:#x}",
                                         texs.len()
                                     );
                                     for t in &texs {
@@ -107,6 +108,20 @@ fn main() -> ExitCode {
                                             "    {} flag={} blob={} jpeg={}",
                                             t.path, t.flag, t.blob_len, t.jpeg
                                         );
+                                    }
+                                    if let Some((mc, mats, _)) =
+                                        parse_ras_ldb_import_materials_at(&data, tex_end, 5)
+                                    {
+                                        println!(
+                                            "  import materials: declared={mc} shown={}",
+                                            mats.len()
+                                        );
+                                        for m in &mats {
+                                            println!(
+                                                "    {} → {} (#{})",
+                                                m.name, m.texture, m.index
+                                            );
+                                        }
                                     }
                                 } else {
                                     let paths = ras_ldb_import_paths(&data, 8);
