@@ -534,7 +534,11 @@ pub fn parse_ras_ldb_import_materials_at(
         i += 1;
         let name = read_mf_str(data, &mut i)?;
         let texture = read_mf_str(data, &mut i)?;
-        let index = read_mf_i32(data, &mut i)?;
+        // Startup’s last entry lacks the trailing int before a nested `0x1f` list.
+        let index = match data.get(i).copied() {
+            Some(0x14 | 0x13 | 0x12 | 0x02) => read_mf_i32(data, &mut i)?,
+            _ => -1,
+        };
         parsed += 1;
         if out.len() < max {
             out.push(RasLdbImportMaterial {
@@ -544,7 +548,7 @@ pub fn parse_ras_ldb_import_materials_at(
             });
         }
     }
-    if parsed != count {
+    if parsed == 0 {
         return None;
     }
     Some((count, out, i))
