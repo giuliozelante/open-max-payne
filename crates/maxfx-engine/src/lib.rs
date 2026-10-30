@@ -156,8 +156,19 @@ pub fn parse_ras_ldb_section_at(data: &[u8], offset: usize) -> Option<RasLdbSect
 }
 
 /// Byte offset just past the first vec3 section header + `header.count` × 13.
+///
+/// Prefer [`ras_ldb_vec3_section_end`] when `flag != 0` (declared count may be
+/// smaller than the contiguous `0x16` run — Tutorial).
 pub fn ras_ldb_count_section_end(header: &RasLdbHeader) -> usize {
     LDB_RAS_HEADER_LEN + header.count as usize * 13
+}
+
+/// End of the leading vec3 cloud using the contiguous `0x16` run (not declared count).
+pub fn ras_ldb_vec3_section_end(data: &[u8]) -> Option<usize> {
+    if !looks_like_ras_ldb(data) {
+        return None;
+    }
+    Some(LDB_RAS_HEADER_LEN + count_ras_ldb_leading_vec3(data) * 13)
 }
 
 /// Count contiguous `0x16` + 12-byte float triples after the RAS header.
@@ -345,11 +356,7 @@ pub fn parse_ras_ldb_faces_ex(body: &[u8], max: usize) -> (Vec<RasLdbFace>, usiz
 
 /// Body slice of the first kind-`0x13` section after a flag-0 vec3 cloud.
 pub fn ras_ldb_first_mf_section_body(data: &[u8]) -> Option<&[u8]> {
-    let h = parse_ras_ldb_header(data)?;
-    if h.flag != 0 {
-        return None;
-    }
-    let end = ras_ldb_count_section_end(&h);
+    let end = ras_ldb_vec3_section_end(data)?;
     let sec = parse_ras_ldb_section_at(data, end)?;
     if sec.kind != LDB_SECTION_KIND_MF {
         return None;
@@ -419,7 +426,17 @@ pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
         };
         match sec.kind {
             LDB_SECTION_KIND_VEC3 => {
-                let end = off + LDB_RAS_HEADER_LEN + sec.count as usize * 13;
+                // Advance by contiguous 0x16 run (Tutorial flag=1: run > declared count).
+                let run = {
+                    let mut i = off + LDB_RAS_HEADER_LEN;
+                    let mut n = 0usize;
+                    while i + 13 <= data.len() && data[i] == 0x16 {
+                        n += 1;
+                        i += 13;
+                    }
+                    n
+                };
+                let end = off + LDB_RAS_HEADER_LEN + run * 13;
                 if end > data.len() {
                     break;
                 }

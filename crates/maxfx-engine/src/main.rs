@@ -2,10 +2,11 @@ use maxfx_engine::{
     classify_ldb_lead, count_ras_ldb_leading_vec3, discover_ras_files, list_level_packages,
     looks_like_ldb_or_ai, looks_like_memory_file_ai, looks_like_memory_file_ldb,
     looks_like_ras_ldb, open_archive, parse_levels_txt, parse_ras_ldb_faces,
-    parse_ras_ldb_header, parse_ras_ldb_section_at, ras_ldb_count_section_end,
-    ras_ldb_after_geometry, ras_ldb_first_mf_section_body, ras_ldb_import_paths,
-    split_ldb_records, walk_ras_ldb_known_sections, LDB_IMPORT_VERSION, LDB_RAS_MAGIC,
-    LDB_SECTION_KIND_MF, LDB_SECTION_KIND_VEC3, LDB_SECTION_TAG,
+    parse_ras_ldb_header, parse_ras_ldb_section_at, ras_ldb_after_geometry,
+    ras_ldb_count_section_end, ras_ldb_first_mf_section_body, ras_ldb_import_paths,
+    ras_ldb_vec3_section_end, split_ldb_records, walk_ras_ldb_known_sections,
+    LDB_IMPORT_VERSION, LDB_RAS_MAGIC, LDB_SECTION_KIND_MF, LDB_SECTION_KIND_VEC3,
+    LDB_SECTION_TAG,
 };
 use openras::RasArchive;
 use std::env;
@@ -27,7 +28,9 @@ fn main() -> ExitCode {
                     if looks_like_ras_ldb(&data) {
                         let h = parse_ras_ldb_header(&data).unwrap();
                         let nvec = count_ras_ldb_leading_vec3(&data);
-                        let end = ras_ldb_count_section_end(&h);
+                        let end = ras_ldb_vec3_section_end(&data).unwrap_or_else(|| {
+                            ras_ldb_count_section_end(&h)
+                        });
                         println!(
                             "{}: {} bytes, RAS .ldb magic {:#x} count={} flag={} leading_vec3={} (count_match={})",
                             p.display(),
@@ -36,69 +39,67 @@ fn main() -> ExitCode {
                             h.count,
                             h.flag,
                             nvec,
-                            h.flag == 0 && h.count as usize == nvec
+                            h.count as usize == nvec
                         );
-                        if h.flag == 0 {
-                            if let Some(s2) = parse_ras_ldb_section_at(&data, end) {
+                        if let Some(s2) = parse_ras_ldb_section_at(&data, end) {
+                            println!(
+                                "  section2 @{end}: tag={:#x} kind={:#x} count={} {}",
+                                LDB_SECTION_TAG,
+                                s2.kind,
+                                s2.count,
+                                if s2.kind == LDB_SECTION_KIND_MF {
+                                    "MF-body"
+                                } else {
+                                    "other"
+                                }
+                            );
+                        }
+                        if let Some(body) = ras_ldb_first_mf_section_body(&data) {
+                            let faces = parse_ras_ldb_faces(body, 3);
+                            if let Some(f) = faces.first() {
                                 println!(
-                                    "  section2 @{end}: tag={:#x} kind={:#x} count={} {}",
-                                    LDB_SECTION_TAG,
-                                    s2.kind,
-                                    s2.count,
-                                    if s2.kind == LDB_SECTION_KIND_MF {
-                                        "MF-body"
-                                    } else {
-                                        "other"
-                                    }
+                                    "  face0 indices={:?} attr={} n=({:.3},{:.3},{:.3}) p=({:.3},{:.3},{:.3})",
+                                    f.indices,
+                                    f.attr,
+                                    f.normal[0],
+                                    f.normal[1],
+                                    f.normal[2],
+                                    f.point[0],
+                                    f.point[1],
+                                    f.point[2]
                                 );
                             }
-                            if let Some(body) = ras_ldb_first_mf_section_body(&data) {
-                                let faces = parse_ras_ldb_faces(body, 3);
-                                if let Some(f) = faces.first() {
-                                    println!(
-                                        "  face0 indices={:?} attr={} n=({:.3},{:.3},{:.3}) p=({:.3},{:.3},{:.3})",
-                                        f.indices,
-                                        f.attr,
-                                        f.normal[0],
-                                        f.normal[1],
-                                        f.normal[2],
-                                        f.point[0],
-                                        f.point[1],
-                                        f.point[2]
-                                    );
-                                }
-                                println!("  parsed {} face prefix(es)", faces.len());
-                            }
-                            let spans = walk_ras_ldb_known_sections(&data);
-                            println!("  known sections ({}):", spans.len());
-                            for s in &spans {
-                                let label = match s.kind {
-                                    LDB_SECTION_KIND_VEC3 => "vec3",
-                                    LDB_SECTION_KIND_MF if s.end > s.offset => "mf-ok",
-                                    LDB_SECTION_KIND_MF => "mf-stop",
-                                    _ => "other",
-                                };
+                            println!("  parsed {} face prefix(es)", faces.len());
+                        }
+                        let spans = walk_ras_ldb_known_sections(&data);
+                        println!("  known sections ({}):", spans.len());
+                        for s in &spans {
+                            let label = match s.kind {
+                                LDB_SECTION_KIND_VEC3 => "vec3",
+                                LDB_SECTION_KIND_MF if s.end > s.offset => "mf-ok",
+                                LDB_SECTION_KIND_MF => "mf-stop",
+                                _ => "other",
+                            };
+                            println!(
+                                "    @{:#x} kind={:#x} ({label}) count={} end={:#x}",
+                                s.offset, s.kind, s.count, s.end
+                            );
+                        }
+                        match ras_ldb_after_geometry(&data) {
+                            Some(at) => {
                                 println!(
-                                    "    @{:#x} kind={:#x} ({label}) count={} end={:#x}",
-                                    s.offset, s.kind, s.count, s.end
+                                    "  ImportLevel MF @ {at:#x} (14 {:#x})",
+                                    LDB_IMPORT_VERSION
                                 );
-                            }
-                            match ras_ldb_after_geometry(&data) {
-                                Some(at) => {
-                                    println!(
-                                        "  ImportLevel MF @ {at:#x} (14 {:#x})",
-                                        LDB_IMPORT_VERSION
-                                    );
-                                    let paths = ras_ldb_import_paths(&data, 8);
-                                    for pth in &paths {
-                                        println!("    path {pth}");
-                                    }
-                                    if paths.len() >= 8 {
-                                        println!("    …");
-                                    }
+                                let paths = ras_ldb_import_paths(&data, 8);
+                                for pth in &paths {
+                                    println!("    path {pth}");
                                 }
-                                None => println!("  ImportLevel MF head not found after geometry"),
+                                if paths.len() >= 8 {
+                                    println!("    …");
+                                }
                             }
+                            None => println!("  ImportLevel MF head not found after geometry"),
                         }
                         return ExitCode::SUCCESS;
                     }
