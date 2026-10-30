@@ -128,6 +128,10 @@ continues as a flat MemoryFile stream beginning **`14 20`**
 texture path `\\HYPERION\MAX\PROJECTS\TEXTURES\…JPG` + `FFD8` blob. This is the
 bridge from RAS geometry packing to the MaxED ImportLevel gate.
 
+Startup ImportLevel stream (~20 MiB): ~2888 printable `0x0d` paths, ~341 JPEG
+`FFD8` markers (`ras_ldb_import_paths`). Typed ImportBSP/Character/… decode still
+open.
+
 ### Retail RAS `.ai`
 
 Starts as a MemoryFile tag stream (`0x14 …`), e.g. Tutorial.ai:
