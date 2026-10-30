@@ -426,6 +426,72 @@ pub fn ras_ldb_import_stats(data: &[u8]) -> Option<(usize, usize)> {
     Some((paths, jpegs))
 }
 
+/// One texture entry after ImportLevel `0x20`: path + uint flag + raw blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasLdbImportTexture {
+    pub path: String,
+    pub flag: u8,
+    pub blob_len: usize,
+    pub jpeg: bool,
+}
+
+fn read_mf_uint_u8(data: &[u8], i: &mut usize) -> Option<u8> {
+    if *i + 2 > data.len() || data[*i] != 0x11 {
+        return None;
+    }
+    *i += 1;
+    let v = data[*i];
+    *i += 1;
+    Some(v)
+}
+
+fn read_mf_str(data: &[u8], i: &mut usize) -> Option<String> {
+    if *i + 3 > data.len() || data[*i] != 0x0d || data[*i + 1] != 0x14 {
+        return None;
+    }
+    let len = data[*i + 2] as usize;
+    *i += 3;
+    if *i + len > data.len() {
+        return None;
+    }
+    let bytes = &data[*i..*i + len];
+    *i += len;
+    if !bytes.iter().all(|&b| (0x20..=0x7e).contains(&b)) {
+        return None;
+    }
+    String::from_utf8(bytes.to_vec()).ok()
+}
+
+/// Parse the texture list that follows ImportLevel version (`14 20` then count int).
+///
+/// Each entry: `0x0d` path, `0x11` flag, compressed-int length + raw bytes.
+pub fn parse_ras_ldb_import_textures(
+    data: &[u8],
+    max: usize,
+) -> Option<(u32, Vec<RasLdbImportTexture>)> {
+    let at = ras_ldb_after_geometry(data)?;
+    let mut i = at + 2; // skip 14 20
+    let count = read_mf_i32(data, &mut i)? as u32;
+    let mut out = Vec::new();
+    while out.len() < max && out.len() < count as usize {
+        let path = read_mf_str(data, &mut i)?;
+        let flag = read_mf_uint_u8(data, &mut i)?;
+        let blob_len = read_mf_i32(data, &mut i)? as usize;
+        if i + blob_len > data.len() {
+            break;
+        }
+        let jpeg = blob_len >= 2 && data[i] == 0xff && data[i + 1] == 0xd8;
+        i += blob_len;
+        out.push(RasLdbImportTexture {
+            path,
+            flag,
+            blob_len,
+            jpeg,
+        });
+    }
+    Some((count, out))
+}
+
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
     let mut out = Vec::new();
     let mut off = 0;
@@ -989,6 +1055,30 @@ mod tests {
         let at = data.len();
         data.extend_from_slice(&[0x14, LDB_IMPORT_VERSION as u8, 0x14, 1]);
         assert_eq!(ras_ldb_after_geometry(&data), Some(at));
+    }
+
+    #[test]
+    fn parses_import_texture_list() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&LDB_RAS_MAGIC.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(0);
+        data.push(LDB_SECTION_TAG);
+        data.push(LDB_SECTION_KIND_MF);
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&[0x14, LDB_IMPORT_VERSION as u8]);
+        data.extend_from_slice(&[0x14, 1]); // count
+        data.extend_from_slice(&[0x0d, 0x14, 5]);
+        data.extend_from_slice(b"a.JPG");
+        data.extend_from_slice(&[0x11, 4]);
+        data.extend_from_slice(&[0x14, 4]); // blob len
+        data.extend_from_slice(&[0xff, 0xd8, 0xff, 0xd9]);
+        let (n, texs) = parse_ras_ldb_import_textures(&data, 8).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(texs[0].path, "a.JPG");
+        assert_eq!(texs[0].flag, 4);
+        assert!(texs[0].jpeg);
+        assert_eq!(texs[0].blob_len, 4);
     }
 
     #[test]
