@@ -89,20 +89,15 @@ Also present: `X_LevelDBImportLevel` (top-level), `ImportBSP`, `ImportCharacter`
 
 ### Retail RAS `.ldb`
 
-```
-1c 12          LE u16 magic = 0x121c   (maxfx_engine::LDB_RAS_MAGIC)
-NN NN          LE u16 count
-FF             u8 flag (0 or 1 observed)
-16 <3×f32> × N run of MemoryFile vec3 tags (0x16)
-```
+Top-level sections share tag byte **`0x1c`** + kind byte + LE `u16` count:
 
-When **flag = 0**, `count` equals the contiguous leading vec3 run length
-(Startup_level / end_combat). After that run the next byte is often `0x1c`
-(start of another `1c 12 …` section). When **flag = 1** (Tutorial), `count` is
-smaller than the contiguous `0x16` run — layout WIP.
+| Kind | Bytes | Body |
+|------|-------|------|
+| `0x12` | `1c 12 NN NN FF` | `FF` flag + `NN` × (`0x16` + 3×f32). Flag 0 ⇒ count matches run; next section follows. |
+| `0x13` | `1c 13 NN NN` | No flag byte; MemoryFile tags (`14 …`) — Startup section-2. |
 
-Helpers: `looks_like_ras_ldb` / `parse_ras_ldb_header` /
-`count_ras_ldb_leading_vec3` / `ras_ldb_count_section_end`.
+`LDB_RAS_MAGIC` = LE u16 for `1c 12`. Helpers: `parse_ras_ldb_section_at`,
+`parse_ras_ldb_header`, `count_ras_ldb_leading_vec3`, `ras_ldb_count_section_end`.
 
 ### Retail RAS `.ai`
 

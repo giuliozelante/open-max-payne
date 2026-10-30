@@ -60,12 +60,19 @@ pub struct LevelPackage {
 /// synthetic tests and any still-unseen cook path.
 pub const LDB_PREAMBLE: &[u8] = b"                >"; // 16 spaces + '>'
 
-/// Retail RAS `.ldb` magic (LE `u16` at offset 0). Observed on Startup/Tutorial/
-/// end_combat front_end levels: bytes `1c 12`.
-pub const LDB_RAS_MAGIC: u16 = 0x121c;
+/// Retail RAS `.ldb` section tag byte (first byte of each top-level section).
+pub const LDB_SECTION_TAG: u8 = 0x1c;
 
-/// Byte length of the RAS `.ldb` head before the first `0x16` vec3 tag:
-/// `magic_u16` + `u16` + `u8`.
+/// Vertex-cloud section kind (byte after tag): `1c 12` → LE u16 `0x121c`.
+pub const LDB_SECTION_KIND_VEC3: u8 = 0x12;
+
+/// Follow-on section kind (byte after tag): `1c 13` → often MemoryFile-tagged body.
+pub const LDB_SECTION_KIND_MF: u8 = 0x13;
+
+/// Convenience: LE u16 for a vec3 section header word0 (`1c 12`).
+pub const LDB_RAS_MAGIC: u16 = u16::from_le_bytes([LDB_SECTION_TAG, LDB_SECTION_KIND_VEC3]);
+
+/// Vec3 section head: `tag` + `kind` + `count_u16` + `flag_u8` (= 5 bytes).
 pub const LDB_RAS_HEADER_LEN: usize = 5;
 
 /// `X_LevelDBImportLevel` MemoryFile version gate (`operator>>` int must be this).
@@ -80,16 +87,21 @@ pub fn looks_like_ldb_or_ai(data: &[u8]) -> bool {
         || (data.len() >= LDB_PREAMBLE.len() && data.starts_with(LDB_PREAMBLE))
 }
 
-/// Retail RAS `.ldb`: LE u16 [`LDB_RAS_MAGIC`] (`1c 12`).
+/// Retail RAS `.ldb`: section tag [`LDB_SECTION_TAG`] + kind [`LDB_SECTION_KIND_VEC3`].
 pub fn looks_like_ras_ldb(data: &[u8]) -> bool {
-    data.len() >= 2 && u16::from_le_bytes([data[0], data[1]]) == LDB_RAS_MAGIC
+    data.len() >= 2 && data[0] == LDB_SECTION_TAG && data[1] == LDB_SECTION_KIND_VEC3
 }
 
-/// Parsed RAS `.ldb` head.
-///
-/// When `flag == 0`, `count` equals the number of leading `0x16` vec3 tags
-/// (BYOD Startup/end_combat). When `flag == 1` (Tutorial), `count` is smaller
-/// than the contiguous vec3 run — semantics still WIP.
+/// One top-level RAS `.ldb` section head (`1c <kind> <count_u16> …`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RasLdbSection {
+    pub kind: u8,
+    pub count: u16,
+    /// Present for kind `0x12` (vec3 cloud); first body byte for kind `0x13` is often `0x14`.
+    pub flag: Option<u8>,
+}
+
+/// Parsed first (vec3) section of a retail RAS `.ldb`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RasLdbHeader {
     pub magic: u16,
@@ -98,17 +110,52 @@ pub struct RasLdbHeader {
 }
 
 pub fn parse_ras_ldb_header(data: &[u8]) -> Option<RasLdbHeader> {
-    if data.len() < LDB_RAS_HEADER_LEN || !looks_like_ras_ldb(data) {
+    let sec = parse_ras_ldb_section_at(data, 0)?;
+    if sec.kind != LDB_SECTION_KIND_VEC3 {
         return None;
     }
     Some(RasLdbHeader {
-        magic: u16::from_le_bytes([data[0], data[1]]),
-        count: u16::from_le_bytes([data[2], data[3]]),
-        flag: data[4],
+        magic: LDB_RAS_MAGIC,
+        count: sec.count,
+        flag: sec.flag?,
     })
 }
 
-/// Byte offset just past the RAS header + `header.count` vec3 tags (13 bytes each).
+/// Parse a `1c <kind> <u16>` section head at `offset`.
+///
+/// Kind `0x12` consumes an extra flag byte. Kind `0x13` does not (body starts
+/// immediately — BYOD Startup section-2 begins `14 00 14 03 …`).
+pub fn parse_ras_ldb_section_at(data: &[u8], offset: usize) -> Option<RasLdbSection> {
+    if data.len() < offset + 4 || data[offset] != LDB_SECTION_TAG {
+        return None;
+    }
+    let kind = data[offset + 1];
+    let count = u16::from_le_bytes([data[offset + 2], data[offset + 3]]);
+    match kind {
+        LDB_SECTION_KIND_VEC3 => {
+            if data.len() < offset + 5 {
+                return None;
+            }
+            Some(RasLdbSection {
+                kind,
+                count,
+                flag: Some(data[offset + 4]),
+            })
+        }
+        LDB_SECTION_KIND_MF => Some(RasLdbSection {
+            kind,
+            count,
+            flag: None,
+        }),
+        _ => Some(RasLdbSection {
+            kind,
+            count,
+            flag: None,
+        }),
+    }
+}
+
+/// Byte offset just past the first vec3 section header + `header.count` × 13.
 pub fn ras_ldb_count_section_end(header: &RasLdbHeader) -> usize {
     LDB_RAS_HEADER_LEN + header.count as usize * 13
 }
@@ -493,6 +540,17 @@ mod tests {
         assert_eq!(ras_ldb_count_section_end(&ht), tight.len() - 1);
         assert!(looks_like_memory_file_ai(&[0x14, 0x7b, 0x14, 0x0a]));
         assert!(!looks_like_memory_file_ai(&[0x14, 0x20]));
+        // kind 0x13 section: no flag byte; body starts with MF int tag
+        let mut s2 = Vec::new();
+        s2.push(LDB_SECTION_TAG);
+        s2.push(LDB_SECTION_KIND_MF);
+        s2.extend_from_slice(&3u16.to_le_bytes());
+        s2.extend_from_slice(&[0x14, 0x00, 0x14, 0x03]);
+        let sec = parse_ras_ldb_section_at(&s2, 0).unwrap();
+        assert_eq!(sec.kind, LDB_SECTION_KIND_MF);
+        assert_eq!(sec.count, 3);
+        assert_eq!(sec.flag, None);
+        assert_eq!(s2[4], 0x14);
     }
 
     #[test]
