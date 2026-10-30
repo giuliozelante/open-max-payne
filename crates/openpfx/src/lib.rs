@@ -337,12 +337,12 @@ pub struct SampledCurve {
     pub values: Vec<f32>,
 }
 
-/// Like [`pse_to_rps_export`], but `per_emitter_curves[i]` supplies up to four sampled
-/// curves for emitter stub `i`. Missing slots get placeholders.
+/// Like [`pse_to_rps_export`], but `per_emitter_curves[i]` supplies four slots
+/// (`None` → placeholder) for emitter stub `i`.
 pub fn pse_to_rps_export_with_curves(
     h: &PseHeader,
     opts: &PseExportOptions,
-    per_emitter_curves: &[Vec<SampledCurve>],
+    per_emitter_curves: &[Vec<Option<SampledCurve>>],
 ) -> Result<Vec<u8>, PfxError> {
     use memory_file::MemoryFileWriter;
     fn u8_fit(v: u32, name: &str) -> Result<u8, PfxError> {
@@ -383,7 +383,8 @@ pub fn pse_to_rps_export_with_curves(
                 .unwrap_or(&[]);
             // Four curves required by FUN_00417570 before path embeds.
             for slot in 0..4 {
-                if let Some(sc) = sampled.get(slot) {
+                let sc = sampled.get(slot).and_then(|o| o.as_ref());
+                if let Some(sc) = sc {
                     let ch = sc.channels;
                     let need = ch as usize;
                     if need == 0 || sc.values.len() % need != 0 {
@@ -429,43 +430,76 @@ pub fn pse_to_rps_export_with_curves(
     Ok(w.into_bytes())
 }
 
+/// Candle / FUN_00417570 emitter curve slot order (editor names, case-insensitive prefix).
+const EMITTER_CURVE_SLOTS: &[&str] = &["Size", "Rotation", "Vertex Alpha", "Rgb"];
+
+fn sample_one_pse_curve(
+    data: &[u8],
+    curve: &PseCurveRef,
+    sample_count: u8,
+) -> Option<SampledCurve> {
+    let parsed = parse_pse_curve_floats(data, curve)?;
+    let channels = pse_curve_channels(&parsed);
+    let kfs = pse_curve_to_keyframes(&parsed).ok()?;
+    if kfs.is_empty() {
+        return None;
+    }
+    let t_max = kfs.last().map(|k| k.t).unwrap_or(1.0).max(1.0);
+    let values = sample_linear(&kfs, channels, 0.0, t_max, sample_count as usize).ok()?;
+    let channels = u8::try_from(channels).ok()?;
+    Some(SampledCurve { channels, values })
+}
+
 /// Build up to four sampled curves for each emitter from PSE curve objects
 /// that fall between that emitter and the next (channel count from header word0).
+///
+/// Prefers candle slot names (Size / Rotation / Vertex Alpha / Rgb); falls back
+/// to first four scannable curves in file order.
 pub fn sample_emitter_curves_from_pse(
     data: &[u8],
     sample_count: u8,
-) -> Result<Vec<Vec<SampledCurve>>, PfxError> {
+) -> Result<Vec<Vec<Option<SampledCurve>>>, PfxError> {
     let emitters = scan_pse_emitters(data);
     let curves = scan_pse_curves(data);
     let mut out = Vec::with_capacity(emitters.len());
     for (i, em) in emitters.iter().enumerate() {
         let end = emitters.get(i + 1).map(|e| e.offset).unwrap_or(data.len());
-        let mut grids = Vec::new();
-        for c in curves
+        let in_range: Vec<&PseCurveRef> = curves
             .iter()
             .filter(|c| c.offset > em.offset && c.offset < end)
-            .take(4)
-        {
-            let Some(parsed) = parse_pse_curve_floats(data, c) else {
-                continue;
-            };
-            let channels = pse_curve_channels(&parsed);
-            let Ok(kfs) = pse_curve_to_keyframes(&parsed) else {
-                continue;
-            };
-            if kfs.is_empty() {
+            .collect();
+        let mut grids: Vec<Option<SampledCurve>> = Vec::with_capacity(4);
+        let mut used = std::collections::HashSet::new();
+        for slot_name in EMITTER_CURVE_SLOTS {
+            let c = in_range.iter().find(|c| {
+                !used.contains(&c.offset)
+                    && c.name
+                        .to_ascii_lowercase()
+                        .starts_with(&slot_name.to_ascii_lowercase())
+            });
+            match c.and_then(|c| {
+                let sc = sample_one_pse_curve(data, c, sample_count)?;
+                used.insert(c.offset);
+                Some(sc)
+            }) {
+                Some(sc) => grids.push(Some(sc)),
+                None => grids.push(None),
+            }
+        }
+        // Fill any still-empty slots from remaining curves (file order).
+        for c in &in_range {
+            if used.contains(&c.offset) {
                 continue;
             }
-            let t_max = kfs.last().map(|k| k.t).unwrap_or(1.0).max(1.0);
-            let Ok(values) =
-                sample_linear(&kfs, channels, 0.0, t_max, sample_count as usize)
-            else {
+            let Some(sc) = sample_one_pse_curve(data, c, sample_count) else {
                 continue;
             };
-            let channels = u8::try_from(channels).map_err(|_| {
-                PfxError::Msg(format!("channels {channels} > 255"))
-            })?;
-            grids.push(SampledCurve { channels, values });
+            used.insert(c.offset);
+            if let Some(slot) = grids.iter_mut().find(|s| s.is_none()) {
+                *slot = Some(sc);
+            } else {
+                break;
+            }
         }
         out.push(grids);
     }
@@ -650,7 +684,7 @@ mod tests {
                 texture_embeds: vec![Some(jpeg.clone())],
                 ..Default::default()
             },
-            &[],
+            &[vec![None, None, None, None]],
         )
         .unwrap();
         let walked = parse_rps(&bytes).unwrap();
