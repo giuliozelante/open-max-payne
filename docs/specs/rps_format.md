@@ -106,7 +106,8 @@ via evaluator `FUN_00432240`. Export stubs sample PSE floats with
 `sample_linear` using **header word0 = channels**, **word6 = keyframe count**.
 BYOD Examples layout is **times then values** (`t[0..kf)` + values, with short
 Rgb/Emission floats broadcast as gray/scalars). Interleaved `(t,ch…)` remains a
-fallback. Wine `-e` still hangs under staging; game-accept still open.
+fallback. Export CLI samples at **32** points by default. Wine `-e` still
+hangs under staging; game-accept still open.
 
 **Textures:** `write_embedded_file` matches candle (`str` + JPEG blob, or int `0`
 external). CLI: `openpfx export-root --emitter-stubs --embed-jpeg FILE`.
