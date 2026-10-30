@@ -4,7 +4,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "openras", version, about = "Remedy Archive System (RAS/MPM) for Max Payne 1")]
+#[command(
+    name = "openras",
+    version,
+    about = "Remedy Archive System (RAS/MPM) for Max Payne 1"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

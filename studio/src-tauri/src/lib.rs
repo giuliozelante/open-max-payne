@@ -42,8 +42,7 @@ struct GameStatus {
     next_step: String,
 }
 
-const FIXPACK_GUIDE_URL: &str =
-    "https://steamcommunity.com/sharedfiles/filedetails/?id=1633394421";
+const FIXPACK_GUIDE_URL: &str = "https://steamcommunity.com/sharedfiles/filedetails/?id=1633394421";
 
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
@@ -83,8 +82,7 @@ fn discover_root() -> Result<PathBuf, String> {
 
 fn paths_now() -> Result<Paths, String> {
     let root = discover_root()?;
-    let sample = root
-        .join("vendor/fixtures/Basic Room Example Mod.mpm");
+    let sample = root.join("vendor/fixtures/Basic Room Example Mod.mpm");
     Ok(Paths {
         root: root.display().to_string(),
         out: root.join("easy-output").display().to_string(),
@@ -219,9 +217,7 @@ fn game_status_inner(dest: &Path) -> GameStatus {
 /// Wine `explorer` treats args starting with `/` as switches. Never pass a Unix
 /// absolute path there — use a basename (cwd = game) or `Z:\...`.
 fn wine_program_arg(game: &Path, program: &Path) -> Result<String, String> {
-    let game_abs = game
-        .canonicalize()
-        .unwrap_or_else(|_| game.to_path_buf());
+    let game_abs = game.canonicalize().unwrap_or_else(|_| game.to_path_buf());
     let prog_abs = program
         .canonicalize()
         .map_err(|e| format!("Program not found ({}): {e}", program.display()))?;
@@ -236,7 +232,12 @@ fn wine_program_arg(game: &Path, program: &Path) -> Result<String, String> {
     ))
 }
 
-fn spawn_wine_desktop(game: &Path, desktop: &str, size: &str, program: &Path) -> Result<String, String> {
+fn spawn_wine_desktop(
+    game: &Path,
+    desktop: &str,
+    size: &str,
+    program: &Path,
+) -> Result<String, String> {
     if !command_exists("wine") {
         return Err("wine not found — install wine-staging".into());
     }
@@ -510,8 +511,7 @@ fn open_url(url: String) -> Result<(), String> {
 fn apply_localized_safe_stack(dest: String) -> Result<String, String> {
     let root = discover_root()?;
     let overlays = root.join("runtime/overlays");
-    maxfx_play::apply_localized_safe_stack(Path::new(&dest), &overlays)
-        .map_err(|e| e.to_string())
+    maxfx_play::apply_localized_safe_stack(Path::new(&dest), &overlays).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

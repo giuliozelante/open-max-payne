@@ -88,7 +88,9 @@ fn looks_like_sfx_installer(data: &[u8]) -> bool {
         b"WinZip Self-Extractor",
         b"7-Zip self-extracting archive",
     ];
-    NEEDLES.iter().any(|n| data.windows(n.len()).any(|w| w == *n))
+    NEEDLES
+        .iter()
+        .any(|n| data.windows(n.len()).any(|w| w == *n))
 }
 
 fn looks_like_dropin_payload(data: &[u8]) -> bool {
@@ -194,8 +196,7 @@ mod tests {
     fn classifies_lab_dropin_when_present() {
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
         let Some(home) = home else { return };
-        let p = Path::new(&home)
-            .join("Games/MaxPayne1/maxpayne1-05patch.exe");
+        let p = Path::new(&home).join("Games/MaxPayne1/maxpayne1-05patch.exe");
         if !p.is_file() {
             return;
         }

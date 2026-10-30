@@ -94,9 +94,7 @@ if [[ -z "$EXE" ]]; then
 fi
 
 # Prefer system Wine for non-Steam installs (Proton often exits silently outside Steam).
-# Set OPENMAXFX_USE_PROTON=1 to force Proton. OPENMAXFX_PROTON_DIR overrides path.
-USE_PROTON="${OPENMAXFX_USE_PROTON:-0}"
-PROTON_DIR="${OPENMAXFX_PROTON_DIR:-${PROTON_DIR:-$HOME/.steam/steam/steamapps/common/Proton 9.0 (Beta)}}"
+# Launcher reads OPENMAXFX_USE_PROTON / OPENMAXFX_PROTON_DIR at runtime.
 
 # Quoted heredoc so $(dirname "$0") is NOT expanded at generate-time (bug → cd ".")
 cat >"$LAUNCH" <<'EOF'

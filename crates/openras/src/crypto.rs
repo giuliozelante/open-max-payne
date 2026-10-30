@@ -39,16 +39,15 @@ pub fn decrypt_with_seed(data: &[u8], mut seed: i32) -> Vec<u8> {
     if seed == 0 {
         seed = 1;
     }
-    for i in 0..buf.len() {
+    for (i, byte) in buf.iter_mut().enumerate() {
         let r = (i % 5) & 7;
-        let mut b = buf[i];
+        let mut b = *byte;
         if r != 0 {
             b = b.rotate_left(r as u32);
         }
-        buf[i] = b;
         seed = advance_seed(seed);
-        let mixed = ((i8(i as i32) + 3) * 6) as u8 ^ buf[i];
-        buf[i] = mixed.wrapping_add(i8(seed) as u8);
+        let mixed = ((i8(i as i32) + 3) * 6) as u8 ^ b;
+        *byte = mixed.wrapping_add(i8(seed) as u8);
     }
     buf
 }
@@ -58,15 +57,15 @@ pub fn encrypt_with_seed(data: &[u8], mut seed: i32) -> Vec<u8> {
     if seed == 0 {
         seed = 1;
     }
-    for i in 0..buf.len() {
+    for (i, byte) in buf.iter_mut().enumerate() {
         seed = advance_seed(seed);
-        let mut x = buf[i].wrapping_sub(i8(seed) as u8);
+        let mut x = byte.wrapping_sub(i8(seed) as u8);
         x ^= ((i8(i as i32) + 3) * 6) as u8;
         let r = (i % 5) & 7;
         if r != 0 {
             x = x.rotate_right(r as u32);
         }
-        buf[i] = x;
+        *byte = x;
     }
     buf
 }

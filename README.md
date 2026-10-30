@@ -1,5 +1,7 @@
 # Open Max Payne
 
+[![ci](https://github.com/giuliozelante/open-max-payne/actions/workflows/ci.yml/badge.svg)](https://github.com/giuliozelante/open-max-payne/actions/workflows/ci.yml)
+
 Play **Max Payne 1** and use its **MAX-FX** toolchain on modern OSes.
 You need your own retail CD / install. This project does **not** redistribute the game.
 

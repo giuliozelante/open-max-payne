@@ -131,7 +131,7 @@ install_from_root() {
 
   info "Game files present:"
   ls -lh "$DEST/MaxPayne.exe" 2>/dev/null || true
-  ls "$DEST"/*.ras 2>/dev/null | head -10 || true
+  find "$DEST" -maxdepth 1 -iname '*.ras' -printf '%f\n' 2>/dev/null | head -10 || true
 
   # --- Modern Linux wrappers ---
   info "Installing DXVK / d3d8to9 launcher…"
@@ -168,7 +168,7 @@ elif [[ -n "$CD_ARG" && -d "$CD_ARG" ]] && looks_like_maxpayne_cd "$CD_ARG"; the
   CD_ROOT="$CD_ARG"
 else
   info "Looking for Max Payne CD…"
-  if CD_ROOT="$(find_cd_root)"; then
+  if CD_ROOT="$(find_cd_root "${CD_ARG}")"; then
     info "Found CD at $CD_ROOT"
   else
     die "No Max Payne CD found.

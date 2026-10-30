@@ -76,8 +76,7 @@ pub fn compress(src: &[u8]) -> Vec<u8> {
             if max_len > THRESHOLD {
                 for off in 0..N {
                     let mut length = 0usize;
-                    while length < max_len
-                        && text_buf[(off + length) & 0xFFF] == src[pos + length]
+                    while length < max_len && text_buf[(off + length) & 0xFFF] == src[pos + length]
                     {
                         length += 1;
                     }

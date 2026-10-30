@@ -81,7 +81,9 @@ fn park_hires_and_asi(game: &Path, lang: &str) -> Result<Vec<String>, PlayError>
             let _ = fs::remove_dir_all(&hires);
         }
         fs::rename(&data, &hires)?;
-        notes.push(format!("parked hi-res data/ ({lang}) → data.disabled-hires"));
+        notes.push(format!(
+            "parked hi-res data/ ({lang}) → data.disabled-hires"
+        ));
     }
     let dinput = game.join("dinput.dll");
     if dinput.is_file() {
@@ -108,10 +110,7 @@ fn copy_if_exists(src: &Path, dst: &Path) -> Result<bool, PlayError> {
 
 /// Apply localized-safe graphics stack using overlays under `overlay_root` (repo `runtime/overlays`).
 /// Fails if DXVK/d3d8to9 cannot be installed into the game dir.
-pub fn apply_localized_safe_stack(
-    game: &Path,
-    overlay_root: &Path,
-) -> Result<String, PlayError> {
+pub fn apply_localized_safe_stack(game: &Path, overlay_root: &Path) -> Result<String, PlayError> {
     let mut notes = Vec::new();
     if let Some(lang) = detect_localized_lang(game) {
         notes.push(format!("localized pack: x_{lang}.ras"));

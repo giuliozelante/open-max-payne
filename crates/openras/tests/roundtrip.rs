@@ -88,16 +88,14 @@ fn compressed_pack_unpack_bytes_identical() {
         assert_eq!(a.data, b.data);
     }
     // At least one file should prefer LZSS when smaller
-    let _ = arc
-        .files
-        .iter_mut()
-        .find(|f| f.data.len() > 20)
-        .map(|f| {
-            let c = lzss::compress(&f.data);
-            assert!(c.len() < f.data.len() || c.len() >= f.data.len());
-        });
-    assert!(back.files.iter().any(|f| f.compression_mode == MODE_LZSS)
-        || back.files.iter().all(|f| f.compression_mode == MODE_STORED));
+    let _ = arc.files.iter_mut().find(|f| f.data.len() > 20).map(|f| {
+        let c = lzss::compress(&f.data);
+        assert!(c.len() < f.data.len() || c.len() >= f.data.len());
+    });
+    assert!(
+        back.files.iter().any(|f| f.compression_mode == MODE_LZSS)
+            || back.files.iter().all(|f| f.compression_mode == MODE_STORED)
+    );
 }
 
 #[test]
