@@ -1,12 +1,14 @@
 //! ParticleFX editor project (`.pse`) + runtime (`.rps`) tooling — draft.
 //! Spec: docs/specs/rps_format.md
 
+pub mod curve_sample;
 pub mod memory_file;
 pub mod rps;
 
 use std::path::Path;
 use thiserror::Error;
 
+pub use curve_sample::{sample_linear, Keyframe as CurveKeyframe};
 pub use memory_file::{obj as rps_obj, MemoryFileWriter};
 pub use rps::{
     encode_rps, parse_rps, pse_header_to_rps_preamble, read_rps, roundtrip_rps, RpsHeader, RpsValue,

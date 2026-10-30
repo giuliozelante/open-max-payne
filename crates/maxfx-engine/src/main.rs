@@ -30,7 +30,10 @@ fn main() -> ExitCode {
                         return ExitCode::SUCCESS;
                     }
                     if !looks_like_ldb_or_ai(&data) {
-                        eprintln!("error: missing LDB/AI preamble (and not 14 {:#x} MF head)", LDB_IMPORT_VERSION);
+                        eprintln!(
+                            "error: missing LDB/AI preamble (and not 14 {:#x} MF head)",
+                            LDB_IMPORT_VERSION
+                        );
                         return ExitCode::FAILURE;
                     }
                     let recs = split_ldb_records(&data).unwrap();
