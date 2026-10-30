@@ -165,6 +165,36 @@ impl MemoryFileWriter {
         self.write_object_header(obj::GRAPH, count);
     }
 
+    /// Emitter object open (`FUN_00417570`): `0x30`/`4` + param block + scalar fields before curves.
+    ///
+    /// Seven scalars after the nested param block (BYOD candle):
+    /// `int, f32, int, int, f32, f32, uint`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_emitter_open(
+        &mut self,
+        param_f_a: f32,
+        param_i_a: u8,
+        param_i_b: u8,
+        param_f_b: f32,
+        i0: u8,
+        f0: f32,
+        i1: u8,
+        i2: u8,
+        f1: f32,
+        f2: f32,
+        u0: u8,
+    ) {
+        self.write_object_header(obj::EMITTER, obj::EMITTER_VER);
+        self.write_param_block(param_f_a, param_i_a, param_i_b, param_f_b);
+        self.write_int_u8(i0);
+        self.write_f32(f0);
+        self.write_int_u8(i1);
+        self.write_int_u8(i2);
+        self.write_f32(f1);
+        self.write_f32(f2);
+        self.write_uint_u8(u0);
+    }
+
     /// `FUN_00432fd0` sampled curve: header `0x71`/`3` + channel count + sample count + f32 grid.
     ///
     /// `values` length must be `channels * samples` in sample-major order
@@ -245,6 +275,18 @@ mod tests {
         w.write_pse_preamble(96, 5, 12, 2.5, 10, 2.5).unwrap();
         let via_helper = crate::rps::pse_header_to_rps_preamble(96, 5, 12, 2.5, 10, 2.5).unwrap();
         assert_eq!(w.as_bytes(), via_helper.as_slice());
+    }
+
+    #[test]
+    fn emitter_open_matches_candle_before_curves() {
+        let mut w = MemoryFileWriter::new();
+        w.write_emitter_open(0.0, 0, 1, 0.0, 0, 10.0, 0, 1, -3.0, 3.0, 2);
+        let expected: &[u8] = &[
+            0x14, 0x30, 0x14, 4, 0x14, 0x20, 0x14, 3, 0x09, 0x00, 0x00, 0x00, 0x00, 0x14, 0, 0x14,
+            1, 0x09, 0x00, 0x00, 0x00, 0x00, 0x14, 0, 0x09, 0x00, 0x00, 0x20, 0x41, 0x14, 0, 0x14,
+            1, 0x09, 0x00, 0x00, 0x40, 0xc0, 0x09, 0x00, 0x00, 0x40, 0x40, 0x11, 2,
+        ];
+        assert_eq!(w.as_bytes(), expected);
     }
 
     #[test]
