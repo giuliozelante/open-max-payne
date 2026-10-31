@@ -671,6 +671,218 @@ fn open_in_file_manager(path: String) -> Result<(), String> {
     Err("No file manager opener found".into())
 }
 
+#[tauri::command]
+fn inspect_maxed_level(path: String) -> Result<String, String> {
+    let p = PathBuf::from(&path);
+    let data = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let scene = maxfx_engine::scene::parse_ldb_scene(&data).ok_or_else(|| {
+        "Could not parse LDB scene (want RAS 0x121c + ImportLevel 0x20)".to_string()
+    })?;
+    let mut out = format!(
+        "MaxED Level: {} ({} bytes, consumed {:#x}/{:#x})\nRooms: {} | Static meshes: {} | Dynamic meshes: {} | Portals: {}\nTextures: {} | Materials: {} | Lightmaps: {} | Jumppoints: {} | FSMs: {} | Characters: {} | Triggers: {} | Items: {} | Point lights: {}\n\nRooms:\n",
+        p.display(),
+        data.len(),
+        scene.bytes_consumed,
+        data.len(),
+        scene.rooms.len(),
+        scene.static_meshes.len(),
+        scene.dynamic_meshes.len(),
+        scene.exits.len(),
+        scene.textures.len(),
+        scene.materials.len(),
+        scene.lightmaps.len(),
+        scene.jumppoints.len(),
+        scene.fsms.len(),
+        scene.characters.len(),
+        scene.triggers.len(),
+        scene.items.len(),
+        scene.point_lights.len(),
+    );
+    for r in &scene.rooms {
+        out.push_str(&format!(
+            "  [{:2}] {:18} origin=({:6.1},{:5.1},{:6.1}) meshes={:?} exits={} DOs={}\n",
+            r.id,
+            r.name,
+            r.world_origin[0],
+            r.world_origin[1],
+            r.world_origin[2],
+            r.static_meshes,
+            r.exits.len(),
+            r.dynamic_meshes.len()
+        ));
+    }
+    out.push_str("\nJumppoints:\n");
+    for j in scene.jumppoints.iter().take(12) {
+        out.push_str(&format!(
+            "  {} (room {}) pos=({:.1},{:.1},{:.1})\n",
+            j.name, j.room_id, j.pos[0], j.pos[1], j.pos[2]
+        ));
+    }
+    if !scene.characters.is_empty() {
+        out.push_str("\nCharacters:\n");
+        for c in &scene.characters {
+            out.push_str(&format!(
+                "  {} skin={} (room {}) pos=({:.1},{:.1},{:.1})\n",
+                c.name, c.skin, c.room_id, c.pos[0], c.pos[1], c.pos[2]
+            ));
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn launch_3d_level(path: String, state: State<'_, GameProc>) -> Result<String, String> {
+    let root = discover_root()?;
+    let engine = resolve_maxfx_engine(&root).ok_or_else(|| {
+        "maxfx-engine binary not found — build with: cargo build -p maxfx-engine".to_string()
+    })?;
+    let p = PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(format!("Level file not found: {}", p.display()));
+    }
+    let child = Command::new(&engine)
+        .args(["--window", &path])
+        .current_dir(&root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Ok(mut slot) = state.0.lock() {
+        *slot = Some(child);
+    }
+    Ok(format!(
+        "Launched 3D walkthrough on {} (WASD + Mouse/Arrows, E interact, Tab next spawn, G fly/walk)",
+        p.display()
+    ))
+}
+
+#[tauri::command]
+fn inspect_particlefx(path: String) -> Result<String, String> {
+    let p = PathBuf::from(&path);
+    let data = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+    if ext.eq_ignore_ascii_case("pse") {
+        let h = openpfx::parse_pse(&data).map_err(|e| e.to_string())?;
+        let emitters = openpfx::scan_pse_emitters(&data);
+        let curves = openpfx::scan_pse_curves(&data);
+        let stems = openpfx::scan_pse_bitmap_stems(&data);
+        let mut out = format!(
+            "ParticleFX PSE: {} ({} bytes)\nHeader: word0={} word1={} word2={} word3={} word4={} float_a={} float_b={}\nEmitters ({}): {:?}\nCurves ({}): {:?}\nBitmap stems ({}): {:?}\n",
+            p.display(),
+            data.len(),
+            h.word0,
+            h.word1,
+            h.word2,
+            h.word3,
+            h.word4,
+            h.float_a,
+            h.float_b,
+            emitters.len(),
+            emitters.iter().map(|e| &e.name).collect::<Vec<_>>(),
+            curves.len(),
+            curves.iter().take(12).map(|c| &c.name).collect::<Vec<_>>(),
+            stems.len(),
+            stems.iter().take(8).collect::<Vec<_>>(),
+        );
+        for pth in h.ascii_paths.iter().take(8) {
+            out.push_str(&format!("  path: {pth}\n"));
+        }
+        Ok(out)
+    } else {
+        let rps = openpfx::parse_rps(&data).map_err(|e| e.to_string())?;
+        let gate = openpfx::validate_rps_game_gates(&data);
+        let blobs = rps
+            .values
+            .iter()
+            .filter(|v| matches!(v, openpfx::RpsValue::Blob { .. }))
+            .count();
+        Ok(format!(
+            "ParticleFX RPS: {} ({} bytes, consumed {}/{})\nValues: {} | Embedded frame blobs: {} | PS_ParticleSystem gate: {}\n",
+            p.display(),
+            data.len(),
+            rps.bytes_consumed,
+            data.len(),
+            rps.values.len(),
+            blobs,
+            match gate {
+                Ok(()) => "OK (0x60 / ver 5)".to_string(),
+                Err(e) => format!("FAIL ({e})"),
+            }
+        ))
+    }
+}
+
+#[tauri::command]
+fn export_particlefx_rps(
+    pse_path: String,
+    bitmap_root: String,
+    out_path: String,
+) -> Result<String, String> {
+    let pse = PathBuf::from(&pse_path);
+    let data = std::fs::read(&pse).map_err(|e| format!("{}: {e}", pse.display()))?;
+    let h = openpfx::parse_pse(&data).map_err(|e| e.to_string())?;
+    let stubs: Vec<String> = openpfx::scan_pse_emitters(&data)
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    let sampled = openpfx::sample_emitter_curves_from_pse(&data, 32).map_err(|e| e.to_string())?;
+    let texture_sequences = if !bitmap_root.trim().is_empty() {
+        openpfx::build_texture_sequences_from_pse(&data, Path::new(&bitmap_root), stubs.len())
+    } else {
+        Vec::new()
+    };
+    let bytes = openpfx::pse_to_rps_export_with_curves(
+        &h,
+        &openpfx::PseExportOptions {
+            empty_graph: false,
+            emitter_stubs: stubs.clone(),
+            texture_stubs: Vec::new(),
+            texture_embeds: Vec::new(),
+            texture_sequences,
+        },
+        &sampled,
+    )
+    .map_err(|e| e.to_string())?;
+    openpfx::validate_rps_game_gates(&bytes).map_err(|e| e.to_string())?;
+    std::fs::write(&out_path, &bytes).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "Exported {} ({} bytes, {} emitters, PS_ParticleSystem gate OK)",
+        out_path,
+        bytes.len(),
+        stubs.len()
+    ))
+}
+
+#[tauri::command]
+fn inspect_actorfx(path: String) -> Result<String, String> {
+    let p = PathBuf::from(&path);
+    let data = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let sum = maxfx_engine::kf2::parse_kf2_or_skd(&data)
+        .ok_or_else(|| "Not a valid 0x0c chunked KF2/SKD file".to_string())?;
+    let mut out = format!(
+        "ActorFX KF2/SKD: {} ({} bytes)\nTop-level chunks: {} | Total vec3 vertices/keys: {}\nBones / Materials / Nodes ({}): {:?}\n\nChunks:\n",
+        p.display(),
+        sum.file_size,
+        sum.chunks.len(),
+        sum.total_vec3,
+        sum.all_strings.len(),
+        &sum.all_strings[..sum.all_strings.len().min(24)]
+    );
+    for c in &sum.chunks {
+        out.push_str(&format!(
+            "  @{:#08x} id={:#010x} ver={} size={} vec3={} strings={:?}\n",
+            c.offset,
+            c.id,
+            c.version,
+            c.size,
+            c.vec3_count,
+            &c.strings[..c.strings.len().min(8)]
+        ));
+    }
+    Ok(out)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -697,6 +909,11 @@ pub fn run() {
             game_running,
             run_tests,
             open_in_file_manager,
+            inspect_maxed_level,
+            launch_3d_level,
+            inspect_particlefx,
+            export_particlefx_rps,
+            inspect_actorfx,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Open Max Payne Studio");

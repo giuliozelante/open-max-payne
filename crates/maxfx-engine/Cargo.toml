@@ -17,3 +17,4 @@ path = "src/lib.rs"
 openras = { path = "../openras" }
 thiserror = "2"
 minifb = "0.28"
+jpeg-decoder = "0.3"

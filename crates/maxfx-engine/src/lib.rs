@@ -1,7 +1,8 @@
-//! Native Max Payne 1 engine — walking skeleton only.
-//!
-//! Loads a BYOD RAS/MPM via `openras`. Rendering / gameplay come later
-//! (see `docs/specs/2026-10-30-engine-skeleton.md`).
+//! Native Max Payne 1 engine — level decoder, 3D walkthrough renderer, and KF2/SKD inspector.
+
+pub mod kf2;
+pub mod render3d;
+pub mod scene;
 
 use openras::RasArchive;
 use std::path::Path;
@@ -132,7 +133,7 @@ pub fn parse_ras_ldb_section_at(data: &[u8], offset: usize) -> Option<RasLdbSect
     let kind = data[offset + 1];
     let count = u16::from_le_bytes([data[offset + 2], data[offset + 3]]);
     match kind {
-        LDB_SECTION_KIND_VEC3 => {
+        LDB_SECTION_KIND_VEC3 if offset == 0 || data.get(offset + 5) == Some(&0x16) => {
             if data.len() < offset + 5 {
                 return None;
             }
@@ -142,11 +143,30 @@ pub fn parse_ras_ldb_section_at(data: &[u8], offset: usize) -> Option<RasLdbSect
                 flag: Some(data[offset + 4]),
             })
         }
-        LDB_SECTION_KIND_MF => Some(RasLdbSection {
-            kind,
-            count,
-            flag: None,
-        }),
+        LDB_SECTION_KIND_MF | LDB_SECTION_KIND_VEC3 | 0x14 => {
+            // MemoryFile compressed uint count after 0x1c (`14 <u8>`, `13 <u16>`, `12 <u24>`)
+            let mut i = offset + 1;
+            let count32 = match data.get(i).copied()? {
+                0x14 => {
+                    i += 1;
+                    *data.get(i)? as u32
+                }
+                0x13 => {
+                    i += 1;
+                    u16::from_le_bytes([*data.get(i)?, *data.get(i + 1)?]) as u32
+                }
+                0x12 => {
+                    i += 1;
+                    u32::from_le_bytes([*data.get(i)?, *data.get(i + 1)?, *data.get(i + 2)?, 0])
+                }
+                _ => return None,
+            };
+            Some(RasLdbSection {
+                kind: LDB_SECTION_KIND_MF,
+                count: count32.min(u16::MAX as u32) as u16,
+                flag: None,
+            })
+        }
         _ => Some(RasLdbSection {
             kind,
             count,
@@ -422,14 +442,11 @@ pub fn parse_ras_ldb_faces_ex(body: &[u8], max: usize) -> (Vec<RasLdbFace>, usiz
     (out, i)
 }
 
-/// Body slice of the first kind-`0x13` section after a flag-0 vec3 cloud.
+/// Body slice of the first kind-`0x13` section after a vec3 cloud.
 pub fn ras_ldb_first_mf_section_body(data: &[u8]) -> Option<&[u8]> {
     let end = ras_ldb_vec3_section_end(data)?;
-    let sec = parse_ras_ldb_section_at(data, end)?;
-    if sec.kind != LDB_SECTION_KIND_MF {
-        return None;
-    }
-    Some(&data[end + 4..])
+    let (_, body_off) = offset_plus_mf_count(data, end)?;
+    Some(&data[body_off..])
 }
 
 /// Top-level `0x1c` sections with known sizes (vec3 cloud + face `0x13` only).
@@ -1575,6 +1592,15 @@ pub fn parse_ras_ldb_import_exits_at(
     }
 }
 
+fn offset_plus_mf_count(data: &[u8], off: usize) -> Option<(usize, usize)> {
+    if data.get(off) != Some(&LDB_SECTION_TAG) {
+        return None;
+    }
+    let mut i = off + 1;
+    let count = read_mf_i32(data, &mut i)? as usize;
+    Some((count, i))
+}
+
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
     let mut out = Vec::new();
     let mut off = 0;
@@ -1604,8 +1630,10 @@ pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
                 off = end;
             }
             LDB_SECTION_KIND_MF => {
-                let body = &data[off + 4..];
-                let n = sec.count as usize;
+                let Some((n, body_start)) = offset_plus_mf_count(data, off) else {
+                    break;
+                };
+                let body = &data[body_start..];
                 let (faces, face_bytes) = parse_ras_ldb_faces_ex(body, n);
                 let (surfs, surf_bytes) = parse_ras_ldb_surfs_ex(body, n);
                 let (ints, int_bytes) = parse_ras_ldb_ints_ex(body, n);
@@ -1624,7 +1652,7 @@ pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
                     });
                     break;
                 };
-                let end = off + 4 + consumed;
+                let end = body_start + consumed;
                 out.push(RasLdbSectionSpan {
                     offset: off,
                     kind: sec.kind,

@@ -49,6 +49,42 @@ fn main() -> ExitCode {
     let p = Path::new(&path);
     if p.is_file() {
         let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if ext.eq_ignore_ascii_case("kf2") || ext.eq_ignore_ascii_case("skd") {
+            return match std::fs::read(p) {
+                Ok(data) => match maxfx_engine::kf2::parse_kf2_or_skd(&data) {
+                    Some(sum) => {
+                        println!(
+                            "{}: {} bytes, {} chunk(s), total_vec3={}, strings={:?}",
+                            p.display(),
+                            sum.file_size,
+                            sum.chunks.len(),
+                            sum.total_vec3,
+                            &sum.all_strings[..sum.all_strings.len().min(12)]
+                        );
+                        for c in &sum.chunks {
+                            println!(
+                                "  chunk @{:#x}: id={:#010x} ver={} size={} vec3={} strs={:?}",
+                                c.offset,
+                                c.id,
+                                c.version,
+                                c.size,
+                                c.vec3_count,
+                                &c.strings[..c.strings.len().min(6)]
+                            );
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    None => {
+                        eprintln!("error: not a valid 0x0c chunked KF2/SKD file");
+                        ExitCode::FAILURE
+                    }
+                },
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         if ext.eq_ignore_ascii_case("ldb") || ext.eq_ignore_ascii_case("ai") {
             return match std::fs::read(p) {
                 Ok(data) => {
@@ -376,7 +412,33 @@ fn main() -> ExitCode {
                             }
                             None => println!("  ImportLevel MF head not found after geometry"),
                         }
-                        if want_window {
+                        if let Some(scene) = maxfx_engine::scene::parse_ldb_scene(&data) {
+                            println!(
+                                "  full scene decoded: rooms={} static_meshes={} dyn_meshes={} exits={} jumppoints={} fsms={} chars={} triggers={} items={} point_lights={} consumed={:#x}/{:#x}",
+                                scene.rooms.len(),
+                                scene.static_meshes.len(),
+                                scene.dynamic_meshes.len(),
+                                scene.exits.len(),
+                                scene.jumppoints.len(),
+                                scene.fsms.len(),
+                                scene.characters.len(),
+                                scene.triggers.len(),
+                                scene.items.len(),
+                                scene.point_lights.len(),
+                                scene.bytes_consumed,
+                                data.len()
+                            );
+                            if want_window {
+                                if let Err(e) = maxfx_engine::render3d::run_3d_walkthrough(
+                                    scene,
+                                    &format!("Open Max Payne 3D — {}", p.display()),
+                                ) {
+                                    eprintln!("3D walkthrough error: {e}");
+                                    return ExitCode::FAILURE;
+                                }
+                                return ExitCode::SUCCESS;
+                            }
+                        } else if want_window {
                             let pts = sample_ras_ldb_vec3_preview(&data, 120_000);
                             println!("  preview window: {} points (Esc to close)", pts.len());
                             if let Err(e) = show_vec3_preview_window(
