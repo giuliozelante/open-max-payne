@@ -550,6 +550,100 @@ fn identity_mat() -> [f32; 9] {
     [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 }
 
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+/// Spherical blend of two column-major rotation matrices.
+fn slerp_mat(a: [f32; 9], b: [f32; 9], t: f32) -> [f32; 9] {
+    let t = t.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return a;
+    }
+    if t >= 1.0 {
+        return b;
+    }
+    quat_to_mat(quat_slerp(mat_to_quat(a), mat_to_quat(b), t))
+}
+
+fn mat_to_quat(m: [f32; 9]) -> [f32; 4] {
+    let (m00, m10, m20) = (m[0], m[1], m[2]);
+    let (m01, m11, m21) = (m[3], m[4], m[5]);
+    let (m02, m12, m22) = (m[6], m[7], m[8]);
+    let trace = m00 + m11 + m22;
+    if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        [(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25 * s]
+    } else if m00 > m11 && m00 > m22 {
+        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
+        [0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s]
+    } else if m11 > m22 {
+        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
+        [(m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s]
+    } else {
+        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
+        [(m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s]
+    }
+}
+
+fn quat_slerp(a: [f32; 4], mut b: [f32; 4], t: f32) -> [f32; 4] {
+    let mut dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    if dot < 0.0 {
+        b = [-b[0], -b[1], -b[2], -b[3]];
+        dot = -dot;
+    }
+    if dot > 0.9995 {
+        let r = [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+            a[3] + (b[3] - a[3]) * t,
+        ];
+        return quat_norm(r);
+    }
+    let theta = dot.clamp(-1.0, 1.0).acos();
+    let sin_theta = theta.sin();
+    let w1 = ((1.0 - t) * theta).sin() / sin_theta;
+    let w2 = (t * theta).sin() / sin_theta;
+    [
+        a[0] * w1 + b[0] * w2,
+        a[1] * w1 + b[1] * w2,
+        a[2] * w1 + b[2] * w2,
+        a[3] * w1 + b[3] * w2,
+    ]
+}
+
+fn quat_norm(q: [f32; 4]) -> [f32; 4] {
+    let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if n < 1.0e-8 {
+        [0.0, 0.0, 0.0, 1.0]
+    } else {
+        [q[0] / n, q[1] / n, q[2] / n, q[3] / n]
+    }
+}
+
+fn quat_to_mat(q: [f32; 4]) -> [f32; 9] {
+    let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+    let (xx, yy, zz) = (x * x, y * y, z * z);
+    let (xy, xz, yz) = (x * y, x * z, y * z);
+    let (wx, wy, wz) = (w * x, w * y, w * z);
+    [
+        1.0 - 2.0 * (yy + zz),
+        2.0 * (xy + wz),
+        2.0 * (xz - wy),
+        2.0 * (xy - wz),
+        1.0 - 2.0 * (xx + zz),
+        2.0 * (yz + wx),
+        2.0 * (xz + wy),
+        2.0 * (yz - wx),
+        1.0 - 2.0 * (xx + yy),
+    ]
+}
+
 fn mul_rt(rp: [f32; 9], tp: [f32; 3], rl: [f32; 9], tl: [f32; 3]) -> ([f32; 9], [f32; 3]) {
     let mut r = [0f32; 9];
     for j in 0..3 {
@@ -597,13 +691,24 @@ pub fn sample_locals(anim: &Kf2Anim, time_s: f32) -> BTreeMap<String, ([f32; 9],
         }
         let dur = bone.duration.max(1) as f32;
         let frame = (time_s.max(0.0) * 30.0) % dur;
-        let mut pick = &bone.keys[0];
-        for k in &bone.keys {
-            if k.frame as f32 <= frame {
-                pick = k;
-            }
+        let mut i = 0usize;
+        while i + 1 < bone.keys.len() && bone.keys[i + 1].frame as f32 <= frame {
+            i += 1;
         }
-        out.insert(bone.name.to_ascii_lowercase(), (pick.mat, pick.pos));
+        let a = &bone.keys[i];
+        let (mat, pos) = if i + 1 >= bone.keys.len() || (a.frame as f32) > frame {
+            (a.mat, a.pos)
+        } else {
+            let b = &bone.keys[i + 1];
+            let span = (b.frame - a.frame) as f32;
+            let t = if span <= 0.0 {
+                0.0
+            } else {
+                ((frame - a.frame as f32) / span).clamp(0.0, 1.0)
+            };
+            (slerp_mat(a.mat, b.mat, t), lerp3(a.pos, b.pos, t))
+        };
+        out.insert(bone.name.to_ascii_lowercase(), (mat, pos));
     }
     out
 }
@@ -726,7 +831,10 @@ fn find_file_ci(dirs: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
     None
 }
 
-fn load_bytes_from_ras(level_or_game_path: &Path, basenames: &[&str]) -> Option<Vec<u8>> {
+pub(crate) fn load_bytes_from_ras(
+    level_or_game_path: &Path,
+    basenames: &[&str],
+) -> Option<Vec<u8>> {
     let mut ras_candidates: Vec<PathBuf> = Vec::new();
     for anc in level_or_game_path.ancestors() {
         ras_candidates.push(anc.join("x_data.ras"));
@@ -791,18 +899,151 @@ fn load_skd_near(level_or_game_path: &Path, names: &[&str]) -> Option<SkdSkin> {
     load_bytes_from_ras(level_or_game_path, names).and_then(|b| parse_skd(&b))
 }
 
+/// `max_payne.txt` rest clip (`CHARANIM_STAND`).
+pub fn player_rest_anim_names() -> [&'static str; 1] {
+    ["stand.kf2"]
+}
+
+/// `max_payne.txt` reverts the walk slot onto `CHARANIM_RUN`.
+pub fn player_move_anim_names() -> [&'static str; 1] {
+    ["run.kf2"]
+}
+
 fn attach_rig(mesh: KfsMesh, skd_names: &[&str], path: &Path) -> CharacterRig {
-    let skin = load_skd_near(path, skd_names);
-    let idle = load_anim_named(path, &["idle_aim.kf2", "2_idle_aim.kf2"]);
-    let walk = load_anim_named(path, &["walk.kf2", "2_walk.kf2"]);
-    let bind = load_anim_named(path, &["pose.kf2", "widepose.kf2"]);
+    rig_from_mesh(mesh, load_skd_near(path, skd_names), path)
+}
+
+fn rig_from_mesh(mesh: KfsMesh, skin: Option<SkdSkin>, path: &Path) -> CharacterRig {
     CharacterRig {
         mesh,
         skin,
-        idle,
-        walk,
-        bind,
+        idle: load_anim_named(path, &player_rest_anim_names()),
+        walk: load_anim_named(path, &player_move_anim_names()),
+        bind: load_anim_named(path, &["pose.kf2", "widepose.kf2"]),
     }
+}
+
+/// First `[Geometry]` pair in a skin `.txt` (`ExportData` / `SkinData`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkinLodFiles {
+    pub kfs: String,
+    pub skd: String,
+}
+
+pub fn skin_lod_files(text: &str) -> Option<SkinLodFiles> {
+    for line in text.lines() {
+        if let (Some(kfs), Some(skd)) = (lod_field(line, "ExportData"), lod_field(line, "SkinData"))
+        {
+            return Some(SkinLodFiles { kfs, skd });
+        }
+    }
+    None
+}
+
+/// `C_SetInvulnerable` in the skin's OnInit (the baby in the house).
+pub fn skin_blocks_projectiles(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("c_setinvulnerable")
+}
+
+fn lod_field(line: &str, key: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let key_l = key.to_ascii_lowercase();
+    let idx = lower.find(&key_l)?;
+    let rest = line[idx + key.len()..].trim_start();
+    let rest = rest.strip_prefix('=').unwrap_or(rest).trim_start();
+    let end = rest.find(';').unwrap_or(rest.len());
+    let v = rest[..end].trim().trim_matches('"').replace('\\', "/");
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+/// A skin `.txt` plus the mesh it names. `invulnerable` comes from that file's OnInit.
+pub struct SkinBody {
+    pub rig: CharacterRig,
+    pub invulnerable: bool,
+}
+
+fn skin_roots(level_or_game_path: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![PathBuf::from("/tmp/omp-xdata-ref/data/database/skins")];
+    for anc in level_or_game_path.ancestors() {
+        dirs.push(anc.join("data/database/skins"));
+        dirs.push(anc.join("xdata/data/database/skins"));
+    }
+    dirs
+}
+
+fn read_skin_bytes(txt_dir: Option<&Path>, rel: &str, game: &Path) -> Option<Vec<u8>> {
+    if let Some(dir) = txt_dir {
+        let joined = dir.join(rel);
+        if let Ok(bytes) = std::fs::read(&joined) {
+            return Some(bytes);
+        }
+    }
+    let base = Path::new(rel).file_name()?.to_str()?;
+    if let Some(dir) = txt_dir {
+        if let Ok(bytes) = std::fs::read(dir.join(base)) {
+            return Some(bytes);
+        }
+    }
+    load_bytes_from_ras(game, &[base])
+}
+
+fn texture_dirs_for(txt_dir: Option<&Path>, kfs_rel: &str) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = txt_dir {
+        if let Some(parent) = dir.join(kfs_rel).parent() {
+            dirs.push(parent.join("textures"));
+            if let Some(skins) = parent.parent() {
+                dirs.push(skins.join("sharedtextures"));
+            }
+        }
+        dirs.push(dir.join("textures"));
+        if let Some(skins) = dir.parent() {
+            dirs.push(skins.join("sharedtextures"));
+        }
+    }
+    dirs
+}
+
+/// Load `database/skins/<skin_id>.txt` and the KFS/SKD its first geometry line names.
+pub fn load_skin_body(level_or_game_path: &Path, skin_id: &str) -> Option<SkinBody> {
+    if skin_id.is_empty() {
+        return None;
+    }
+    let txt_name = format!("{skin_id}.txt");
+    let loose = find_file_ci(&skin_roots(level_or_game_path), &[&txt_name]);
+    let (txt_dir, text) = if let Some(path) = loose {
+        let text = std::fs::read_to_string(&path).ok()?;
+        (path.parent().map(Path::to_path_buf), text)
+    } else {
+        let bytes = load_bytes_from_ras(level_or_game_path, &[&txt_name])?;
+        (None, String::from_utf8_lossy(&bytes).into_owned())
+    };
+    let lod = skin_lod_files(&text)?;
+    let kfs = read_skin_bytes(txt_dir.as_deref(), &lod.kfs, level_or_game_path)?;
+    let skd = read_skin_bytes(txt_dir.as_deref(), &lod.skd, level_or_game_path)
+        .and_then(|bytes| parse_skd(&bytes));
+    let tex_dirs = texture_dirs_for(txt_dir.as_deref(), &lod.kfs);
+    let mesh = parse_kfs_mesh(&kfs, |tfile| {
+        load_tex_from_dirs(tfile, &tex_dirs).or_else(|| {
+            let bytes = load_bytes_from_ras(level_or_game_path, &[tfile])?;
+            let (width, height, pixels) = decode_texture_blob(&bytes)?;
+            Some(DecodedTexture {
+                path: tfile.to_string(),
+                flag: 4,
+                width,
+                height,
+                pixels,
+            })
+        })
+    })?;
+    Some(SkinBody {
+        rig: rig_from_mesh(mesh, skd, level_or_game_path),
+        invulnerable: skin_blocks_projectiles(&text),
+    })
 }
 
 /// Load Max + Johnny as skinned rigs (KF2 idle/walk when BYOD `x_data` is present).
@@ -1001,6 +1242,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn skin_lod_reads_the_geometry_line() {
+        let young = "[LOD]\n{\n\t[Geometry] ExportData = young_max_payne_l0.kfs; SkinData = young_max_payne_l0.skd;\n";
+        let got = skin_lod_files(young).unwrap();
+        assert_eq!(got.kfs, "young_max_payne_l0.kfs");
+        assert_eq!(got.skd, "young_max_payne_l0.skd");
+
+        let staged = "[Geometry] ExportData = ..\\young_max_payne\\young_max_payne_l0.kfs; SkinData = ..\\young_max_payne\\young_max_payne_l0.skd;";
+        let got = skin_lod_files(staged).unwrap();
+        assert_eq!(got.kfs, "../young_max_payne/young_max_payne_l0.kfs");
+        assert_eq!(got.skd, "../young_max_payne/young_max_payne_l0.skd");
+
+        assert!(skin_blocks_projectiles(
+            r#"this->C_SetInvulnerable ( TRUE );"#
+        ));
+        assert!(!skin_blocks_projectiles("this->c_sethealth( 1 );"));
+    }
+
+    #[test]
     fn parses_synthetic_kf2_chunk() {
         let mut buf = Vec::new();
         buf.push(0x0c);
@@ -1097,6 +1356,26 @@ mod tests {
         assert!((posed[0][0]).abs() < 1e-4);
         assert!((posed[0][1]).abs() < 1e-4);
         assert!((posed[0][2] + 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn halfway_between_identity_and_yaw_90_is_yaw_45() {
+        let yaw90 = [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0];
+        let mid = slerp_mat(identity_mat(), yaw90, 0.5);
+        let c = (std::f32::consts::FRAC_PI_4).cos();
+        assert!((mid[0] - c).abs() < 1e-4);
+        assert!(mid[1].abs() < 1e-4);
+        assert!((mid[2] + c).abs() < 1e-4);
+        assert!((mid[6] - c).abs() < 1e-4);
+        assert!((mid[8] - c).abs() < 1e-4);
+        let len = (mid[0] * mid[0] + mid[1] * mid[1] + mid[2] * mid[2]).sqrt();
+        assert!((len - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn player_uses_stand_and_run_clips() {
+        assert_eq!(player_rest_anim_names(), ["stand.kf2"]);
+        assert_eq!(player_move_anim_names(), ["run.kf2"]);
     }
 
     #[test]

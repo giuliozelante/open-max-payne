@@ -35,6 +35,137 @@ pub struct SceneMaterial {
     pub texture_index: Option<usize>,
 }
 
+/// Draw and character-collision rules from `data/database/materials.txt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterialPolicy {
+    pub draw: bool,
+    pub character_collides: bool,
+    pub writes_z: bool,
+    /// `DetailOffset` in `materials.txt`. Larger values sit closer to the camera.
+    pub detail_offset: i32,
+    pub skybox: bool,
+}
+
+/// Category behavior. Unknown names stay solid and visible.
+pub fn material_policy(category: &str) -> MaterialPolicy {
+    let mut policy = MaterialPolicy {
+        draw: true,
+        character_collides: true,
+        writes_z: true,
+        detail_offset: 0,
+        skybox: false,
+    };
+    match category.to_ascii_lowercase().as_str() {
+        "ai_node_collision_nodraw" => {
+            policy.draw = false;
+            policy.character_collides = false;
+        }
+        "cameracollision" => policy.draw = false,
+        "character" => {
+            policy.draw = false;
+            policy.character_collides = false;
+        }
+        "charactercollision_nodraw" => policy.draw = false,
+        "dummy" => {
+            policy.draw = false;
+            policy.character_collides = false;
+        }
+        "graffiti" => {
+            policy.character_collides = false;
+            policy.writes_z = false;
+            policy.detail_offset = 1;
+        }
+        "leaves" | "water" | "nocollision" => policy.character_collides = false,
+        "skybox" => {
+            policy.draw = false;
+            policy.skybox = true;
+        }
+        _ => {}
+    }
+    policy
+}
+
+/// Alpha fields from one `[Category]` in `materials.txt`.
+///
+/// `ID_ALPHAREFERENCE` is 15. `Leaves` is the category that overrides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterialSurface {
+    pub alpha_reference: i32,
+    pub blended_alpha_test: bool,
+}
+
+pub fn parse_material_surfaces(text: &str) -> BTreeMap<String, MaterialSurface> {
+    let mut defines = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.split("//").next().unwrap_or("").trim();
+        let Some(rest) = line.strip_prefix("#define") else {
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        if let (Some(name), Some(val)) = (parts.next(), parts.next()) {
+            if let Ok(n) = val.parse::<i32>() {
+                defines.insert(name.to_string(), n);
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    let mut name: Option<String> = None;
+    let mut alpha = 0i32;
+    let mut blended = true;
+    let mut saw = false;
+    for line in text.lines() {
+        let line = line.split("//").next().unwrap_or("").trim();
+        if let Some(inner) = line.strip_prefix('[') {
+            if let Some(end) = inner.find(']') {
+                if let Some(prev) = name.take() {
+                    if saw {
+                        out.insert(
+                            prev,
+                            MaterialSurface {
+                                alpha_reference: alpha,
+                                blended_alpha_test: blended,
+                            },
+                        );
+                    }
+                }
+                name = Some(inner[..end].trim().to_string());
+                alpha = 0;
+                blended = true;
+                saw = false;
+            }
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim().trim_end_matches(';').trim();
+        if key.eq_ignore_ascii_case("AlphaReference") {
+            alpha = value
+                .parse::<i32>()
+                .ok()
+                .or_else(|| defines.get(value).copied())
+                .unwrap_or(0);
+            saw = true;
+        } else if key.eq_ignore_ascii_case("BlendedAlphaTest") {
+            blended = value.eq_ignore_ascii_case("TRUE");
+            saw = true;
+        }
+    }
+    if let Some(prev) = name {
+        if saw {
+            out.insert(
+                prev,
+                MaterialSurface {
+                    alpha_reference: alpha,
+                    blended_alpha_test: blended,
+                },
+            );
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SceneVertex {
     pub pos: [f32; 3],
@@ -67,6 +198,9 @@ pub struct SceneDynamicAnim {
     pub end_mat: [f32; 9],
     pub end_pos: [f32; 3],
     pub scripts: Vec<String>,
+    /// Two sample channels. Each sample is a tagged `f32` (`0x09`). One channel
+    /// runs along the start→end distance; the other is a 0..1 clock.
+    pub curves: [Vec<f32>; 2],
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +252,23 @@ pub struct SceneCharacter {
     pub room_id: i32,
     pub pos: [f32; 3],
     pub startup_scripts: Vec<String>,
+}
+
+impl SceneCharacter {
+    /// Startup `C_Kill` (Michelle is already dead when the house prologue begins).
+    pub fn starts_dead(&self) -> bool {
+        self.startup_scripts
+            .iter()
+            .any(|s| s.to_ascii_lowercase().contains("c_kill"))
+    }
+
+    /// Chase only when a startup script enters combat. Placed actors stay on their mark.
+    pub fn pursues(&self) -> bool {
+        self.startup_scripts.iter().any(|s| {
+            let s = s.to_ascii_lowercase();
+            s.contains("mobstercombat") || s.contains("c_goto(")
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +386,21 @@ fn read_f32_tag(data: &[u8], i: &mut usize) -> Option<f32> {
     let v = f32::from_le_bytes(data.get(*i + 1..*i + 5)?.try_into().ok()?);
     *i += 5;
     Some(v)
+}
+
+/// `n` animation samples. On disk each one is 5 bytes; a `0x09` sample is a float.
+fn read_f32_samples(data: &[u8], i: &mut usize, n: usize) -> Option<Vec<f32>> {
+    let mut out = Vec::with_capacity(n.min(8192));
+    for _ in 0..n {
+        if data.get(*i) == Some(&0x09) {
+            out.push(read_f32_tag(data, i)?);
+        } else if *i + 5 <= data.len() {
+            *i += 5;
+        } else {
+            return None;
+        }
+    }
+    Some(out)
 }
 
 fn read_vec2_tag(data: &[u8], i: &mut usize) -> Option<[f32; 2]> {
@@ -858,9 +1024,22 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         i = lend;
     }
 
-    // 9. Jumppoints
+    // 9. Jumppoints.
+    // House levels start at the count (`14 <n>`). Startup wraps that count:
+    // empty `0x1f` list, int 0, then the count, then the named records.
     let mut jumppoints = Vec::new();
-    if let Some(jcnt) = read_i32(data, &mut i) {
+    let jcnt = if data.get(i) == Some(&0x1f) {
+        match super::parse_ras_ldb_import_character_head_at(data, i) {
+            Some((count, at)) => {
+                i = at;
+                Some(count as i32)
+            }
+            None => read_i32(data, &mut i),
+        }
+    } else {
+        read_i32(data, &mut i)
+    };
+    if let Some(jcnt) = jcnt {
         for _ in 0..jcnt {
             let name = read_str(data, &mut i)?;
             let _parent = read_str(data, &mut i)?;
@@ -998,18 +1177,20 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     let mut scripts = read_str_list(data, &mut i, 0x1c)?;
                     scripts.append(&mut read_str_list(data, &mut i, 0x1c)?);
                     scripts.append(&mut read_str_list(data, &mut i, 0x1c)?);
-                    for _ in 0..2 {
+                    let mut curves = [Vec::new(), Vec::new()];
+                    for curve in &mut curves {
                         let _cty = read_i32(data, &mut i)?;
                         let _cver = read_i32(data, &mut i)?;
                         let c_ch = read_i32(data, &mut i)? as usize;
                         let c_smp = read_i32(data, &mut i)? as usize;
-                        i += c_ch * c_smp * 5;
+                        *curve = read_f32_samples(data, &mut i, c_ch.saturating_mul(c_smp))?;
                     }
                     anims.push(SceneDynamicAnim {
                         name: aname,
                         duration,
                         start_mat,
                         start_pos,
+                        curves,
                         end_mat,
                         end_pos,
                         scripts,
@@ -1226,6 +1407,248 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
     })
 }
 
+impl LdbScene {
+    /// `::StartRoom::Jumppoint 00` when the node name is only `Jumppoint 00`.
+    pub fn jumppoint_place(&self, jp: &SceneJumppoint) -> String {
+        if jp.name.starts_with("::") {
+            return jp.name.clone();
+        }
+        match self.rooms.iter().find(|r| r.id == jp.room_id) {
+            Some(room) if !room.name.is_empty() => format!("{}::{}", room.name, jp.name),
+            _ => jp.name.clone(),
+        }
+    }
+
+    /// Index of `PlayerStartingPlace`, else the first StartRoom jumppoint.
+    pub fn spawn_jumppoint_index(&self, place: Option<&str>) -> usize {
+        if let Some(place) = place {
+            if let Some(i) = self
+                .jumppoints
+                .iter()
+                .position(|j| self.jumppoint_place(j).eq_ignore_ascii_case(place))
+            {
+                return i;
+            }
+        }
+        self.jumppoints
+            .iter()
+            .position(|j| {
+                let place = self.jumppoint_place(j);
+                place.to_ascii_lowercase().contains("startroom")
+                    && place.to_ascii_lowercase().contains("jumppoint")
+            })
+            .or_else(|| {
+                self.jumppoints
+                    .iter()
+                    .position(|j| j.name.to_ascii_lowercase().contains("jumppoint"))
+            })
+            .unwrap_or(0)
+    }
+}
+
+/// One animated dynamic object in the intro camera rig.
+#[derive(Debug, Clone)]
+struct FlyBone {
+    /// Rest orientation. Column 0, 1, 2 are the local axes.
+    mat: [f32; 9],
+    start_pos: [f32; 3],
+    end_pos: [f32; 3],
+    duration: f32,
+    /// Distance-along-segment samples. Empty means a linear blend.
+    curve: Vec<f32>,
+}
+
+/// Startup flyover: ancestor bones run from t = 0, and `altitude::camera`
+/// plays tracks 1..5 in order. Track 5's script is the graphic-novel handoff.
+#[derive(Debug, Clone)]
+pub struct CameraFlyover {
+    ancestors: Vec<FlyBone>,
+    segments: Vec<FlyBone>,
+    room_origin: [f32; 3],
+    forward: [f32; 3],
+    pub duration: f32,
+}
+
+impl CameraFlyover {
+    /// World position and look direction at `time` seconds.
+    pub fn pose(&self, time: f32) -> ([f32; 3], [f32; 3]) {
+        let mut origin = [0.0f32; 3];
+        let mut mat = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        for (i, bone) in self.ancestors.iter().enumerate() {
+            let local = bone.pos_at(time);
+            if i == 0 {
+                origin = local;
+            } else {
+                origin = xform_point(mat, origin, local);
+            }
+            mat = bone.mat;
+        }
+        let (seg, local_t) = segment_at(&self.segments, time);
+        let local = seg.pos_at(local_t);
+        let mut pos = xform_point(mat, origin, local);
+        pos[0] += self.room_origin[0];
+        pos[1] += self.room_origin[1];
+        pos[2] += self.room_origin[2];
+        (pos, self.forward)
+    }
+}
+
+impl FlyBone {
+    fn pos_at(&self, time: f32) -> [f32; 3] {
+        let w = if self.duration <= 0.0 {
+            1.0
+        } else {
+            curve_weight(&self.curve, self.duration, time.min(self.duration))
+        };
+        [
+            self.start_pos[0] + (self.end_pos[0] - self.start_pos[0]) * w,
+            self.start_pos[1] + (self.end_pos[1] - self.start_pos[1]) * w,
+            self.start_pos[2] + (self.end_pos[2] - self.start_pos[2]) * w,
+        ]
+    }
+}
+
+fn xform_point(mat: [f32; 9], origin: [f32; 3], v: [f32; 3]) -> [f32; 3] {
+    [
+        origin[0] + mat[0] * v[0] + mat[3] * v[1] + mat[6] * v[2],
+        origin[1] + mat[1] * v[0] + mat[4] * v[1] + mat[7] * v[2],
+        origin[2] + mat[2] * v[0] + mat[5] * v[1] + mat[8] * v[2],
+    ]
+}
+
+fn curve_weight(curve: &[f32], duration: f32, time: f32) -> f32 {
+    let linear = if duration <= 0.0 {
+        1.0
+    } else {
+        (time / duration).clamp(0.0, 1.0)
+    };
+    let Some(&last) = curve.last() else {
+        return linear;
+    };
+    if curve.len() < 2 || last.abs() < 1.0e-4 {
+        return linear;
+    }
+    let f = linear * (curve.len() - 1) as f32;
+    let i = (f.floor() as usize).min(curve.len() - 1);
+    let j = (i + 1).min(curve.len() - 1);
+    let frac = f - i as f32;
+    let sample = curve[i] + (curve[j] - curve[i]) * frac;
+    (sample / last).clamp(0.0, 1.0)
+}
+
+fn segment_at(segments: &[FlyBone], time: f32) -> (&FlyBone, f32) {
+    let mut remain = time.max(0.0);
+    for seg in segments {
+        if remain <= seg.duration || seg.duration <= 0.0 {
+            return (seg, remain.min(seg.duration.max(0.0)));
+        }
+        remain -= seg.duration;
+    }
+    let last = segments.last().expect("flyover has a segment");
+    (last, last.duration)
+}
+
+fn bone_from_anim(mesh: &SceneDynamicMesh, anim: &SceneDynamicAnim) -> FlyBone {
+    let delta = dist3(anim.end_pos, anim.start_pos);
+    let mut curve = Vec::new();
+    let mut best_err = f32::MAX;
+    for samples in &anim.curves {
+        let Some(&last) = samples.last() else {
+            continue;
+        };
+        if samples.len() < 2 {
+            continue;
+        }
+        let err = (last.abs() - delta).abs();
+        if err < best_err {
+            best_err = err;
+            curve.clone_from(samples);
+        }
+    }
+    if delta <= 0.05 || best_err > (delta * 0.05).max(0.5) {
+        curve.clear();
+    }
+    FlyBone {
+        mat: mesh.world_mat,
+        start_pos: anim.start_pos,
+        end_pos: anim.end_pos,
+        duration: anim.duration,
+        curve,
+    }
+}
+
+fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+}
+
+fn parent_name(name: &str) -> Option<String> {
+    let bare = name.strip_suffix(".DO").unwrap_or(name);
+    let (parent, _) = bare.rsplit_once("::")?;
+    Some(format!("{parent}.DO"))
+}
+
+/// The `startup_level` camera rig, if this scene has the rotator that ends in
+/// `s_modeswitch(graphicnovel)`.
+pub fn camera_flyover(scene: &LdbScene) -> Option<CameraFlyover> {
+    let cam = scene.dynamic_meshes.iter().find(|m| {
+        m.name.ends_with("altitude::camera.DO")
+            && m.anims.iter().any(|a| {
+                a.scripts.iter().any(|s| {
+                    s.to_ascii_lowercase()
+                        .contains("s_modeswitch(graphicnovel)")
+                })
+            })
+    })?;
+    let mut chain = vec![cam];
+    while let Some(parent) = parent_name(&chain.last()?.name) {
+        let Some(mesh) = scene.dynamic_meshes.iter().find(|m| m.name == parent) else {
+            break;
+        };
+        chain.push(mesh);
+    }
+    chain.reverse();
+    let camera = chain.pop()?;
+    let ancestors = chain
+        .iter()
+        .filter_map(|mesh| {
+            mesh.anims
+                .iter()
+                .find(|a| a.name == "1")
+                .or_else(|| mesh.anims.first())
+                .map(|anim| bone_from_anim(mesh, anim))
+        })
+        .collect::<Vec<_>>();
+    if ancestors.is_empty() {
+        return None;
+    }
+    let mut segments = Vec::new();
+    for index in 1..=5 {
+        let anim = camera.anims.iter().find(|a| a.name == index.to_string())?;
+        segments.push(bone_from_anim(camera, anim));
+    }
+    let duration = segments.iter().map(|s| s.duration).sum();
+    let room_origin = scene
+        .rooms
+        .iter()
+        .find(|r| r.id == camera.room_id)
+        .map(|r| r.world_origin)
+        .unwrap_or([0.0; 3]);
+    let z = [
+        camera.world_mat[6],
+        camera.world_mat[7],
+        camera.world_mat[8],
+    ];
+    let len = (z[0] * z[0] + z[1] * z[1] + z[2] * z[2]).sqrt().max(1.0e-6);
+    Some(CameraFlyover {
+        ancestors,
+        segments,
+        room_origin,
+        forward: [z[0] / len, z[1] / len, z[2] / len],
+        duration,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1243,5 +1666,183 @@ mod tests {
         let (w, h, px) = decode_texture_blob(&tga).unwrap();
         assert_eq!((w, h), (1, 1));
         assert_eq!(px, vec![0x00332211]);
+    }
+
+    fn bare_scene(rooms: Vec<SceneRoom>, jumppoints: Vec<SceneJumppoint>) -> LdbScene {
+        LdbScene {
+            textures: Vec::new(),
+            materials: BTreeMap::new(),
+            lightmaps: Vec::new(),
+            exits: Vec::new(),
+            static_meshes: Vec::new(),
+            jumppoints,
+            fsms: Vec::new(),
+            characters: Vec::new(),
+            triggers: Vec::new(),
+            dynamic_meshes: Vec::new(),
+            items: Vec::new(),
+            point_lights: Vec::new(),
+            rooms,
+            bytes_consumed: 0,
+        }
+    }
+
+    #[test]
+    fn spawn_uses_player_starting_place() {
+        let scene = bare_scene(
+            vec![
+                SceneRoom {
+                    id: 0,
+                    name: "::startroom".into(),
+                    static_meshes: Vec::new(),
+                    exits: Vec::new(),
+                    dynamic_meshes: Vec::new(),
+                    world_origin: [0.0; 3],
+                },
+                SceneRoom {
+                    id: 4,
+                    name: "::Bathroom".into(),
+                    static_meshes: Vec::new(),
+                    exits: Vec::new(),
+                    dynamic_meshes: Vec::new(),
+                    world_origin: [0.0; 3],
+                },
+            ],
+            vec![
+                SceneJumppoint {
+                    name: "Jumppoint 00".into(),
+                    room_id: 4,
+                    pos: [9.0, 0.0, 0.0],
+                    jp_type: 0,
+                },
+                SceneJumppoint {
+                    name: "Jumppoint 00".into(),
+                    room_id: 0,
+                    pos: [1.0, 0.0, 2.0],
+                    jp_type: 0,
+                },
+            ],
+        );
+        let idx = scene.spawn_jumppoint_index(Some("::StartRoom::Jumppoint 00"));
+        assert_eq!(idx, 1);
+        assert_eq!(scene.jumppoints[idx].pos, [1.0, 0.0, 2.0]);
+    }
+
+    #[test]
+    fn material_policy_matches_materials_txt() {
+        let dummy = material_policy("dummy");
+        assert!(!dummy.draw);
+        assert!(!dummy.character_collides);
+
+        let sky = material_policy("Skybox");
+        assert!(!sky.draw);
+        assert!(sky.character_collides);
+        assert!(sky.skybox);
+
+        let graffiti = material_policy("Graffiti");
+        assert!(graffiti.draw);
+        assert!(!graffiti.character_collides);
+        assert!(!graffiti.writes_z);
+        assert_eq!(graffiti.detail_offset, 1);
+
+        let wood = material_policy("wood");
+        assert!(wood.draw);
+        assert!(wood.character_collides);
+        assert!(wood.writes_z);
+        assert_eq!(wood.detail_offset, 0);
+
+        let pass = material_policy("NoCollision");
+        assert!(pass.draw);
+        assert!(!pass.character_collides);
+
+        let ai = material_policy("ai_node_collision_nodraw");
+        assert!(!ai.draw);
+        assert!(!ai.character_collides);
+
+        let shell = material_policy("CharacterCollision_NoDraw");
+        assert!(!shell.draw);
+        assert!(shell.character_collides);
+    }
+
+    #[test]
+    fn material_surfaces_use_the_file_alpha_reference() {
+        let text = "#define ID_ALPHAREFERENCE 15\n[Default]\nAlphaReference = ID_ALPHAREFERENCE;\nBlendedAlphaTest = TRUE;\n[Leaves]\nAlphaReference = 127;\nBlendedAlphaTest = FALSE;\n";
+        let surfaces = parse_material_surfaces(text);
+        assert_eq!(surfaces["Default"].alpha_reference, 15);
+        assert!(surfaces["Default"].blended_alpha_test);
+        assert_eq!(surfaces["Leaves"].alpha_reference, 127);
+        assert!(!surfaces["Leaves"].blended_alpha_test);
+        let path = std::path::Path::new("/tmp/omp-xdata-ref/data/database/materials.txt");
+        if path.is_file() {
+            let retail = parse_material_surfaces(&std::fs::read_to_string(path).unwrap());
+            assert_eq!(retail["Leaves"].alpha_reference, 127);
+            assert!(!retail["Leaves"].blended_alpha_test);
+            assert_eq!(retail["Glass"].alpha_reference, 15);
+            assert!(retail["Glass"].blended_alpha_test);
+        }
+    }
+
+    fn actor(scripts: &[&str]) -> SceneCharacter {
+        SceneCharacter {
+            name: "actor".into(),
+            skin: "lab_junkie".into(),
+            room_id: 1,
+            pos: [0.0; 3],
+            startup_scripts: scripts.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn placed_house_actors_stay_put_until_combat() {
+        let michelle = actor(&["::teleport::michelle->c_kill(1);"]);
+        assert!(michelle.starts_dead());
+        assert!(!michelle.pursues());
+
+        let junkie = actor(&["::babys_room::e1->C_RemoveAllWeapons(beretta);"]);
+        assert!(!junkie.starts_dead());
+        assert!(!junkie.pursues());
+
+        let combat = actor(&["::babys_room::e1->C_SetStateMachine(mobstercombat);"]);
+        assert!(combat.pursues());
+        assert!(!combat.starts_dead());
+    }
+
+    #[test]
+    fn startup_level_reads_the_rotator_camera_tracks() {
+        let path = std::path::Path::new(
+            "/tmp/omp-xdata-ref/data/database/levels/front_end/Startup_level.ldb",
+        );
+        if !path.is_file() {
+            return;
+        }
+        let bytes = std::fs::read(path).unwrap();
+        let scene = parse_ldb_scene(&bytes).expect("startup scene");
+        assert_eq!(scene.bytes_consumed, bytes.len());
+        let jp = scene
+            .jumppoints
+            .iter()
+            .find(|j| j.name == "::start::Jumppoint 00")
+            .expect("jumppoint");
+        assert_eq!(jp.pos, [-139.0, -67.5, -1149.0]);
+        let cam = scene
+            .dynamic_meshes
+            .iter()
+            .find(|m| m.name.ends_with("altitude::camera.DO"))
+            .expect("camera");
+        let track1 = cam.anims.iter().find(|a| a.name == "1").expect("track 1");
+        assert_eq!(track1.duration, 7.0);
+        assert!((track1.start_pos[0] + 0.07).abs() < 0.02);
+        assert!((track1.start_pos[1] - 0.2).abs() < 0.02);
+        assert!((track1.start_pos[2] - 1.56).abs() < 0.02);
+        let fly = camera_flyover(&scene).expect("flyover");
+        assert_eq!(fly.segments.len(), 5);
+        assert!((fly.duration - 28.5).abs() < 0.05);
+        let (pos, forward) = fly.pose(0.0);
+        assert!((pos[0] + 40.57).abs() < 0.05);
+        assert!((pos[1] + 58.55).abs() < 0.05);
+        assert!((pos[2] + 34.44).abs() < 0.05);
+        let flen =
+            (forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]).sqrt();
+        assert!((flen - 1.0).abs() < 0.01);
     }
 }

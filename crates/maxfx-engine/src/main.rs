@@ -29,7 +29,7 @@ fn main() -> ExitCode {
             Some("--window") => want_window = true,
             Some("-h" | "--help") => {
                 eprintln!(
-                    "usage: maxfx-engine [--window] <archive.ras|archive.mpm|game-dir|level.ldb|.ai>"
+                    "usage: maxfx-engine [--window] <game-dir|archive.ras|archive.mpm|level.ldb|.ai>"
                 );
                 return ExitCode::SUCCESS;
             }
@@ -433,6 +433,10 @@ fn main() -> ExitCode {
                                     scene,
                                     p,
                                     &format!("Open Max Payne 3D — {}", p.display()),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
                                 ) {
                                     eprintln!("3D walkthrough error: {e}");
                                     return ExitCode::FAILURE;
@@ -520,6 +524,9 @@ fn main() -> ExitCode {
         }
     }
     if p.is_dir() {
+        if want_window {
+            return launch_startup(p);
+        }
         return match discover_ras_files(p) {
             Ok(files) => {
                 println!("{}: {} *.ras", p.display(), files.len());
@@ -582,6 +589,86 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn launch_startup(game_dir: &Path) -> ExitCode {
+    if let Some(video) = maxfx_engine::startup_video_path(game_dir) {
+        println!("startup video {}", video.display());
+        if let Err(e) = maxfx_engine::play_intro_video(&video) {
+            eprintln!("intro: {e} — continuing to the main menu");
+        }
+    } else {
+        println!("startup video: none");
+    }
+    let menu = match maxfx_engine::load_main_menu(game_dir) {
+        Ok(menu) => menu,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(level_id) = maxfx_engine::menu_ui::run_main_menu(&menu) else {
+        println!("quit");
+        return ExitCode::SUCCESS;
+    };
+    println!("start level {level_id}");
+    if let Err(e) = play_level(game_dir, &level_id, true) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// One menu level. `startup_level` plays the rotator camera tracks, then the
+/// comic page, then the next level. Escape or Space skips the tracks.
+fn play_level(game_dir: &Path, level_id: &str, allow_handoff: bool) -> Result<(), String> {
+    let (win, bytes) =
+        maxfx_engine::load_level_by_id(game_dir, level_id).map_err(|e| e.to_string())?;
+    let handoff = if allow_handoff {
+        maxfx_engine::level_handoff(&bytes)
+    } else {
+        None
+    };
+    if handoff.is_none() {
+        let pages = maxfx_engine::level_opening_pages(&bytes);
+        if !pages.is_empty() {
+            println!("opening pages {}", pages.join(", "));
+            let (chrome, shown) = maxfx_engine::load_novel_session(game_dir, &pages);
+            maxfx_engine::menu_ui::show_novel_session(&chrome, &shown);
+        }
+    }
+    let scene = maxfx_engine::scene::parse_ldb_scene(&bytes)
+        .ok_or_else(|| format!("{win} did not decode"))?;
+    let entry = maxfx_engine::level_entry(game_dir, level_id).ok();
+    let player_start = entry.as_ref().and_then(|entry| entry.player_start.clone());
+    let player_skin = entry.as_ref().and_then(|entry| entry.player_skin.clone());
+    let world_sphere = entry.as_ref().and_then(|entry| entry.world_sphere.clone());
+    let title = format!("Open Max Payne — {level_id}");
+    let shot = if handoff.is_some() {
+        maxfx_engine::scene::camera_flyover(&scene)
+    } else {
+        None
+    };
+    maxfx_engine::render3d::run_3d_walkthrough(
+        scene,
+        game_dir,
+        &title,
+        player_start.as_deref(),
+        player_skin.as_deref(),
+        world_sphere.as_deref(),
+        shot,
+    )?;
+    if let Some(hand) = handoff {
+        println!(
+            "handoff {level_id} → {} → {}",
+            hand.novel_page, hand.next_level
+        );
+        let (chrome, shown) =
+            maxfx_engine::load_novel_session(game_dir, std::slice::from_ref(&hand.novel_page));
+        maxfx_engine::menu_ui::show_novel_session(&chrome, &shown);
+        return play_level(game_dir, &hand.next_level, false);
+    }
+    Ok(())
 }
 
 fn extract_levels_txt(arc: &RasArchive) -> Option<String> {
