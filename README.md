@@ -13,12 +13,12 @@ Product spec: [docs/specs/2026-10-30-open-max-payne.md](docs/specs/2026-10-30-op
 
 | Area | Status |
 |------|--------|
-| **Play (Rust)** | `maxfx-play` — Wine/`MaxPayne.exe` default; Studio checkbox / `OPENMAXFX_PLAY=native` → `maxfx-engine --window` BYOD point preview |
+| **Play (Rust)** | `maxfx-play` — Wine/`MaxPayne.exe` default; Studio checkbox / `OPENMAXFX_PLAY=native` → `maxfx-engine --window` 3D textured + lightmapped walkthrough |
 | **1.05 patcher** | `maxfx-patcher` — HTTPS + SHA-256 allowlist; refuses SFX installers |
-| **`openras` (Rust)** | **Alpha** — RASMaker `-x/-v/-a/-m/-p/-c` + subcommands; CI tests |
-| **`openpfx` (Rust)** | **Draft** — `dump-pse` / `dump-rps` (tags `14`/`11`/`09`/`0d`/`13`); preamble export only |
-| **`maxfx-engine`** | **Skeleton + preview** — BYOD `.ldb` parse + `--window` vec3 point cloud (not a full game) |
-| **Studio (Tauri)** | GUI front door (Launch/Stop process tracking) |
+| **`openras` (Rust)** | **Complete** — RASMaker `-x/-v/-a/-m/-p/-c` + `RA->` 12-byte LZSS header (`rl.dll` `0x10012fa0`); extracts all retail `x_level*.ras` |
+| **`openpfx` (Rust)** | **Alpha** — `dump-pse`, `dump-rps`, `export-root` (`export`), `validate-rps` (`PS_ParticleSystem` `0x60`/`5` gates) |
+| **`maxfx-engine`** | **3D Walkthrough + Tools** — 100% `.ldb` scene decoder (textures, `256²` lightmaps, rooms, portals, static & dynamic meshes, FSMs, triggers, items, characters), interactive 3D walkthrough (`--window`), and `.kf2`/`.skd` chunk inspector |
+| **Studio (Tauri)** | Native GUI front door: **RASMaker**, **Play**, **MaxED 3D**, **ParticleFX**, and **ActorFX** tabs |
 | **`.sh` runtime** | Linux convenience only — not required on Windows |
 | **Blender KF2** | Specification / early architecture (stub add-on) |
 

@@ -74,6 +74,15 @@ window.addEventListener("DOMContentLoaded", async () => {
   input("#game-dir").value = paths.game_default;
   input("#pack-folder").value = `${paths.out}/sample-mod`;
   input("#pack-out").value = `${paths.root}/my-mod.mpm`;
+  input("#maxed-level").value =
+    `${paths.game_default}/data.disabled-hires/database/levels/front_end/Tutorial.ldb`;
+  input("#pfx-input").value =
+    `${paths.root}/vendor/max-fx-tools/ParticleFX_files/Examples/Fire_Medium.pse`;
+  input("#pfx-bitmaps").value =
+    `${paths.root}/vendor/max-fx-tools/ParticleFX_files/Examples/Bitmaps`;
+  input("#pfx-output").value = `/tmp/Fire_Medium.rps`;
+  input("#afx-input").value =
+    `/tmp/omp-accept-11/xdata/data/database/skeletons/transit_cop_l0.skd`;
   stamp(`Repo: ${paths.root}`);
 
   $("#btn-sample").onclick = () => {
@@ -363,6 +372,81 @@ window.addEventListener("DOMContentLoaded", async () => {
       try {
         stamp(await invoke<string>("run_tests"));
       } catch (e) {
+        stamp(`ERROR: ${e}`);
+      }
+    });
+
+  const maxedInspectBtn = $("#btn-maxed-inspect") as HTMLButtonElement;
+  const maxed3dBtn = $("#btn-maxed-3d") as HTMLButtonElement;
+  maxedInspectBtn.onclick = () =>
+    withBusy([maxedInspectBtn], async () => {
+      try {
+        const res = await invoke<string>("inspect_maxed_level", {
+          path: input("#maxed-level").value,
+        });
+        $("#maxed-out").textContent = res;
+        stamp("Inspected MaxED level.");
+      } catch (e) {
+        $("#maxed-out").textContent = `ERROR: ${e}`;
+        stamp(`ERROR: ${e}`);
+      }
+    });
+  maxed3dBtn.onclick = () =>
+    withBusy([maxed3dBtn], async () => {
+      try {
+        stamp(
+          await invoke<string>("launch_3d_level", {
+            path: input("#maxed-level").value,
+          }),
+        );
+        await syncRunning();
+      } catch (e) {
+        stamp(`ERROR: ${e}`);
+      }
+    });
+
+  const pfxInspectBtn = $("#btn-pfx-inspect") as HTMLButtonElement;
+  const pfxExportBtn = $("#btn-pfx-export") as HTMLButtonElement;
+  pfxInspectBtn.onclick = () =>
+    withBusy([pfxInspectBtn], async () => {
+      try {
+        const res = await invoke<string>("inspect_particlefx", {
+          path: input("#pfx-input").value,
+        });
+        $("#pfx-out").textContent = res;
+        stamp("Inspected ParticleFX file.");
+      } catch (e) {
+        $("#pfx-out").textContent = `ERROR: ${e}`;
+        stamp(`ERROR: ${e}`);
+      }
+    });
+  pfxExportBtn.onclick = () =>
+    withBusy([pfxExportBtn], async () => {
+      try {
+        const res = await invoke<string>("export_particlefx_rps", {
+          psePath: input("#pfx-input").value,
+          bitmapRoot: input("#pfx-bitmaps").value,
+          outPath: input("#pfx-output").value,
+        });
+        $("#pfx-out").textContent = res;
+        stamp(res);
+      } catch (e) {
+        $("#pfx-out").textContent = `ERROR: ${e}`;
+        stamp(`ERROR: ${e}`);
+      }
+    });
+
+  const afxInspectBtn = $("#btn-afx-inspect") as HTMLButtonElement;
+  afxInspectBtn.onclick = () =>
+    withBusy([afxInspectBtn], async () => {
+      try {
+        const res = await invoke<string>("inspect_actorfx", {
+          path: input("#afx-input").value,
+        });
+        $("#afx-out").textContent = res;
+        stamp("Inspected ActorFX KF2/SKD file.");
+      } catch (e) {
+        $("#afx-out").textContent = `ERROR: ${e}`;
         stamp(`ERROR: ${e}`);
       }
     });

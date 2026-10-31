@@ -1,40 +1,57 @@
 //! Okumura-style LZSS as used by rl.dll R_File::decompress (compression mode 1).
+//!
+//! `rl.dll` `0x10012ce0` / `0x10012fa0` frames mode-1 payloads with a 12-byte
+//! header: `b"RA->"` + `uncompressed_size: u32` + `compressed_body_size: u32`.
 
 const N: usize = 4096;
 const F: usize = 18;
 const THRESHOLD: usize = 2;
+pub const LZSS_MAGIC: &[u8; 4] = b"RA->";
+pub const LZSS_HEADER_LEN: usize = 12;
 
 pub fn decompress(src: &[u8], uncompressed_size: Option<usize>) -> Vec<u8> {
+    let (body, hdr_uncomp) = if src.len() >= LZSS_HEADER_LEN && &src[..4] == LZSS_MAGIC {
+        let u = u32::from_le_bytes(src[4..8].try_into().unwrap()) as usize;
+        let c = u32::from_le_bytes(src[8..12].try_into().unwrap()) as usize;
+        let end = LZSS_HEADER_LEN.saturating_add(c).min(src.len());
+        (&src[LZSS_HEADER_LEN..end], Some(u))
+    } else {
+        (src, None)
+    };
+    let target_len = uncompressed_size.or(hdr_uncomp);
     let mut text_buf = vec![0x20u8; N];
     let mut r = 0xFEE;
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(target_len.unwrap_or(body.len() * 2));
     let mut pb = 0usize;
     let mut flags: u32 = 0;
 
     loop {
+        if target_len.is_some_and(|sz| out.len() >= sz) {
+            break;
+        }
         flags >>= 1;
         if flags & 0x100 == 0 {
-            if pb >= src.len() {
+            if pb >= body.len() {
                 break;
             }
-            flags = u32::from(src[pb]) | 0xFF00;
+            flags = u32::from(body[pb]) | 0xFF00;
             pb += 1;
         }
         if flags & 1 != 0 {
-            if pb >= src.len() {
+            if pb >= body.len() {
                 break;
             }
-            let b = src[pb];
+            let b = body[pb];
             pb += 1;
             out.push(b);
             text_buf[r] = b;
             r = (r + 1) & 0xFFF;
         } else {
-            if pb + 1 >= src.len() {
+            if pb + 1 >= body.len() {
                 break;
             }
-            let b0 = src[pb];
-            let b1 = src[pb + 1];
+            let b0 = body[pb];
+            let b1 = body[pb + 1];
             pb += 2;
             let offset = usize::from(b0) | ((usize::from(b1) & 0xF0) << 4);
             let limit = (usize::from(b1) & 0x0F) + 2;
@@ -47,17 +64,20 @@ pub fn decompress(src: &[u8], uncompressed_size: Option<usize>) -> Vec<u8> {
         }
     }
 
-    if let Some(sz) = uncompressed_size {
+    if let Some(sz) = target_len {
         out.truncate(sz);
     }
     out
 }
 
-/// Greedy LZSS encoder producing streams accepted by [`decompress`].
+/// Greedy LZSS encoder producing streams accepted by [`decompress`] and retail `rl.dll`.
 pub fn compress(src: &[u8]) -> Vec<u8> {
     let mut text_buf = vec![0x20u8; N];
     let mut r = 0xFEE;
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(LZSS_HEADER_LEN + src.len());
+    out.extend_from_slice(LZSS_MAGIC);
+    out.extend_from_slice(&(src.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
     let mut pos = 0usize;
     let n = src.len();
 
@@ -112,6 +132,8 @@ pub fn compress(src: &[u8]) -> Vec<u8> {
         out[flag_pos] = flags;
         out.extend_from_slice(&block);
     }
+    let body_len = (out.len() - LZSS_HEADER_LEN) as u32;
+    out[8..12].copy_from_slice(&body_len.to_le_bytes());
     out
 }
 
@@ -131,6 +153,11 @@ mod tests {
     fn lzss_roundtrip_binary() {
         let src: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
         let comp = compress(&src);
+        assert_eq!(&comp[..4], b"RA->");
+        let uncomp_hdr = u32::from_le_bytes(comp[4..8].try_into().unwrap()) as usize;
+        let body_hdr = u32::from_le_bytes(comp[8..12].try_into().unwrap()) as usize;
+        assert_eq!(uncomp_hdr, src.len());
+        assert_eq!(body_hdr + 12, comp.len());
         let out = decompress(&comp, Some(src.len()));
         assert_eq!(out, src);
     }
