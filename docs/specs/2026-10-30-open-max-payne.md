@@ -53,6 +53,7 @@ Done when (north star — open):
   - [x] At least one additional native MAX-FX tool beyond archiver (`openpfx` dump)
   - [x] Engine walking skeleton loads a BYOD archive (`maxfx-engine` + skeleton spec)
   - [ ] Play path can prefer native engine when ready; Wine remains fallback
-  - [ ] `openpfx` PSE→RPS export (`-e` parity) after RPS version REA
+        (`OPENMAXFX_PLAY=native` scaffolding in `maxfx-play`; engine not playable yet — epic #16)
+  - [ ] `openpfx` PSE→RPS export (`-e` parity) after RPS version REA (issue #11 in-level smoke)
   - [x] Engine REA note naming archive mount + level-load tokens
   - [x] Decompiled `R_File::loadArchives` → `FindFirstFile("*.RAS")` (+ secondary path)

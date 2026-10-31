@@ -13,7 +13,7 @@ Product spec: [docs/specs/2026-10-30-open-max-payne.md](docs/specs/2026-10-30-op
 
 | Area | Status |
 |------|--------|
-| **Play (Rust)** | `maxfx-play` — Wine win32 `pfx/` on Unix; native EXE on Windows; localized-safe stack |
+| **Play (Rust)** | `maxfx-play` — Wine/`MaxPayne.exe` default; opt-in `OPENMAXFX_PLAY=native` → `maxfx-engine` probe (#16) |
 | **1.05 patcher** | `maxfx-patcher` — HTTPS + SHA-256 allowlist; refuses SFX installers |
 | **`openras` (Rust)** | **Alpha** — RASMaker `-x/-v/-a/-m/-p/-c` + subcommands; CI tests |
 | **`openpfx` (Rust)** | **Draft** — `dump-pse` / `dump-rps` (tags `14`/`11`/`09`/`0d`/`13`); preamble export only |

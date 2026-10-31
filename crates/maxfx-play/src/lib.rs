@@ -154,8 +154,95 @@ fn wine_prefix(game: &Path) -> PathBuf {
     game.join("pfx")
 }
 
+/// How Play launches. Wine/`MaxPayne.exe` remains the default bridge (#16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayBackend {
+    /// Retail `MaxPayne.exe` (Wine on Unix, native on Windows).
+    Retail,
+    /// `maxfx-engine` skeleton — not playable; opt-in via `OPENMAXFX_PLAY=native`.
+    NativeEngine,
+}
+
+/// Resolve backend from `OPENMAXFX_PLAY` (`wine`/`retail` default; `native`/`engine`).
+pub fn resolve_play_backend() -> PlayBackend {
+    match std::env::var("OPENMAXFX_PLAY")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "native" | "engine" => PlayBackend::NativeEngine,
+        _ => PlayBackend::Retail,
+    }
+}
+
+/// Locate `maxfx-engine` binary (`OPENMAXFX_ENGINE`, then `PATH`).
+pub fn find_native_engine() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("OPENMAXFX_ENGINE") {
+        let path = PathBuf::from(p);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    which("maxfx-engine")
+}
+
 /// Spawn the game. Caller owns the Child (for process manager).
+///
+/// Default: retail EXE via Wine (Unix) / native (Windows).
+/// `OPENMAXFX_PLAY=native` runs `maxfx-engine` against BYOD paths under the game dir
+/// (skeleton probe — not a playable replacement yet).
 pub fn spawn_game(game: &Path) -> Result<Child, PlayError> {
+    match resolve_play_backend() {
+        PlayBackend::NativeEngine => spawn_native_engine(game),
+        PlayBackend::Retail => spawn_retail(game),
+    }
+}
+
+fn spawn_native_engine(game: &Path) -> Result<Child, PlayError> {
+    let engine = find_native_engine().ok_or_else(|| {
+        PlayError::Msg(
+            "OPENMAXFX_PLAY=native but maxfx-engine not found — set OPENMAXFX_ENGINE or PATH; Wine remains default (unset OPENMAXFX_PLAY)"
+                .into(),
+        )
+    })?;
+    let probe = std::env::var("OPENMAXFX_ENGINE_PROBE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            // Prefer a common BYOD front-end extract if present; else x_data.ras.
+            let tutorial = game
+                .join("data.disabled-hires")
+                .join("database/levels/front_end/Tutorial.ldb");
+            if tutorial.is_file() {
+                tutorial
+            } else {
+                game.join("x_data.ras")
+            }
+        });
+    if !probe.is_file() {
+        return Err(PlayError::Msg(format!(
+            "native engine probe missing: {} — extract BYOD level or set OPENMAXFX_ENGINE_PROBE",
+            probe.display()
+        )));
+    }
+
+    let log_path = game.join("openmaxfx-launch.log");
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let log_err = log.try_clone()?;
+
+    Command::new(&engine)
+        .arg(&probe)
+        .current_dir(game)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
+        .spawn()
+        .map_err(PlayError::from)
+}
+
+fn spawn_retail(game: &Path) -> Result<Child, PlayError> {
     graphics_dlls_ok(game)?;
     let exe = game.join("MaxPayne.exe");
     if !exe.is_file() {
@@ -270,6 +357,44 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         assert!(graphics_dlls_ok(&dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn play_backend_defaults_to_retail() {
+        // SAFETY: test process; restore after.
+        let prev = std::env::var_os("OPENMAXFX_PLAY");
+        std::env::remove_var("OPENMAXFX_PLAY");
+        assert_eq!(resolve_play_backend(), PlayBackend::Retail);
+        std::env::set_var("OPENMAXFX_PLAY", "native");
+        assert_eq!(resolve_play_backend(), PlayBackend::NativeEngine);
+        std::env::set_var("OPENMAXFX_PLAY", "wine");
+        assert_eq!(resolve_play_backend(), PlayBackend::Retail);
+        match prev {
+            Some(v) => std::env::set_var("OPENMAXFX_PLAY", v),
+            None => std::env::remove_var("OPENMAXFX_PLAY"),
+        }
+    }
+
+    #[test]
+    fn native_engine_missing_errors() {
+        let prev_play = std::env::var_os("OPENMAXFX_PLAY");
+        let prev_eng = std::env::var_os("OPENMAXFX_ENGINE");
+        std::env::set_var("OPENMAXFX_PLAY", "native");
+        std::env::set_var("OPENMAXFX_ENGINE", "/no/such/maxfx-engine");
+        let dir = std::env::temp_dir().join(format!("maxfx-play-native-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let err = spawn_game(&dir).unwrap_err().to_string();
+        assert!(err.contains("maxfx-engine not found"), "{err}");
+        match prev_play {
+            Some(v) => std::env::set_var("OPENMAXFX_PLAY", v),
+            None => std::env::remove_var("OPENMAXFX_PLAY"),
+        }
+        match prev_eng {
+            Some(v) => std::env::set_var("OPENMAXFX_ENGINE", v),
+            None => std::env::remove_var("OPENMAXFX_ENGINE"),
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }
