@@ -54,7 +54,7 @@ fn home_dir() -> PathBuf {
 fn looks_like_root(p: &Path) -> bool {
     p.join("openmaxfx").is_file()
         && p.join("runtime").join("install-from-cd.sh").is_file()
-        && p.join("tools").join("openras").is_dir()
+        && (p.join("crates").join("openras").is_dir() || p.join("tools").join("openras").is_dir())
 }
 
 fn discover_root() -> Result<PathBuf, String> {
@@ -917,4 +917,18 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Open Max Payne Studio");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_root_and_paths_succeed() {
+        let root = discover_root().expect("discover_root must locate repo root");
+        assert!(looks_like_root(&root));
+        let paths = paths_now().expect("paths_now must succeed");
+        assert!(!paths.root.is_empty());
+        assert!(!paths.game_default.is_empty());
+    }
 }
