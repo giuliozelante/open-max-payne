@@ -62,13 +62,19 @@ function wireTabs() {
 
 window.addEventListener("DOMContentLoaded", async () => {
   wireTabs();
-  let paths: Paths;
-  try {
-    paths = await invoke<Paths>("get_paths");
-  } catch (e) {
+  let paths: Paths = await invoke<Paths>("get_paths").catch((e) => {
     stamp(`ERROR: ${e}`);
-    return;
-  }
+    return {
+      root: ".",
+      out: "./easy-output",
+      sample: "",
+      game_default: "",
+      install_cd: "",
+      bootstrap: "",
+      fixpack_guide_url: "https://steamcommunity.com/sharedfiles/filedetails/?id=1633394421",
+      patch_105_url: "",
+    };
+  });
 
   input("#archive").value = paths.sample;
   input("#game-dir").value = paths.game_default;
@@ -318,17 +324,19 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   launchBtn.onclick = async () => {
     try {
-      const st = await refreshStatus();
-      if (st.safedisc) {
-        stamp("Blocked: SafeDisc stub still present. Apply 1.05 first.");
-        return;
-      }
-      if (!st.graphics_stack_ok) {
-        stamp("Graphics stack not OK — apply localized-safe stack first.");
-        return;
-      }
       const preferNative = (document.querySelector("#prefer-native") as HTMLInputElement)
         .checked;
+      if (!preferNative) {
+        const st = await refreshStatus();
+        if (st.safedisc) {
+          stamp("Blocked: SafeDisc stub still present. Apply 1.05 first.");
+          return;
+        }
+        if (!st.graphics_stack_ok) {
+          stamp("Graphics stack not OK — apply localized-safe stack first.");
+          return;
+        }
+      }
       stamp(
         await invoke<string>("launch_game", {
           dest: input("#game-dir").value,
