@@ -1,5 +1,7 @@
 //! End-to-end integration tests for `maxfx-engine` (`parse_ldb_scene`, `kf2`, CLI, and optional BYOD smoke).
 
+#![allow(clippy::same_item_push)]
+
 use maxfx_engine::{
     kf2::parse_kf2_or_skd,
     scene::{decode_texture_blob, parse_ldb_scene},
