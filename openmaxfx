@@ -68,6 +68,7 @@ cmd_help() {
 Easiest:
   ./openmaxfx                 Opens native Studio (Tauri)
   ./openmaxfx gui             Same as above
+  ./openmaxfx play3d [level]  Opens native 3D engine walkthrough window
 
 Also:
   ./openmaxfx help
@@ -147,8 +148,19 @@ cmd_setup_game() {
 }
 
 cmd_test() {
-  echo "Running openras tests…"
-  (cd "$ROOT" && cargo test -p openras)
+  echo "Running workspace tests…"
+  (cd "$ROOT" && cargo test --workspace)
+}
+
+cmd_play3d() {
+  local level="${1:-$HOME/Games/MaxPayne1/data.disabled-hires/database/levels/front_end/Tutorial.ldb}"
+  local bin="$ROOT/target/release/maxfx-engine"
+  [[ -x "$bin" ]] || bin="$ROOT/target/debug/maxfx-engine"
+  if [[ -x "$bin" ]]; then
+    exec "$bin" --window "$level"
+  else
+    (cd "$ROOT" && exec cargo run -q -p maxfx-engine -- --window "$level")
+  fi
 }
 
 cmd_where_cd() {
@@ -181,6 +193,7 @@ main() {
       cmd_help
       ;;
     help|-h|--help) cmd_help ;;
+    play3d|3d) shift; cmd_play3d "${1:-}" ;;
     list) shift; cmd_list "${1:-}" ;;
     extract) shift; cmd_extract "${1:-}" ;;
     pack) shift; cmd_pack "${1:-}" "${2:-}" ;;
