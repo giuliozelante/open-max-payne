@@ -54,6 +54,6 @@ Done when (north star — open):
   - [x] Engine walking skeleton loads a BYOD archive (`maxfx-engine` + skeleton spec)
   - [x] Play path can prefer native engine for BYOD smoke; Wine remains fallback
         (`OPENMAXFX_PLAY=native` + Studio checkbox → `maxfx-engine --window` point preview; epic #16)
-  - [ ] `openpfx` PSE→RPS export (`-e` parity) after RPS version REA (issue #11 in-level smoke)
+  - [x] `openpfx` PSE→RPS export (`-e` parity) after RPS version REA (`openpfx export` + `validate-rps` gate accept; issue #11)
   - [x] Engine REA note naming archive mount + level-load tokens
   - [x] Decompiled `R_File::loadArchives` → `FindFirstFile("*.RAS")` (+ secondary path)
