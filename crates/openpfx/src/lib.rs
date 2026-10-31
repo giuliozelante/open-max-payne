@@ -108,7 +108,8 @@ pub fn pse_curve_to_keyframes(parsed: &PseCurveFloats) -> Result<Vec<CurveKeyfra
 }
 pub use memory_file::{obj as rps_obj, MemoryFileWriter};
 pub use rps::{
-    encode_rps, parse_rps, pse_header_to_rps_preamble, read_rps, roundtrip_rps, RpsHeader, RpsValue,
+    encode_rps, parse_rps, pse_header_to_rps_preamble, read_rps, roundtrip_rps,
+    validate_rps_game_gates, RpsHeader, RpsValue,
 };
 
 #[derive(Debug, Error)]
@@ -964,6 +965,15 @@ mod tests {
             })
             .collect();
         assert_eq!(blobs, vec![4, 3]);
+        validate_rps_game_gates(&bytes).unwrap();
+    }
+
+    #[test]
+    fn game_gates_reject_bad_version() {
+        let mut bad = vec![0x14, 0x60, 0x14, 0x06]; // type ok, version 6
+        bad.extend_from_slice(&[0x11, 0]); // pad so parse has something
+        let err = validate_rps_game_gates(&bad).unwrap_err().to_string();
+        assert!(err.contains("Invalid File Version"), "{err}");
     }
 
     #[test]
