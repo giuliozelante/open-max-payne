@@ -716,8 +716,7 @@ pub fn ras_ldb_after_import_materials(data: &[u8]) -> Option<usize> {
 }
 
 /// Separator between ImportLightmap blobs after the first (`00 00 00 01 00 01 18 20`).
-pub const LDB_IMPORT_LIGHTMAP_SEP: [u8; 8] =
-    [0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x18, 0x20];
+pub const LDB_IMPORT_LIGHTMAP_SEP: [u8; 8] = [0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x18, 0x20];
 
 /// Blob marker immediately before each lightmap payload (`0x18 0x20`).
 pub const LDB_IMPORT_LIGHTMAP_MARK: [u8; 2] = [0x18, 0x20];
@@ -980,10 +979,7 @@ pub fn parse_ras_ldb_import_lights_at(
 ///
 /// Layout: empty `0x1f`, int `0`, count, then named entities (`0d 14` paths,
 /// dual `0x1a` transforms, nested DO_* graphs). Returns `(count, offset_at_first_name)`.
-pub fn parse_ras_ldb_import_character_head_at(
-    data: &[u8],
-    offset: usize,
-) -> Option<(u32, usize)> {
+pub fn parse_ras_ldb_import_character_head_at(data: &[u8], offset: usize) -> Option<(u32, usize)> {
     let mut i = offset;
     if data.get(i) != Some(&LDB_IMPORT_MATERIAL_LIST_TAG) {
         return None;
@@ -1005,11 +1001,7 @@ pub fn parse_ras_ldb_import_character_head_at(
 }
 
 /// Harvest `::…Jumppoint…` names from a character-block window.
-pub fn ras_ldb_import_jumppoint_names_at(
-    data: &[u8],
-    offset: usize,
-    max: usize,
-) -> Vec<String> {
+pub fn ras_ldb_import_jumppoint_names_at(data: &[u8], offset: usize, max: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = offset;
     let end = data.len().min(offset.saturating_add(512 * 1024));
@@ -1077,20 +1069,17 @@ pub fn parse_ras_ldb_import_static_mesh_at(
             return None;
         }
     }
-    let a;
-    let b;
-    let n;
     // Form A: a, b, n — Form B: b, n (a defaults 0)
     let first = read_mf_i32(data, &mut i)?;
-    if data.get(i) == Some(&0x11) || data.get(i) == Some(&0x10) {
-        a = 0;
-        b = first;
-        n = read_point_count(data, &mut i)?;
+    let (a, b, n) = if data.get(i) == Some(&0x11) || data.get(i) == Some(&0x10) {
+        (0, first, read_point_count(data, &mut i)?)
     } else {
-        a = first;
-        b = read_mf_i32(data, &mut i)?;
-        n = read_point_count(data, &mut i)?;
-    }
+        (
+            first,
+            read_mf_i32(data, &mut i)?,
+            read_point_count(data, &mut i)?,
+        )
+    };
     if n == 0 || n > 500_000 {
         return None;
     }
@@ -1132,10 +1121,7 @@ pub fn parse_ras_ldb_import_static_mesh_at(
 /// Layout after ImportExit: nest `0x1c` + ints, then `0x12` count (even;
 /// body count = count/2), subtype int, first body without id, then
 /// `(id, body) × (n-1)`. Each body: `15 f32 f32 15 f32 f32 03 i32 0e u8`.
-pub fn parse_ras_ldb_import_point_stream_at(
-    data: &[u8],
-    offset: usize,
-) -> Option<(u32, usize)> {
+pub fn parse_ras_ldb_import_point_stream_at(data: &[u8], offset: usize) -> Option<(u32, usize)> {
     if offset >= data.len() {
         return None;
     }
@@ -1174,11 +1160,11 @@ pub fn parse_ras_ldb_import_point_stream_at(
     // Trailing uncounted bodies (same shape, optional leading id).
     loop {
         let mark = i;
-        if matches!(data.get(i), Some(0x14 | 0x13 | 0x12 | 0x02)) {
-            if read_mf_i32(data, &mut i).is_none() {
-                i = mark;
-                break;
-            }
+        if matches!(data.get(i), Some(0x14 | 0x13 | 0x12 | 0x02))
+            && read_mf_i32(data, &mut i).is_none()
+        {
+            i = mark;
+            break;
         }
         match read_point_body(data, i) {
             Some(next) => {
@@ -1429,10 +1415,7 @@ pub fn parse_ras_ldb_import_exits_at(
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
     let mut out = Vec::new();
     let mut off = 0;
-    loop {
-        let Some(sec) = parse_ras_ldb_section_at(data, off) else {
-            break;
-        };
+    while let Some(sec) = parse_ras_ldb_section_at(data, off) {
         match sec.kind {
             LDB_SECTION_KIND_VEC3 => {
                 // Advance by contiguous 0x16 run (Tutorial flag=1: run > declared count).
@@ -1925,6 +1908,7 @@ pub fn discover_ras_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, EngineE
 }
 
 #[cfg(test)]
+#[allow(clippy::same_item_push)] // MF fixture builders push tag bytes then payloads
 mod tests {
     use super::*;
     use openras::archive::{RasArchive, RasDirEntry, RasFileEntry, MODE_STORED};
@@ -2279,7 +2263,9 @@ mod tests {
         }
         for _ in 0..2 {
             body.push(0x1a);
-            for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 3.0, 4.0, 5.0] {
+            for v in [
+                1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 3.0, 4.0, 5.0,
+            ] {
                 body.extend_from_slice(&v.to_le_bytes());
             }
         }
@@ -2311,7 +2297,9 @@ mod tests {
         body.extend_from_slice(b"::start::Jumppoint 00");
         body.extend_from_slice(&[0x0d, 0x14, 0]);
         body.push(0x1a);
-        for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0] {
+        for v in [
+            1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0,
+        ] {
             body.extend_from_slice(&v.to_le_bytes());
         }
         let jp2 = b"::room::Jumppoint 01";
@@ -2363,7 +2351,7 @@ mod tests {
         body.extend_from_slice(&[0x1c, 0x14, 1, 0x1c]);
         body.extend_from_slice(&[0x12, 4, 0, 0]); // count = 4
         body.extend_from_slice(&[0x14, 3]); // subtype
-        // body without id
+                                            // body without id
         body.push(0x15);
         body.extend_from_slice(&1.0f32.to_le_bytes());
         body.extend_from_slice(&2.0f32.to_le_bytes());
@@ -2485,7 +2473,7 @@ mod tests {
         body.extend_from_slice(b"p/a");
         body.extend_from_slice(&[0x0d, 0x14, 0]); // empty path2
         body.extend_from_slice(&[0x0e, 0, 0x0e, 1]); // bools
-        // child member
+                                                     // child member
         body.extend_from_slice(&[0x0d, 0x14, 5]);
         body.extend_from_slice(b"b.JPG");
         body.extend_from_slice(&[0x0d, 0x14, 3]);
@@ -2563,7 +2551,9 @@ mod tests {
         }
         body.extend_from_slice(&[0x14, 1, 0x14, 5]);
         body.push(0x1a);
-        for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0] {
+        for v in [
+            1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+        ] {
             body.extend_from_slice(&v.to_le_bytes());
         }
         body.push(0xff);
