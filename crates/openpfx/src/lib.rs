@@ -66,11 +66,7 @@ pub fn pse_curve_to_keyframes(parsed: &PseCurveFloats) -> Result<Vec<CurveKeyfra
             let times = &floats[..kf];
             let interleaved_ok = channels == 1
                 && floats.len() >= kf * 2
-                && times_monotonic(
-                    &(0..kf)
-                        .map(|i| floats[i * 2])
-                        .collect::<Vec<_>>(),
-                );
+                && times_monotonic(&(0..kf).map(|i| floats[i * 2]).collect::<Vec<_>>());
             if times_monotonic(times) && (channels > 1 || !interleaved_ok) {
                 let mut out = Vec::with_capacity(kf);
                 for (i, &t) in times.iter().enumerate() {
@@ -358,10 +354,9 @@ pub fn group_bitmap_stems(stems: &[String]) -> Vec<Vec<String>> {
             .unwrap_or("")
             .to_string();
         match groups.last_mut() {
-            Some(g) if g
-                .last()
-                .and_then(|s| s.rsplit_once('\\').map(|(p, _)| p))
-                == Some(parent.as_str()) =>
+            Some(g)
+                if g.last().and_then(|s| s.rsplit_once('\\').map(|(p, _)| p))
+                    == Some(parent.as_str()) =>
             {
                 g.push(stem.clone());
             }
@@ -374,10 +369,7 @@ pub fn group_bitmap_stems(stems: &[String]) -> Vec<Vec<String>> {
 /// Resolve a stem against a bitmap root (case-insensitive components).
 ///
 /// Tries `.jpg` / `.JPG` then `.pcx` / `.PCX`. Returns `(rps_relative_path, bytes)`.
-pub fn resolve_bitmap_stem(
-    bitmap_root: &std::path::Path,
-    stem: &str,
-) -> Option<Vec<TextureFrame>> {
+pub fn resolve_bitmap_stem(bitmap_root: &std::path::Path, stem: &str) -> Option<Vec<TextureFrame>> {
     use std::fs;
     let parts: Vec<&str> = stem.split('\\').collect();
     if parts.is_empty() {
@@ -610,10 +602,7 @@ pub fn pse_to_rps_export_with_curves(
                         )));
                     }
                     let samples = u8::try_from(sc.values.len() / need).map_err(|_| {
-                        PfxError::Msg(format!(
-                            "curve samples {} > 255",
-                            sc.values.len() / need
-                        ))
+                        PfxError::Msg(format!("curve samples {} > 255", sc.values.len() / need))
                     })?;
                     w.write_curve(ch, samples, &sc.values)?;
                 } else if slot == 1 {
@@ -962,7 +951,10 @@ mod tests {
         .unwrap();
         let walked = parse_rps(&bytes).unwrap();
         assert_eq!(walked.bytes_consumed, bytes.len());
-        assert!(walked.values.iter().all(|v| !matches!(v, RpsValue::Unknown { .. })));
+        assert!(walked
+            .values
+            .iter()
+            .all(|v| !matches!(v, RpsValue::Unknown { .. })));
         let blobs: Vec<_> = walked
             .values
             .iter()
