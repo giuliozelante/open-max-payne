@@ -1556,12 +1556,11 @@ pub fn parse_ras_ldb_import_exits_at(
         let lim = i.saturating_add(8192).min(data.len());
         let mut j = i;
         while j < lim {
-            // Post-exit stream: `15 <f32> <f32> 15 <f32> <f32> 03 <i32> 0e <u8>`
-            if j + 20 <= data.len()
+            // Post-exit stream: `15 <f32> <f32> 15 <f32> <f32> 03|0f|10|11 ... 0e <u8>`
+            if j + 19 <= data.len()
                 && data[j] == 0x15
-                && data[j + 5] == 0x15
-                && data[j + 10] == 0x03
-                && data[j + 15] == 0x0e
+                && data[j + 9] == 0x15
+                && matches!(data[j + 18], 0x03 | 0x0f | 0x10 | 0x11)
             {
                 break;
             }
