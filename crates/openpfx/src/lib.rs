@@ -52,10 +52,10 @@ pub fn pse_curve_to_keyframes(parsed: &PseCurveFloats) -> Result<Vec<CurveKeyfra
             if times_monotonic(times) {
                 let mut out = Vec::with_capacity(kf);
                 let vals = &floats[kf..full];
-                for i in 0..kf {
+                for (i, &t) in times.iter().enumerate() {
                     let start = i * channels;
                     out.push(CurveKeyframe {
-                        t: times[i],
+                        t,
                         values: vals[start..start + channels].to_vec(),
                     });
                 }
@@ -73,10 +73,10 @@ pub fn pse_curve_to_keyframes(parsed: &PseCurveFloats) -> Result<Vec<CurveKeyfra
                 );
             if times_monotonic(times) && (channels > 1 || !interleaved_ok) {
                 let mut out = Vec::with_capacity(kf);
-                for i in 0..kf {
+                for (i, &t) in times.iter().enumerate() {
                     let s = floats[kf + i];
                     out.push(CurveKeyframe {
-                        t: times[i],
+                        t,
                         values: vec![s; channels],
                     });
                 }

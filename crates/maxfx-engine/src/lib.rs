@@ -1077,20 +1077,17 @@ pub fn parse_ras_ldb_import_static_mesh_at(
             return None;
         }
     }
-    let a;
-    let b;
-    let n;
     // Form A: a, b, n — Form B: b, n (a defaults 0)
     let first = read_mf_i32(data, &mut i)?;
-    if data.get(i) == Some(&0x11) || data.get(i) == Some(&0x10) {
-        a = 0;
-        b = first;
-        n = read_point_count(data, &mut i)?;
+    let (a, b, n) = if data.get(i) == Some(&0x11) || data.get(i) == Some(&0x10) {
+        (0, first, read_point_count(data, &mut i)?)
     } else {
-        a = first;
-        b = read_mf_i32(data, &mut i)?;
-        n = read_point_count(data, &mut i)?;
-    }
+        (
+            first,
+            read_mf_i32(data, &mut i)?,
+            read_point_count(data, &mut i)?,
+        )
+    };
     if n == 0 || n > 500_000 {
         return None;
     }
@@ -1174,11 +1171,11 @@ pub fn parse_ras_ldb_import_point_stream_at(
     // Trailing uncounted bodies (same shape, optional leading id).
     loop {
         let mark = i;
-        if matches!(data.get(i), Some(0x14 | 0x13 | 0x12 | 0x02)) {
-            if read_mf_i32(data, &mut i).is_none() {
-                i = mark;
-                break;
-            }
+        if matches!(data.get(i), Some(0x14 | 0x13 | 0x12 | 0x02))
+            && read_mf_i32(data, &mut i).is_none()
+        {
+            i = mark;
+            break;
         }
         match read_point_body(data, i) {
             Some(next) => {
@@ -1429,10 +1426,7 @@ pub fn parse_ras_ldb_import_exits_at(
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
     let mut out = Vec::new();
     let mut off = 0;
-    loop {
-        let Some(sec) = parse_ras_ldb_section_at(data, off) else {
-            break;
-        };
+    while let Some(sec) = parse_ras_ldb_section_at(data, off) {
         match sec.kind {
             LDB_SECTION_KIND_VEC3 => {
                 // Advance by contiguous 0x16 run (Tutorial flag=1: run > declared count).
@@ -1925,6 +1919,7 @@ pub fn discover_ras_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, EngineE
 }
 
 #[cfg(test)]
+#[allow(clippy::same_item_push)] // MF fixture builders push tag bytes then payloads
 mod tests {
     use super::*;
     use openras::archive::{RasArchive, RasDirEntry, RasFileEntry, MODE_STORED};
