@@ -476,21 +476,15 @@ pub fn run_3d_walkthrough(
         let cam_up = [-sy * sp, cp, -cy * sp];
         let cam_fwd = [sy * cp, sp, cy * cp];
         let cam_pos = if third_person && !fly_mode {
-            let mut dist = 2.05f32;
+            let mut dist = CHASE_BACK;
             while dist > 0.45 {
-                let cand_x = player_pos[0] - cam_fwd[0] * dist + cam_right[0] * 0.28;
-                let cand_y = player_pos[1] - cam_fwd[1] * dist + 0.18;
-                let cand_z = player_pos[2] - cam_fwd[2] * dist + cam_right[2] * 0.28;
-                if !hits_wall(&scene, &room_origins, cand_x, cand_y, cand_z) {
+                let cand = chase_eye(player_pos, cam_fwd, dist);
+                if !hits_wall(&scene, &room_origins, cand[0], cand[1], cand[2]) {
                     break;
                 }
                 dist -= 0.25;
             }
-            [
-                player_pos[0] - cam_fwd[0] * dist + cam_right[0] * 0.28,
-                player_pos[1] - cam_fwd[1] * dist + 0.18,
-                player_pos[2] - cam_fwd[2] * dist + cam_right[2] * 0.28,
-            ]
+            chase_eye(player_pos, cam_fwd, dist)
         } else {
             player_pos
         };
@@ -646,7 +640,7 @@ fn toggle_nearest_dynamic_mesh(
 ) {
     let mut best_dm: Option<(usize, f32)> = None;
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
-        if dm.anims.is_empty() {
+        if dm.opening_anim().is_none() {
             continue;
         }
         let ro = room_origins.get(&dm.room_id).copied().unwrap_or([0.0; 3]);
@@ -661,7 +655,7 @@ fn toggle_nearest_dynamic_mesh(
     if let Some((idx, _)) = best_dm {
         let dm = &mut scene.dynamic_meshes[idx];
         dm.toggled = !dm.toggled;
-        if let Some(anim) = dm.anims.last() {
+        if let Some(anim) = dm.opening_anim() {
             println!(
                 "  3D Engine: DO_Animate {} ({}) -> {:?}",
                 dm.name,
@@ -847,28 +841,20 @@ fn blocks_character(scene: &LdbScene, material_id: i32) -> bool {
     poly_policy(scene, material_id).character_collides
 }
 
+const CHASE_BACK: f32 = 2.2;
+const CHASE_UP: f32 = 0.4;
+
+fn chase_eye(player: [f32; 3], cam_fwd: [f32; 3], dist: f32) -> [f32; 3] {
+    [
+        player[0] - cam_fwd[0] * dist,
+        player[1] - cam_fwd[1] * dist + CHASE_UP,
+        player[2] - cam_fwd[2] * dist,
+    ]
+}
+
 fn dynamic_world(dm: &SceneDynamicMesh, rooms: &BTreeMap<i32, [f32; 3]>) -> ([f32; 9], [f32; 3]) {
     let ro = rooms.get(&dm.room_id).copied().unwrap_or([0.0; 3]);
-    let (mat, pos) = if dm.toggled {
-        if let Some(anim) = dm.anims.last() {
-            if dm.world_pos == dm.local_start_pos {
-                (anim.end_mat, anim.end_pos)
-            } else {
-                (
-                    dm.world_mat,
-                    [
-                        dm.world_pos[0] + (anim.end_pos[0] - anim.start_pos[0]),
-                        dm.world_pos[1] + (anim.end_pos[1] - anim.start_pos[1]),
-                        dm.world_pos[2] + (anim.end_pos[2] - anim.start_pos[2]),
-                    ],
-                )
-            }
-        } else {
-            (dm.world_mat, dm.world_pos)
-        }
-    } else {
-        (dm.world_mat, dm.world_pos)
-    };
+    let (mat, pos) = dm.posed_local();
     (mat, [ro[0] + pos[0], ro[1] + pos[1], ro[2] + pos[2]])
 }
 
@@ -1442,6 +1428,14 @@ fn load_world_sphere(level_path: &Path, name: &str) -> Option<DecodedTexture> {
 mod tests {
     use super::*;
     use crate::scene::{SceneDynamicMesh, SceneMaterial, ScenePoly, SceneVertex};
+
+    #[test]
+    fn chase_eye_sits_behind_and_above_the_player() {
+        let eye = chase_eye([0.0, 1.6, 0.0], [0.0, 0.0, 1.0], CHASE_BACK);
+        assert!(eye[0].abs() < 1e-4);
+        assert!((eye[1] - 2.0).abs() < 1e-4);
+        assert!((eye[2] + CHASE_BACK).abs() < 1e-4);
+    }
 
     #[test]
     fn sunset_strip_keeps_the_sun_on_the_horizon() {

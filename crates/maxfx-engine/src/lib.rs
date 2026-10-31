@@ -3880,6 +3880,21 @@ mod tests {
     }
 
     #[test]
+    fn italian_pack_holds_the_house_opening_wavs() {
+        let path = std::path::Path::new("/home/gzelante/Games/MaxPayne1/x_italian.ras");
+        if !path.is_file() {
+            return;
+        }
+        let arc = RasArchive::read(path).expect("x_italian.ras");
+        for page in ["P1L0a_003", "P1L0a_004", "P1L0a_005"] {
+            let member = story_wav_win_path(&format!("story\\part1\\{page}.wav"));
+            let wav = archive_member(&arc, &member).expect("house story wav");
+            assert!(wav.starts_with(b"RIFF"), "{page}");
+            assert_eq!(&wav[8..12], b"WAVE");
+        }
+    }
+
+    #[test]
     fn level_handoff_ignores_a_comic_that_stays_in_the_level() {
         let mut bytes =
             b"mpgnm_pickupnote(P1L0a_007);s_modeswitch(graphicnovel);fsm_switch(normal);".to_vec();

@@ -216,6 +216,42 @@ pub struct SceneDynamicMesh {
     pub anims: Vec<SceneDynamicAnim>,
 }
 
+impl SceneDynamicMesh {
+    /// The track whose name is `open`, or the first `open*` track.
+    pub fn opening_anim(&self) -> Option<&SceneDynamicAnim> {
+        self.anims
+            .iter()
+            .find(|anim| anim.name.eq_ignore_ascii_case("open"))
+            .or_else(|| {
+                self.anims
+                    .iter()
+                    .find(|anim| anim.name.to_ascii_lowercase().starts_with("open"))
+            })
+    }
+
+    /// Rest pose, or the opening track's end pose once `toggled`.
+    pub fn posed_local(&self) -> ([f32; 9], [f32; 3]) {
+        if !self.toggled {
+            return (self.world_mat, self.world_pos);
+        }
+        let Some(anim) = self.opening_anim() else {
+            return (self.world_mat, self.world_pos);
+        };
+        if self.world_pos == self.local_start_pos {
+            (anim.end_mat, anim.end_pos)
+        } else {
+            (
+                self.world_mat,
+                [
+                    self.world_pos[0] + (anim.end_pos[0] - anim.start_pos[0]),
+                    self.world_pos[1] + (anim.end_pos[1] - anim.start_pos[1]),
+                    self.world_pos[2] + (anim.end_pos[2] - anim.start_pos[2]),
+                ],
+            )
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScenePortalExit {
     pub name: String,
@@ -1844,5 +1880,62 @@ mod tests {
         let flen =
             (forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]).sqrt();
         assert!((flen - 1.0).abs() < 0.01);
+    }
+
+    fn door_mesh(anims: Vec<SceneDynamicAnim>) -> SceneDynamicMesh {
+        SceneDynamicMesh {
+            name: "::startroom::door.DO".into(),
+            room_id: 1,
+            world_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            world_pos: [1.0, 0.0, 2.0],
+            local_start_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            local_start_pos: [0.0, 0.0, 0.0],
+            toggled: false,
+            polys: Vec::new(),
+            anims,
+        }
+    }
+
+    fn track(name: &str, end: [f32; 3]) -> SceneDynamicAnim {
+        SceneDynamicAnim {
+            name: name.into(),
+            duration: 1.3,
+            start_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            start_pos: [0.0, 0.0, 0.0],
+            end_mat: [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+            end_pos: end,
+            scripts: Vec::new(),
+            curves: [Vec::new(), Vec::new()],
+        }
+    }
+
+    #[test]
+    fn opening_track_is_open_not_the_trailing_timer() {
+        let mut door = door_mesh(vec![
+            track("open", [0.2, 0.0, 0.0]),
+            track("timer", [9.0, 9.0, 9.0]),
+        ]);
+        assert_eq!(door.opening_anim().unwrap().name, "open");
+        assert_eq!(door.posed_local().1, [1.0, 0.0, 2.0]);
+        door.toggled = true;
+        assert_eq!(door.posed_local().1, [1.2, 0.0, 2.0]);
+    }
+
+    #[test]
+    fn house_startroom_door_uses_the_open_track() {
+        let path =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !path.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(path).unwrap()).expect("house");
+        let door = scene
+            .dynamic_meshes
+            .iter()
+            .find(|mesh| mesh.name == "::startroom::New mesh 53::door.DO")
+            .expect("front door");
+        let anim = door.opening_anim().expect("open track");
+        assert_eq!(anim.name, "open");
+        assert!((anim.duration - 1.3).abs() < 0.01);
     }
 }
