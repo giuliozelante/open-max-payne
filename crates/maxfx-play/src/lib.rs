@@ -151,7 +151,12 @@ pub fn apply_localized_safe_stack(game: &Path, overlay_root: &Path) -> Result<St
 }
 
 fn wine_prefix(game: &Path) -> PathBuf {
-    game.join("pfx")
+    let dot_wine = game.join(".wine");
+    if dot_wine.is_dir() {
+        dot_wine
+    } else {
+        game.join("pfx")
+    }
 }
 
 /// How Play launches. Wine/`MaxPayne.exe` remains the default bridge (#16).
@@ -284,7 +289,6 @@ fn spawn_retail(game: &Path) -> Result<Child, PlayError> {
 
     let mut cmd = Command::new(&wine);
     cmd.current_dir(game)
-        .env("WINEARCH", "win32")
         .env("WINEPREFIX", &prefix)
         .env(
             "WINEDLLOVERRIDES",
@@ -298,6 +302,14 @@ fn spawn_retail(game: &Path) -> Result<Child, PlayError> {
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
+    if std::path::Path::new("/usr/share/vulkan/icd.d/nvidia_icd.json").is_file()
+        && std::env::var_os("VK_ICD_FILENAMES").is_none()
+    {
+        cmd.env(
+            "VK_ICD_FILENAMES",
+            "/usr/share/vulkan/icd.d/nvidia_icd.json",
+        );
+    }
 
     // Virtual desktop via explorer (basename only — never Unix absolute as wine arg)
     if std::env::var("OPENMAXFX_VIRTUAL_DESKTOP").unwrap_or_else(|_| "1".into()) != "0" {

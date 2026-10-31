@@ -148,7 +148,7 @@ pub fn run_3d_walkthrough(mut scene: LdbScene, title: &str) -> Result<(), String
             wireframe = !wireframe;
         }
 
-        // Interact (`E`): trigger nearest dynamic mesh / door or FSM within 4.5m
+        // Interact (`E`): trigger nearest dynamic mesh / door or FSM within 6m
         if window.is_key_pressed(Key::E, KeyRepeat::No) {
             let mut best_dm: Option<(usize, f32)> = None;
             for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
@@ -156,9 +156,9 @@ pub fn run_3d_walkthrough(mut scene: LdbScene, title: &str) -> Result<(), String
                     continue;
                 }
                 let ro = room_origins.get(&dm.room_id).copied().unwrap_or([0.0; 3]);
-                let wx = ro[0] + dm.base_pos[0] + dm.current_offset[0];
-                let wy = ro[1] + dm.base_pos[1] + dm.current_offset[1];
-                let wz = ro[2] + dm.base_pos[2] + dm.current_offset[2];
+                let wx = ro[0] + dm.world_pos[0];
+                let wy = ro[1] + dm.world_pos[1];
+                let wz = ro[2] + dm.world_pos[2];
                 let d2 = (wx - cam_pos[0]).powi(2)
                     + (wy - cam_pos[1]).powi(2)
                     + (wz - cam_pos[2]).powi(2);
@@ -170,15 +170,6 @@ pub fn run_3d_walkthrough(mut scene: LdbScene, title: &str) -> Result<(), String
                 let dm = &mut scene.dynamic_meshes[idx];
                 dm.toggled = !dm.toggled;
                 if let Some(anim) = dm.anims.last() {
-                    dm.current_offset = if dm.toggled {
-                        [
-                            anim.end_pos[0] - anim.start_pos[0],
-                            anim.end_pos[1] - anim.start_pos[1],
-                            anim.end_pos[2] - anim.start_pos[2],
-                        ]
-                    } else {
-                        [0.0, 0.0, 0.0]
-                    };
                     hud_msg = format!(
                         "DO_Animate {} ({}) -> {:?}",
                         dm.name,
@@ -295,9 +286,11 @@ pub fn run_3d_walkthrough(mut scene: LdbScene, title: &str) -> Result<(), String
         let fov_scale = (H as f32) * 0.85;
 
         // Render static room meshes
+        const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
         for sm in &scene.static_meshes {
             render_poly_batch(
                 &sm.polys,
+                IDENT_MAT,
                 sm.world_origin,
                 &scene,
                 cam_pos,
@@ -312,16 +305,37 @@ pub fn run_3d_walkthrough(mut scene: LdbScene, title: &str) -> Result<(), String
             );
         }
 
-        // Render dynamic meshes (doors, breakables, furniture, cameras)
+        // Render dynamic meshes (doors, breakables, furniture, vans, cameras)
         for dm in &scene.dynamic_meshes {
+            // Skip invisible FSM helper cubes (`01_Tip_*`, `Start_FSM`)
+            if dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
+                continue;
+            }
             let ro = room_origins.get(&dm.room_id).copied().unwrap_or([0.0; 3]);
-            let origin = [
-                ro[0] + dm.current_offset[0],
-                ro[1] + dm.current_offset[1],
-                ro[2] + dm.current_offset[2],
-            ];
+            let (mat, pos) = if dm.toggled {
+                if let Some(anim) = dm.anims.last() {
+                    if dm.world_pos == dm.local_start_pos {
+                        (anim.end_mat, anim.end_pos)
+                    } else {
+                        (
+                            dm.world_mat,
+                            [
+                                dm.world_pos[0] + (anim.end_pos[0] - anim.start_pos[0]),
+                                dm.world_pos[1] + (anim.end_pos[1] - anim.start_pos[1]),
+                                dm.world_pos[2] + (anim.end_pos[2] - anim.start_pos[2]),
+                            ],
+                        )
+                    }
+                } else {
+                    (dm.world_mat, dm.world_pos)
+                }
+            } else {
+                (dm.world_mat, dm.world_pos)
+            };
+            let origin = [ro[0] + pos[0], ro[1] + pos[1], ro[2] + pos[2]];
             render_poly_batch(
                 &dm.polys,
+                mat,
                 origin,
                 &scene,
                 cam_pos,
@@ -476,6 +490,7 @@ fn point_in_xz_tri(px: f32, pz: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> b
 #[allow(clippy::too_many_arguments)]
 fn render_poly_batch(
     polys: &[ScenePoly],
+    mat: [f32; 9],
     origin: [f32; 3],
     scene: &LdbScene,
     cam_pos: [f32; 3],
@@ -492,11 +507,29 @@ fn render_poly_batch(
     let half_h = H as f32 * 0.5;
 
     for poly in polys {
-        if let Some(mat) = scene.materials.get(&poly.material_id) {
-            if mat.category.contains("nodraw") {
+        if let Some(m) = scene.materials.get(&poly.material_id) {
+            if m.category.contains("nodraw") {
                 continue;
             }
         }
+        // World-space polygon normal + backface culling (inward normal dot(v0 - cam, n) <= 0)
+        let wn = [
+            mat[0] * poly.normal[0] + mat[3] * poly.normal[1] + mat[6] * poly.normal[2],
+            mat[1] * poly.normal[0] + mat[4] * poly.normal[1] + mat[7] * poly.normal[2],
+            mat[2] * poly.normal[0] + mat[5] * poly.normal[1] + mat[8] * poly.normal[2],
+        ];
+        if let Some(v0) = poly.vertices.first() {
+            let p0 = v0.pos;
+            let wx0 = mat[0] * p0[0] + mat[3] * p0[1] + mat[6] * p0[2] + origin[0];
+            let wy0 = mat[1] * p0[0] + mat[4] * p0[1] + mat[7] * p0[2] + origin[1];
+            let wz0 = mat[2] * p0[0] + mat[5] * p0[1] + mat[8] * p0[2] + origin[2];
+            let to_poly = [wx0 - cam_pos[0], wy0 - cam_pos[1], wz0 - cam_pos[2]];
+            if !wireframe && (to_poly[0] * wn[0] + to_poly[1] * wn[1] + to_poly[2] * wn[2]) >= 0.05
+            {
+                continue;
+            }
+        }
+
         let tex = scene
             .materials
             .get(&poly.material_id)
@@ -513,9 +546,13 @@ fn render_poly_batch(
         let mut all_behind = true;
         let mut all_far = true;
         for v in &poly.vertices {
-            let dx = (v.pos[0] + origin[0]) - cam_pos[0];
-            let dy = (v.pos[1] + origin[1]) - cam_pos[1];
-            let dz = (v.pos[2] + origin[2]) - cam_pos[2];
+            let p = v.pos;
+            let wx = mat[0] * p[0] + mat[3] * p[1] + mat[6] * p[2] + origin[0];
+            let wy = mat[1] * p[0] + mat[4] * p[1] + mat[7] * p[2] + origin[1];
+            let wz = mat[2] * p[0] + mat[5] * p[1] + mat[8] * p[2] + origin[2];
+            let dx = wx - cam_pos[0];
+            let dy = wy - cam_pos[1];
+            let dz = wz - cam_pos[2];
             let cx = dx * cam_right[0] + dy * cam_right[1] + dz * cam_right[2];
             let cy = dx * cam_up[0] + dy * cam_up[1] + dz * cam_up[2];
             let cz = dx * cam_fwd[0] + dy * cam_fwd[1] + dz * cam_fwd[2];
