@@ -1,14 +1,14 @@
 //! Interactive 3D third-person / first-person Max Payne 1 engine walkthrough (`maxfx-engine --window`).
 //!
 //! Features:
-//! - Third-person over-the-shoulder camera showing **Max Payne (`Payne_Max_L0.KFS`)** with walking
-//!   leg-swing animation + gun-aiming posture (`V` toggles 3rd-person / 1st-person)
+//! - Third-person over-the-shoulder camera showing **Max Payne (`Payne_Max_L0.KFS`)** skinned
+//!   with `PAYNE_MAX_L0.SKD` + `idle_aim.kf2` / `Walk.kf2` (`V` toggles 3rd / 1st person)
 //! - Seamless room portal connectivity (`origin_v = origin_u - ex.relative_offset`)
 //! - Sloped floor plane interpolation + strict floor/wall boundary clamping (cannot fall out of world)
 //! - Visible 3D enemies (`doe_johnny_l0.kfs`) spawned via level `C_Teleport` FSM scripts + AI pursuit
 //! - Shooting (`F` / `Ctrl` / Right-Ctrl), Bullet-Time slow-motion (`B` / Right-Click), and `E` door/barrel interaction
 
-use crate::kf2::{load_character_meshes, KfsMesh};
+use crate::kf2::{load_character_rigs, pose_mesh, CharacterRig};
 use crate::scene::{DecodedLightmap, DecodedTexture, LdbScene, ScenePoly, SceneVertex};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use std::collections::BTreeMap;
@@ -70,7 +70,7 @@ pub fn run_3d_walkthrough(
     .map_err(|e| e.to_string())?;
     window.set_target_fps(60);
 
-    let (player_mesh, enemy_mesh) = load_character_meshes(level_path);
+    let (player_rig, enemy_rig) = load_character_rigs(level_path);
 
     let mut room_origins: BTreeMap<i32, [f32; 3]> = BTreeMap::new();
     for r in &scene.rooms {
@@ -158,10 +158,11 @@ pub fn run_3d_walkthrough(
     let mut use_lightmaps = true;
     let mut wireframe = false;
     let mut last_mouse: Option<(f32, f32)> = None;
+    let mut anim_clock = 0.0f32;
     println!(
         "  3D Engine: Spawned ({} enemies loaded, player mesh={}) | WASD move, Mouse/Arrows look, F/Ctrl shoot, B/RightClick Bullet-Time, E interact, V 3rd/1st person, Tab next spawn, G fly/walk",
         enemies.len(),
-        player_mesh.is_some()
+        player_rig.is_some()
     );
 
     let mut fb = vec![0u32; W * H];
@@ -275,11 +276,13 @@ pub fn run_3d_walkthrough(
             mv[2] -= right[2];
         }
         let mv_len = (mv[0] * mv[0] + mv[2] * mv[2]).sqrt();
-        if mv_len > 0.01 {
+        let player_moving = mv_len > 0.01;
+        if player_moving {
             walk_phase += player_dt * speed * 1.9;
         } else {
             walk_phase = 0.0;
         }
+        anim_clock += player_dt;
 
         if fly_mode {
             if window.is_key_down(Key::Space) {
@@ -504,14 +507,19 @@ pub fn run_3d_walkthrough(
             );
         }
 
-        // 3. Render Enemies (`doe_johnny_l0.kfs`)
-        if let Some(ref emesh) = enemy_mesh {
+        // 3. Render Enemies (`doe_johnny_l0.kfs` + SKD / idle_aim|Walk)
+        if let Some(ref erig) = enemy_rig {
             for en in &enemies {
                 render_kfs_character(
-                    emesh,
+                    erig,
                     en.world_pos,
                     en.yaw,
-                    en.walk_phase,
+                    if en.walk_phase > 0.0 {
+                        en.walk_phase
+                    } else {
+                        anim_clock
+                    },
+                    en.walk_phase > 0.0,
                     en.health <= 0,
                     en.hit_flash > 0.0,
                     cam_pos,
@@ -528,12 +536,17 @@ pub fn run_3d_walkthrough(
 
         // 4. Render Player (`Payne_Max_L0.KFS`) in 3rd-person view
         if third_person && !fly_mode {
-            if let Some(ref pmesh) = player_mesh {
+            if let Some(ref prig) = player_rig {
                 render_kfs_character(
-                    pmesh,
+                    prig,
                     player_feet,
                     yaw + std::f32::consts::PI,
-                    walk_phase,
+                    if player_moving {
+                        walk_phase
+                    } else {
+                        anim_clock
+                    },
+                    player_moving,
                     false,
                     false,
                     cam_pos,
@@ -730,10 +743,11 @@ fn point_in_xz_tri(px: f32, pz: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> b
 
 #[allow(clippy::too_many_arguments)]
 fn render_kfs_character(
-    mesh: &KfsMesh,
+    rig: &CharacterRig,
     world_pos: [f32; 3],
     yaw: f32,
-    walk_phase: f32,
+    anim_time: f32,
+    moving: bool,
     dead: bool,
     hit_flash: bool,
     cam_pos: [f32; 3],
@@ -748,18 +762,24 @@ fn render_kfs_character(
     let half_w = W as f32 * 0.5;
     let half_h = H as f32 * 0.5;
     let (sy, cy) = yaw.sin_cos();
-    let leg_swing = walk_phase.sin() * 0.26;
+    let mesh = &rig.mesh;
+    let anim = if moving {
+        rig.walk.as_ref().or(rig.idle.as_ref())
+    } else {
+        rig.idle.as_ref().or(rig.walk.as_ref())
+    };
+    let posed = if dead {
+        mesh.vertices.clone()
+    } else {
+        pose_mesh(mesh, rig.skin.as_ref(), rig.bind.as_ref(), anim, anim_time)
+    };
 
     // Pre-transform character vertices into camera space
-    let mut cam_pts = Vec::with_capacity(mesh.vertices.len());
-    for &[lx, ly, lz] in &mesh.vertices {
+    let mut cam_pts = Vec::with_capacity(posed.len());
+    for &[lx, ly, lz] in &posed {
         let (px, py, pz) = if dead {
             // Lie flat on the floor when dead
             (lx, 0.18 + lz.abs() * 0.5, ly - 0.85)
-        } else if ly < 0.90 {
-            // Procedural leg swing during walk
-            let swing = if lx < 0.0 { leg_swing } else { -leg_swing };
-            (lx, ly, lz + swing * (0.90 - ly))
         } else {
             (lx, ly, lz)
         };
