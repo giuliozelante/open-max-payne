@@ -48,3 +48,4 @@ Done when:
   - [x] REA-backed note naming archive mount + level-load tokens
   - [x] CLI `maxfx-engine <archive.ras>` prints summary
   - [x] Decompiled `loadArchives`: mount = `FindFirstFile("*.RAS")` (+ optional secondary path)
+  - [x] Minimal draw: `--window` orthographic vec3 preview from BYOD `.ldb` (epic #16 smoke)

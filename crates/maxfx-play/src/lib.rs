@@ -232,8 +232,11 @@ fn spawn_native_engine(game: &Path) -> Result<Child, PlayError> {
         .open(&log_path)?;
     let log_err = log.try_clone()?;
 
-    Command::new(&engine)
-        .arg(&probe)
+    let mut cmd = Command::new(&engine);
+    if std::env::var("OPENMAXFX_ENGINE_WINDOW").unwrap_or_default() == "1" {
+        cmd.arg("--window");
+    }
+    cmd.arg(&probe)
         .current_dir(game)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))

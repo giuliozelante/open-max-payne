@@ -13,11 +13,11 @@ Product spec: [docs/specs/2026-10-30-open-max-payne.md](docs/specs/2026-10-30-op
 
 | Area | Status |
 |------|--------|
-| **Play (Rust)** | `maxfx-play` — Wine/`MaxPayne.exe` default; opt-in `OPENMAXFX_PLAY=native` → `maxfx-engine` probe (#16) |
+| **Play (Rust)** | `maxfx-play` — Wine/`MaxPayne.exe` default; Studio checkbox / `OPENMAXFX_PLAY=native` → `maxfx-engine --window` BYOD point preview |
 | **1.05 patcher** | `maxfx-patcher` — HTTPS + SHA-256 allowlist; refuses SFX installers |
 | **`openras` (Rust)** | **Alpha** — RASMaker `-x/-v/-a/-m/-p/-c` + subcommands; CI tests |
 | **`openpfx` (Rust)** | **Draft** — `dump-pse` / `dump-rps` (tags `14`/`11`/`09`/`0d`/`13`); preamble export only |
-| **`maxfx-engine`** | **Skeleton** — opens BYOD MP1 RAS via `openras` (not playable) |
+| **`maxfx-engine`** | **Skeleton + preview** — BYOD `.ldb` parse + `--window` vec3 point cloud (not a full game) |
 | **Studio (Tauri)** | GUI front door (Launch/Stop process tracking) |
 | **`.sh` runtime** | Linux convenience only — not required on Windows |
 | **Blender KF2** | Specification / early architecture (stub add-on) |

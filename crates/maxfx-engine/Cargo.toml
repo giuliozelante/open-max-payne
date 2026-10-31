@@ -16,3 +16,4 @@ path = "src/lib.rs"
 [dependencies]
 openras = { path = "../openras" }
 thiserror = "2"
+minifb = "0.28"
