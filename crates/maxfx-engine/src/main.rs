@@ -1,8 +1,9 @@
 use maxfx_engine::{
-    classify_ldb_lead, count_ras_ldb_leading_vec3, discover_ras_files, list_level_packages,
-    looks_like_ldb_or_ai, looks_like_memory_file_ai, looks_like_memory_file_ldb,
-    looks_like_ras_ldb, open_archive, parse_levels_txt, parse_ras_ai_preamble, parse_ras_ldb_faces,
-    parse_ras_ldb_header, parse_ras_ldb_import_character_head_at, parse_ras_ldb_import_exits_at,
+    classify_ldb_lead, count_ras_ldb_leading_vec3, discover_ras_files,
+    find_ras_ldb_import_do_hooks_at, list_level_packages, looks_like_ldb_or_ai,
+    looks_like_memory_file_ai, looks_like_memory_file_ldb, looks_like_ras_ldb, open_archive,
+    parse_levels_txt, parse_ras_ai_preamble, parse_ras_ldb_faces, parse_ras_ldb_header,
+    parse_ras_ldb_import_character_head_at, parse_ras_ldb_import_exits_at,
     parse_ras_ldb_import_lightmaps_at, parse_ras_ldb_import_lights_at,
     parse_ras_ldb_import_material_categories_at, parse_ras_ldb_import_materials_at,
     parse_ras_ldb_import_mesh_attribs_at, parse_ras_ldb_import_mesh_polys_at,
@@ -267,6 +268,21 @@ fn main() -> ExitCode {
                                                             for en in ents.iter().take(12) {
                                                                 println!("    ent {en}");
                                                             }
+                                                            if let Some((at, hooks, hend)) =
+                                                                find_ras_ldb_import_do_hooks_at(
+                                                                    &data,
+                                                                    cstart,
+                                                                    256 * 1024,
+                                                                )
+                                                            {
+                                                                println!(
+                                                                    "  import DO hooks @{at:#x}: count={} end={hend:#x}",
+                                                                    hooks.len()
+                                                                );
+                                                                for h in hooks.iter().take(8) {
+                                                                    println!("    {h}");
+                                                                }
+                                                            }
                                                         } else if let Some((lc, lights, lend)) =
                                                             parse_ras_ldb_import_lights_at(
                                                                 &data, mesh_off, 8,
@@ -294,6 +310,21 @@ fn main() -> ExitCode {
                                                                     );
                                                                 for t in &teles {
                                                                     println!("    tele {t}");
+                                                                }
+                                                            }
+                                                            if let Some((at, hooks, hend)) =
+                                                                find_ras_ldb_import_do_hooks_at(
+                                                                    &data,
+                                                                    lend,
+                                                                    256 * 1024,
+                                                                )
+                                                            {
+                                                                println!(
+                                                                    "  import DO hooks @{at:#x}: count={} end={hend:#x}",
+                                                                    hooks.len()
+                                                                );
+                                                                for h in hooks.iter().take(8) {
+                                                                    println!("    {h}");
                                                                 }
                                                             }
                                                         }

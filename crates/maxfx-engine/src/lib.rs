@@ -1000,6 +1000,74 @@ pub fn parse_ras_ldb_import_character_head_at(data: &[u8], offset: usize) -> Opt
     Some((count, i))
 }
 
+/// Parse a character `DO_*` hook list at `offset` (BYOD Tutorial.ldb @`0x1f7458f`).
+///
+/// Layout: `0x1f` + count, then ×N: `0x0d` `DO_*` string, empty nest (`0x1c`+0),
+/// empty list (`0x1f`+0), empty nest (`0x1c`+0). Returns `(hooks, offset_after)`.
+pub fn parse_ras_ldb_import_do_hooks_at(
+    data: &[u8],
+    offset: usize,
+) -> Option<(Vec<String>, usize)> {
+    let mut i = offset;
+    if data.get(i) != Some(&LDB_IMPORT_MATERIAL_LIST_TAG) {
+        return None;
+    }
+    i += 1;
+    let count = read_mf_i32(data, &mut i)? as usize;
+    if count == 0 || count > 64 {
+        return None;
+    }
+    let mut hooks = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = read_mf_str(data, &mut i)?;
+        if !name.starts_with("DO_") {
+            return None;
+        }
+        if data.get(i) != Some(&0x1c) {
+            return None;
+        }
+        i += 1;
+        if read_mf_i32(data, &mut i)? != 0 {
+            return None;
+        }
+        if data.get(i) != Some(&LDB_IMPORT_MATERIAL_LIST_TAG) {
+            return None;
+        }
+        i += 1;
+        if read_mf_i32(data, &mut i)? != 0 {
+            return None;
+        }
+        if data.get(i) != Some(&0x1c) {
+            return None;
+        }
+        i += 1;
+        if read_mf_i32(data, &mut i)? != 0 {
+            return None;
+        }
+        hooks.push(name);
+    }
+    Some((hooks, i))
+}
+
+/// Scan `[offset, offset+window)` for the first parseable `DO_*` hook list.
+pub fn find_ras_ldb_import_do_hooks_at(
+    data: &[u8],
+    offset: usize,
+    window: usize,
+) -> Option<(usize, Vec<String>, usize)> {
+    let end = data.len().min(offset.saturating_add(window));
+    let mut i = offset;
+    while i < end {
+        if data[i] == LDB_IMPORT_MATERIAL_LIST_TAG {
+            if let Some((hooks, after)) = parse_ras_ldb_import_do_hooks_at(data, i) {
+                return Some((i, hooks, after));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Harvest `::…Jumppoint…` names from a character-block window.
 pub fn ras_ldb_import_jumppoint_names_at(data: &[u8], offset: usize, max: usize) -> Vec<String> {
     let mut out = Vec::new();
@@ -2310,6 +2378,37 @@ mod tests {
         assert_eq!(body[at], 0x0d);
         let names = ras_ldb_import_jumppoint_names_at(&body, at, 8);
         assert_eq!(names, vec!["::start::Jumppoint 00", "::room::Jumppoint 01"]);
+    }
+
+    #[test]
+    fn parses_import_do_hook_list_tutorial_shape() {
+        // BYOD Tutorial.ldb @0x1f7458f: 1f + count + (DO_* + empty nest/list/nest)×N
+        let mut body = Vec::new();
+        body.push(LDB_IMPORT_MATERIAL_LIST_TAG);
+        body.extend_from_slice(&[0x14, 4]);
+        for name in [
+            "DO_BulletCollides",
+            "DO_CharacterCollides",
+            "DO_MovedToInvalidPosition",
+            "DO_OnDeath",
+        ] {
+            body.extend_from_slice(&[0x0d, 0x14, name.len() as u8]);
+            body.extend_from_slice(name.as_bytes());
+            body.extend_from_slice(&[0x1c, 0x14, 0, 0x1f, 0x14, 0, 0x1c, 0x14, 0]);
+        }
+        body.extend_from_slice(&[0x0d, 0x14, 18]);
+        body.extend_from_slice(b"::Alley2::next_ent");
+        let (hooks, end) = parse_ras_ldb_import_do_hooks_at(&body, 0).unwrap();
+        assert_eq!(
+            hooks,
+            vec![
+                "DO_BulletCollides",
+                "DO_CharacterCollides",
+                "DO_MovedToInvalidPosition",
+                "DO_OnDeath",
+            ]
+        );
+        assert_eq!(&body[end..end + 3], &[0x0d, 0x14, 18]);
     }
 
     #[test]
