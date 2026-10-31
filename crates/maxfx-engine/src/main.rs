@@ -10,11 +10,11 @@ use maxfx_engine::{
     parse_ras_ldb_import_point_stream_at, parse_ras_ldb_import_static_mesh_at,
     parse_ras_ldb_import_textures, parse_ras_ldb_section_at, ras_ldb_after_geometry,
     ras_ldb_after_import_materials, ras_ldb_count_section_end, ras_ldb_first_mf_section_body,
-    ras_ldb_import_entity_names_at, ras_ldb_import_jumppoint_names_at, ras_ldb_import_paths,
-    ras_ldb_import_stats, ras_ldb_import_tele_names_at, ras_ldb_vec3_section_end,
-    sample_ras_ldb_vec3_preview, show_vec3_preview_window, soft_walk_mf_tags, split_ldb_records,
-    walk_ras_ldb_known_sections, LDB_IMPORT_VERSION, LDB_RAS_MAGIC, LDB_SECTION_KIND_MF,
-    LDB_SECTION_KIND_VEC3, LDB_SECTION_TAG,
+    ras_ldb_import_do_scripts_at, ras_ldb_import_entity_names_at,
+    ras_ldb_import_jumppoint_names_at, ras_ldb_import_paths, ras_ldb_import_stats,
+    ras_ldb_import_tele_names_at, ras_ldb_vec3_section_end, sample_ras_ldb_vec3_preview,
+    show_vec3_preview_window, soft_walk_mf_tags, split_ldb_records, walk_ras_ldb_known_sections,
+    LDB_IMPORT_VERSION, LDB_RAS_MAGIC, LDB_SECTION_KIND_MF, LDB_SECTION_KIND_VEC3, LDB_SECTION_TAG,
 };
 use openras::RasArchive;
 use std::env;
@@ -302,6 +302,13 @@ fn main() -> ExitCode {
                                                                 for h in hooks.iter().take(8) {
                                                                     println!("    {h}");
                                                                 }
+                                                                for sc in
+                                                                    ras_ldb_import_do_scripts_at(
+                                                                        &data, hend, 6,
+                                                                    )
+                                                                {
+                                                                    println!("    script {sc}");
+                                                                }
                                                             }
                                                         } else if let Some((lc, lights, lend)) =
                                                             parse_ras_ldb_import_lights_at(
@@ -345,6 +352,13 @@ fn main() -> ExitCode {
                                                                 );
                                                                 for h in hooks.iter().take(8) {
                                                                     println!("    {h}");
+                                                                }
+                                                                for sc in
+                                                                    ras_ldb_import_do_scripts_at(
+                                                                        &data, hend, 6,
+                                                                    )
+                                                                {
+                                                                    println!("    script {sc}");
                                                                 }
                                                             }
                                                         }

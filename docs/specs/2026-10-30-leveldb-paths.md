@@ -217,7 +217,7 @@ Tagged int `0x14 0x20` (`LDB_IMPORT_VERSION`) — see ExportLevel below.
 - [x] Character head + long `0d 13` strings + soft-walk into character region
 - [x] ImportBSP: **not** a separate BYOD post-mesh section — room geometry is static-mesh polys
 - [x] Structural `DO_*` hook list (`1f`+count + empty nest/list/nest trailers; Tutorial @`0x1f7458f`)
-- [ ] Semantic `.DO` / FSM script bodies (typed children) — deferred to epic #16
+- [x] `.DO->` / `->` FSM script action strings harvested after hooks (`ras_ldb_import_do_scripts_at`; Tutorial @`0x1f747a7`)
 
 ## `X_LevelDBImportLevel` (MaxPayne.exe REA)
 

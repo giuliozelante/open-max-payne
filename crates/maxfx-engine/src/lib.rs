@@ -1136,6 +1136,33 @@ pub fn find_ras_ldb_import_do_hooks_at(
     None
 }
 
+/// Harvest `.DO->` / `->` FSM script action strings from a character-block window.
+pub fn ras_ldb_import_do_scripts_at(data: &[u8], offset: usize, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = offset;
+    let end = data.len().min(offset.saturating_add(512 * 1024));
+    while i + 3 < end && out.len() < max {
+        if data[i] == 0x0d && data[i + 1] == 0x14 {
+            let len = data[i + 2] as usize;
+            let start = i + 3;
+            if start + len <= data.len() {
+                let bytes = &data[start..start + len];
+                if bytes.windows(2).any(|w| w == b"->")
+                    && bytes.iter().all(|&b| (0x20..=0x7e).contains(&b))
+                {
+                    if let Ok(s) = String::from_utf8(bytes.to_vec()) {
+                        out.push(s);
+                    }
+                }
+                i = start + len;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Harvest `::…Jumppoint…` names from a character-block window.
 pub fn ras_ldb_import_jumppoint_names_at(data: &[u8], offset: usize, max: usize) -> Vec<String> {
     let mut out = Vec::new();
@@ -2469,6 +2496,9 @@ mod tests {
         }
         body.extend_from_slice(&[0x0d, 0x14, 18]);
         body.extend_from_slice(b"::Alley2::next_ent");
+        let sc = b"::Alley2::barrel04.DO->DO_SetHitpoints(15);";
+        body.extend_from_slice(&[0x0d, 0x14, sc.len() as u8]);
+        body.extend_from_slice(sc);
         let (hooks, end) = parse_ras_ldb_import_do_hooks_at(&body, 0).unwrap();
         assert_eq!(
             hooks,
@@ -2480,6 +2510,10 @@ mod tests {
             ]
         );
         assert_eq!(&body[end..end + 3], &[0x0d, 0x14, 18]);
+        assert_eq!(
+            ras_ldb_import_do_scripts_at(&body, end, 4),
+            vec!["::Alley2::barrel04.DO->DO_SetHitpoints(15);"]
+        );
     }
 
     #[test]

@@ -214,7 +214,7 @@ repeated `write_embedded_file`. Fire_Medium Examples → ~106 KiB / 91 blobs
 - [x] `dump-rps` walks **100%** of `export-root --emitter-stubs --bitmap-root` output (0 unknowns)
 - [x] Fire_Medium BYOD: ~91 blobs / ~106 KiB vs retail ~110 KiB (Examples PSE = **2** emitters; retail cooked = **3**)
 - [x] `openpfx validate-rps` — same `PS_ParticleSystem` gates as the game (`0x60`/`5` + full walk; mirrors Invalid File Version/Structure)
-- [ ] Optional human visual FX in a fire level (Wayland menu automation unreliable; not required for gate accept)
+- [x] Swap into `x_data.ras` boots under Wine without `PS_ParticleSystem` errors (visual level FX optional beyond gate accept)
 
 ### BYOD accept procedure (local only — never commit RAS/RPS)
 
