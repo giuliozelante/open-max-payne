@@ -62,7 +62,9 @@ pub struct SceneStaticMesh {
 pub struct SceneDynamicAnim {
     pub name: String,
     pub duration: f32,
+    pub start_mat: [f32; 9],
     pub start_pos: [f32; 3],
+    pub end_mat: [f32; 9],
     pub end_pos: [f32; 3],
     pub scripts: Vec<String>,
 }
@@ -71,8 +73,10 @@ pub struct SceneDynamicAnim {
 pub struct SceneDynamicMesh {
     pub name: String,
     pub room_id: i32,
-    pub base_pos: [f32; 3],
-    pub current_offset: [f32; 3],
+    pub world_mat: [f32; 9],
+    pub world_pos: [f32; 3],
+    pub local_start_mat: [f32; 9],
+    pub local_start_pos: [f32; 3],
     pub toggled: bool,
     pub polys: Vec<ScenePoly>,
     pub anims: Vec<SceneDynamicAnim>,
@@ -254,16 +258,25 @@ fn read_vec3_tag(data: &[u8], i: &mut usize) -> Option<[f32; 3]> {
     Some([x, y, z])
 }
 
-fn read_xform_pos(data: &[u8], i: &mut usize) -> Option<[f32; 3]> {
+fn read_xform(data: &[u8], i: &mut usize) -> Option<([f32; 9], [f32; 3])> {
     if *data.get(*i)? != 0x1a || *i + 49 > data.len() {
         return None;
+    }
+    let mut mat = [0.0f32; 9];
+    for (k, m) in mat.iter_mut().enumerate() {
+        let off = *i + 1 + k * 4;
+        *m = f32::from_le_bytes(data[off..off + 4].try_into().ok()?);
     }
     let p = *i + 37;
     let x = f32::from_le_bytes(data[p..p + 4].try_into().ok()?);
     let y = f32::from_le_bytes(data[p + 4..p + 8].try_into().ok()?);
     let z = f32::from_le_bytes(data[p + 8..p + 12].try_into().ok()?);
     *i += 49;
-    Some([x, y, z])
+    Some((mat, [x, y, z]))
+}
+
+fn read_xform_pos(data: &[u8], i: &mut usize) -> Option<[f32; 3]> {
+    read_xform(data, i).map(|(_, p)| p)
 }
 
 fn read_str(data: &[u8], i: &mut usize) -> Option<String> {
@@ -959,7 +972,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                 i += 1;
                 let n2 = read_i32(data, &mut i)? as usize;
                 i += n2 * 13;
-                let base_pos = read_xform_pos(data, &mut i)?;
+                let (local_start_mat, local_start_pos) = read_xform(data, &mut i)?;
                 let polys = read_mesh_polys_resolved(data, &mut i, &verts, &dyn_points)?;
                 if *data.get(i)? != 0x1f {
                     return None;
@@ -971,7 +984,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     read_vec3_tag(data, &mut i)?;
                 }
                 let _parent = read_str(data, &mut i)?;
-                let _x1 = read_xform_pos(data, &mut i)?;
+                let (world_mat, world_pos) = read_xform(data, &mut i)?;
                 let _x2 = read_xform_pos(data, &mut i)?;
                 let room_id = read_i32(data, &mut i)?;
                 let _unk_s = read_str(data, &mut i)?;
@@ -980,8 +993,8 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                 for _ in 0..anim_cnt {
                     let aname = read_str(data, &mut i)?;
                     let duration = read_f32_tag(data, &mut i)?;
-                    let start_pos = read_xform_pos(data, &mut i)?;
-                    let end_pos = read_xform_pos(data, &mut i)?;
+                    let (start_mat, start_pos) = read_xform(data, &mut i)?;
+                    let (end_mat, end_pos) = read_xform(data, &mut i)?;
                     let mut scripts = read_str_list(data, &mut i, 0x1c)?;
                     scripts.append(&mut read_str_list(data, &mut i, 0x1c)?);
                     scripts.append(&mut read_str_list(data, &mut i, 0x1c)?);
@@ -995,7 +1008,9 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     anims.push(SceneDynamicAnim {
                         name: aname,
                         duration,
+                        start_mat,
                         start_pos,
+                        end_mat,
                         end_pos,
                         scripts,
                     });
@@ -1010,8 +1025,10 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                 dynamic_meshes.push(SceneDynamicMesh {
                     name,
                     room_id,
-                    base_pos,
-                    current_offset: [0.0, 0.0, 0.0],
+                    world_mat,
+                    world_pos,
+                    local_start_mat,
+                    local_start_pos,
                     toggled: false,
                     polys,
                     anims,
