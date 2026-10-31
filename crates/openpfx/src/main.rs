@@ -32,6 +32,7 @@ enum Cmd {
         output: PathBuf,
     },
     /// Export PSE root object fields to RPS (graphs / emitters still omitted)
+    #[command(alias = "export")]
     ExportRoot {
         pse: PathBuf,
         #[arg(short = 'o', long)]
