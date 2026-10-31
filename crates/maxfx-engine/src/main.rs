@@ -431,6 +431,7 @@ fn main() -> ExitCode {
                             if want_window {
                                 if let Err(e) = maxfx_engine::render3d::run_3d_walkthrough(
                                     scene,
+                                    p,
                                     &format!("Open Max Payne 3D — {}", p.display()),
                                 ) {
                                     eprintln!("3D walkthrough error: {e}");
