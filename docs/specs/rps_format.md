@@ -212,10 +212,35 @@ repeated `write_embedded_file`. Fire_Medium Examples → ~106 KiB / 91 blobs
 ## Accept bar (issue #11)
 
 - [x] `dump-rps` walks **100%** of `export-root --emitter-stubs --bitmap-root` output (0 unknowns)
-- [x] Fire_Medium BYOD: ~91 blobs / ~106 KiB vs retail ~110 KiB
-- [ ] Human in-game particle smoke test (Wine ParticleFX `-e` still hangs; use `openpfx` export)
+- [x] Fire_Medium BYOD: ~91 blobs / ~106 KiB vs retail ~110 KiB (Examples PSE = **2** emitters; retail cooked = **3**)
+- [ ] In-level load of `fire\fire_medium.rps` (menu boot does **not** open individual `.rps`; CombinationRPS `_all_particles.rps` also deferred)
+
+### BYOD accept procedure (local only — never commit RAS/RPS)
+
+```bash
+PSE=vendor/max-fx-tools/ParticleFX_files/Examples/Fire_Medium.pse
+BITMAPS=vendor/max-fx-tools/ParticleFX_files/Examples/Bitmaps
+GAME=~/Games/MaxPayne1
+WORK=/tmp/omp-accept-11
+
+cargo run -q -p openpfx -- export-root --emitter-stubs --bitmap-root "$BITMAPS" \
+  "$PSE" -o "$WORK/Fire_Medium.rps"
+cargo run -q -p openpfx -- dump-rps "$WORK/Fire_Medium.rps"   # expect full walk
+
+cp -a "$GAME/x_data.ras" "$GAME/x_data.ras.pre-openpfx-11"
+cargo run -q -p openras -- extract "$GAME/x_data.ras" --dest "$WORK/xdata"
+cp -a "$WORK/Fire_Medium.rps" \
+  "$WORK/xdata/data/database/particles/fire/Fire_Medium.rps"
+# Prefer clap pack (not RASMaker `-c` alone): uncompressed is fine for probes
+cargo run -q -p openras -- pack "$WORK/xdata" "$WORK/x_data.accept.ras"
+cp -a "$WORK/x_data.accept.ras" "$GAME/x_data.ras"
+# Start a level that uses [fire_medium] from particles.txt — menu is insufficient.
+# Restore: cp -a "$GAME/x_data.ras.pre-openpfx-11" "$GAME/x_data.ras"
+```
+
+`particles.txt` maps `[fire_medium]` → `fire\fire_medium.rps` (case-insensitive in RAS).
 
 ## Next
 
-1. In-game smoke of bitmap-root Fire_Medium (replace inside `x_data.ras` BYOD)
-2. Finish remaining `FUN_00417570` emitter field parity vs candle
+1. In-level smoke of bitmap-root Fire_Medium (procedure above)
+2. Finish remaining `FUN_00417570` emitter field parity vs candle / retail 3rd emitter
