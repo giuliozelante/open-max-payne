@@ -12,8 +12,9 @@ use maxfx_engine::{
     ras_ldb_after_import_materials, ras_ldb_count_section_end, ras_ldb_first_mf_section_body,
     ras_ldb_import_entity_names_at, ras_ldb_import_jumppoint_names_at, ras_ldb_import_paths,
     ras_ldb_import_stats, ras_ldb_import_tele_names_at, ras_ldb_vec3_section_end,
-    soft_walk_mf_tags, split_ldb_records, walk_ras_ldb_known_sections, LDB_IMPORT_VERSION,
-    LDB_RAS_MAGIC, LDB_SECTION_KIND_MF, LDB_SECTION_KIND_VEC3, LDB_SECTION_TAG,
+    sample_ras_ldb_vec3_preview, show_vec3_preview_window, soft_walk_mf_tags, split_ldb_records,
+    walk_ras_ldb_known_sections, LDB_IMPORT_VERSION, LDB_RAS_MAGIC, LDB_SECTION_KIND_MF,
+    LDB_SECTION_KIND_VEC3, LDB_SECTION_TAG,
 };
 use openras::RasArchive;
 use std::env;
@@ -21,9 +22,28 @@ use std::path::Path;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
+    let mut args = env::args().skip(1).peekable();
+    let mut want_window = env::var("OPENMAXFX_ENGINE_WINDOW").unwrap_or_default() == "1";
+    while args.peek().is_some_and(|a| a.starts_with('-')) {
+        match args.next().as_deref() {
+            Some("--window") => want_window = true,
+            Some("-h" | "--help") => {
+                eprintln!(
+                    "usage: maxfx-engine [--window] <archive.ras|archive.mpm|game-dir|level.ldb|.ai>"
+                );
+                return ExitCode::SUCCESS;
+            }
+            Some(other) => {
+                eprintln!("unknown flag {other}");
+                return ExitCode::FAILURE;
+            }
+            None => break,
+        }
+    }
     let Some(path) = args.next() else {
-        eprintln!("usage: maxfx-engine <archive.ras|archive.mpm|game-dir|level.ldb|.ai>");
+        eprintln!(
+            "usage: maxfx-engine [--window] <archive.ras|archive.mpm|game-dir|level.ldb|.ai>"
+        );
         return ExitCode::FAILURE;
     };
     let p = Path::new(&path);
@@ -341,6 +361,17 @@ fn main() -> ExitCode {
                                 }
                             }
                             None => println!("  ImportLevel MF head not found after geometry"),
+                        }
+                        if want_window {
+                            let pts = sample_ras_ldb_vec3_preview(&data, 120_000);
+                            println!("  preview window: {} points (Esc to close)", pts.len());
+                            if let Err(e) = show_vec3_preview_window(
+                                &pts,
+                                &format!("maxfx-engine — {}", p.display()),
+                            ) {
+                                eprintln!("preview window: {e}");
+                                return ExitCode::FAILURE;
+                            }
                         }
                         return ExitCode::SUCCESS;
                     }

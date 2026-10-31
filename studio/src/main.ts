@@ -318,7 +318,14 @@ window.addEventListener("DOMContentLoaded", async () => {
         stamp("Graphics stack not OK — apply localized-safe stack first.");
         return;
       }
-      stamp(await invoke<string>("launch_game", { dest: input("#game-dir").value }));
+      const preferNative = (document.querySelector("#prefer-native") as HTMLInputElement)
+        .checked;
+      stamp(
+        await invoke<string>("launch_game", {
+          dest: input("#game-dir").value,
+          preferNative,
+        }),
+      );
       await syncRunning();
     } catch (e) {
       stamp(`ERROR: ${e}`);

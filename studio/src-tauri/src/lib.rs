@@ -514,8 +514,27 @@ fn apply_localized_safe_stack(dest: String) -> Result<String, String> {
     maxfx_play::apply_localized_safe_stack(Path::new(&dest), &overlays).map_err(|e| e.to_string())
 }
 
+fn resolve_maxfx_engine(root: &Path) -> Option<PathBuf> {
+    for rel in [
+        "target/release/maxfx-engine",
+        "target/debug/maxfx-engine",
+        "crates/maxfx-engine/target/release/maxfx-engine",
+        "crates/maxfx-engine/target/debug/maxfx-engine",
+    ] {
+        let p = root.join(rel);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 #[tauri::command]
-fn launch_game(dest: String, state: State<'_, GameProc>) -> Result<String, String> {
+fn launch_game(
+    dest: String,
+    prefer_native: Option<bool>,
+    state: State<'_, GameProc>,
+) -> Result<String, String> {
     let dir = PathBuf::from(&dest);
     {
         let mut slot = state.0.lock().map_err(|e| e.to_string())?;
@@ -534,22 +553,46 @@ fn launch_game(dest: String, state: State<'_, GameProc>) -> Result<String, Strin
         }
     }
 
-    if maxfx_play::detect_localized_lang(&dir).is_some() {
-        let st = game_status_inner(&dir);
-        if !st.graphics_stack_ok {
-            apply_localized_safe_stack(dest.clone())?;
+    let prefer_native = prefer_native.unwrap_or(false);
+    if prefer_native {
+        let root = discover_root()?;
+        let engine = resolve_maxfx_engine(&root).ok_or_else(|| {
+            "maxfx-engine binary not found — build with: cargo build -p maxfx-engine".to_string()
+        })?;
+        std::env::set_var("OPENMAXFX_PLAY", "native");
+        std::env::set_var("OPENMAXFX_ENGINE", &engine);
+        std::env::set_var("OPENMAXFX_ENGINE_WINDOW", "1");
+        let probe = dir.join("data.disabled-hires/database/levels/front_end/Tutorial.ldb");
+        if probe.is_file() {
+            std::env::set_var("OPENMAXFX_ENGINE_PROBE", &probe);
         }
+    } else {
+        std::env::remove_var("OPENMAXFX_PLAY");
+        std::env::remove_var("OPENMAXFX_ENGINE_WINDOW");
+        if maxfx_play::detect_localized_lang(&dir).is_some() {
+            let st = game_status_inner(&dir);
+            if !st.graphics_stack_ok {
+                apply_localized_safe_stack(dest.clone())?;
+            }
+        }
+        maxfx_play::graphics_dlls_ok(&dir).map_err(|e| e.to_string())?;
     }
-    maxfx_play::graphics_dlls_ok(&dir).map_err(|e| e.to_string())?;
 
     let child = maxfx_play::spawn_game(&dir).map_err(|e| e.to_string())?;
     let log = dir.join("openmaxfx-launch.log");
     let mut slot = state.0.lock().map_err(|e| e.to_string())?;
     *slot = Some(child);
-    Ok(format!(
-        "Launched MaxPayne (Wine win32 prefix pfx/ or native). Watch {}",
-        log.display()
-    ))
+    Ok(if prefer_native {
+        format!(
+            "Launched native maxfx-engine preview (Wine still available if unchecked). Log {}",
+            log.display()
+        )
+    } else {
+        format!(
+            "Launched MaxPayne (Wine win32 prefix pfx/ or native EXE). Watch {}",
+            log.display()
+        )
+    })
 }
 
 #[tauri::command]

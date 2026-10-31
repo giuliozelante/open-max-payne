@@ -185,6 +185,74 @@ pub fn count_ras_ldb_leading_vec3(data: &[u8]) -> usize {
     n
 }
 
+/// Sample up to `max` leading geometry vec3s for a native preview frame (#16).
+pub fn sample_ras_ldb_vec3_preview(data: &[u8], max: usize) -> Vec<[f32; 3]> {
+    let mut out = Vec::new();
+    if !looks_like_ras_ldb(data) || max == 0 {
+        return out;
+    }
+    let mut i = LDB_RAS_HEADER_LEN;
+    while out.len() < max && i + 13 <= data.len() && data[i] == 0x16 {
+        i += 1;
+        let x = f32::from_le_bytes(data[i..i + 4].try_into().unwrap_or([0; 4]));
+        let y = f32::from_le_bytes(data[i + 4..i + 8].try_into().unwrap_or([0; 4]));
+        let z = f32::from_le_bytes(data[i + 8..i + 12].try_into().unwrap_or([0; 4]));
+        i += 12;
+        if x.is_finite() && y.is_finite() && z.is_finite() {
+            out.push([x, y, z]);
+        }
+    }
+    out
+}
+
+/// Orthographic point-cloud preview window (BYOD smoke for epic #16). Esc / close to exit.
+pub fn show_vec3_preview_window(points: &[[f32; 3]], title: &str) -> Result<(), String> {
+    use minifb::{Key, Window, WindowOptions};
+    const W: usize = 960;
+    const H: usize = 640;
+    if points.is_empty() {
+        return Err("no preview points".into());
+    }
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_z = f32::INFINITY;
+    let mut max_z = f32::NEG_INFINITY;
+    for p in points {
+        min_x = min_x.min(p[0]);
+        max_x = max_x.max(p[0]);
+        min_z = min_z.min(p[2]);
+        max_z = max_z.max(p[2]);
+    }
+    let dx = (max_x - min_x).max(1.0);
+    let dz = (max_z - min_z).max(1.0);
+    let mut window = Window::new(
+        title,
+        W,
+        H,
+        WindowOptions {
+            resize: false,
+            ..WindowOptions::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    window.set_target_fps(30);
+    let mut buf = vec![0u32; W * H];
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+        buf.fill(0x00101820);
+        for p in points {
+            let u = ((p[0] - min_x) / dx * (W as f32 - 1.0)) as usize;
+            let v = ((p[2] - min_z) / dz * (H as f32 - 1.0)) as usize;
+            let v = H - 1 - v.min(H - 1);
+            let u = u.min(W - 1);
+            buf[v * W + u] = 0x00e8f0ff;
+        }
+        window
+            .update_with_buffer(&buf, W, H)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// One face-like record from a kind-`0x13` MemoryFile body (BYOD Startup).
 ///
 /// Vertex indices are compressed ints (`0x14`/`0x13`/…) — not fixed u8 — so
@@ -2054,6 +2122,9 @@ mod tests {
         assert_eq!(h.count, 0xcdab);
         assert_eq!(h.flag, 0);
         assert_eq!(count_ras_ldb_leading_vec3(&buf), 2);
+        let preview = sample_ras_ldb_vec3_preview(&buf, 8);
+        assert_eq!(preview.len(), 2);
+        assert_eq!(preview[0], [1.0, 2.0, 3.0]);
         // flag=0: declared count matches contiguous run when we build it that way
         let mut tight = Vec::new();
         tight.extend_from_slice(&LDB_RAS_MAGIC.to_le_bytes());
