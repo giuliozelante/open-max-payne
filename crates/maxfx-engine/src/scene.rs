@@ -1131,7 +1131,12 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
     if !rooms.is_empty() {
         let start_room = jumppoints
             .iter()
-            .find(|j| j.name.contains("Start") || j.name.contains("Jumppoint"))
+            .find(|j| j.name.contains("StartRoom"))
+            .or_else(|| {
+                jumppoints
+                    .iter()
+                    .find(|j| j.name.contains("Start") || j.name.contains("Jumppoint"))
+            })
             .map(|j| j.room_id)
             .unwrap_or(rooms[0].id);
         let mut origins: BTreeMap<i32, [f32; 3]> = BTreeMap::new();
@@ -1145,12 +1150,12 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     if let Some(ex) = exits.iter().find(|e| &e.name == ex_name) {
                         let v = ex.target_room_id;
                         if let std::collections::btree_map::Entry::Vacant(e) = origins.entry(v) {
-                            // `ex.relative_offset` transforms target room `v` into `u`:
-                            // `P_u = P_v + rel` => `origin_v = origin_u + rel`
+                            // `ex.relative_offset` transforms room `u` local coords into room `v`:
+                            // `P_v = P_u + rel` => `origin_v = origin_u - rel`
                             let v_orig = [
-                                u_orig[0] + ex.relative_offset[0],
-                                u_orig[1] + ex.relative_offset[1],
-                                u_orig[2] + ex.relative_offset[2],
+                                u_orig[0] - ex.relative_offset[0],
+                                u_orig[1] - ex.relative_offset[1],
+                                u_orig[2] - ex.relative_offset[2],
                             ];
                             e.insert(v_orig);
                             queue.push_back(v);
@@ -1167,6 +1172,37 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                 if let Some(sm) = static_meshes.iter_mut().find(|m| m.mesh_id == sm_id) {
                     sm.room_id = Some(r.id);
                     sm.world_origin = r.world_origin;
+                }
+            }
+        }
+    }
+
+    // Apply FSM `C_Teleport("::Room::Jumppoint")` scripts to characters starting in `::Teleport`
+    for fsm in &fsms {
+        let all_acts = fsm
+            .startup_actions
+            .iter()
+            .chain(fsm.states.iter())
+            .chain(fsm.hooks.iter().flat_map(|(_, h)| h.iter()));
+        for act in all_acts {
+            let lower = act.to_ascii_lowercase();
+            if let Some(arrow_pos) = lower.find("->c_teleport(") {
+                let actor = &act[..arrow_pos].trim();
+                let rest = &act[arrow_pos + 13..];
+                let target = rest.trim_matches(|c: char| {
+                    c == '(' || c == ')' || c == ';' || c == '"' || c.is_whitespace()
+                });
+                if let Some(jp) = jumppoints
+                    .iter()
+                    .find(|j| j.name.eq_ignore_ascii_case(target))
+                {
+                    if let Some(ch) = characters
+                        .iter_mut()
+                        .find(|c| c.name.eq_ignore_ascii_case(actor))
+                    {
+                        ch.room_id = jp.room_id;
+                        ch.pos = jp.pos;
+                    }
                 }
             }
         }
