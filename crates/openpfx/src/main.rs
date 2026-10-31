@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use openpfx::{
     build_texture_sequences_from_pse, pse_header_to_rps_preamble, pse_to_rps_export_with_curves,
     read_pse, read_rps, roundtrip_rps, sample_emitter_curves_from_pse, scan_pse_bitmap_stems,
-    scan_pse_emitters, PseExportOptions, RpsValue,
+    scan_pse_emitters, validate_rps_game_gates, PseExportOptions, RpsValue,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -55,6 +55,8 @@ enum Cmd {
         #[arg(short = 'o', long)]
         output: PathBuf,
     },
+    /// Check PS_ParticleSystem load gates (type 0x60 / ver 5 + full walk)
+    ValidateRps { path: PathBuf },
 }
 
 fn main() -> ExitCode {
@@ -237,6 +239,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 output.display(),
                 out.len(),
                 out == data
+            );
+        }
+        Cmd::ValidateRps { path } => {
+            let data = fs::read(&path)?;
+            validate_rps_game_gates(&data)?;
+            println!(
+                "{}: OK (PS_ParticleSystem gates 0x60/5, {} bytes walked)",
+                path.display(),
+                data.len()
             );
         }
     }
