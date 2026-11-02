@@ -95,8 +95,8 @@ Attenuation0/1/2 = `getAttenuation()`. So, with Direct3D's fixed-function per-ve
 
 ## Ambient (VERIFIED, driver `0x100165c1`…)
 
-Per lit object the driver sets `D3DRS_LIGHTING` (`0x89`) = 1 and `D3DRS_AMBIENT` (`0x8b`) from the
-**material's** ambient colour (`[obj+0x54]`, packed to ARGB). The level templates set black ambient
+Per lit object the driver sets `D3DRS_LIGHTING` (`0x89`) = 1 and `D3DRS_AMBIENT` (`0x8b`) from
+`[obj+0x54]`, packed to ARGB. **Correction (2026-11-02, see below):** `obj` is the `P_Scene`, not the material. The level templates set black ambient
 (`0x5a6140(0,0,0,255)`); other templates use white (`255,255,255,255`, at `0x5a5f67`/`0x5a6051`). The object
 material builder (`0x554d30`) sets ambient from `0x574940()` at `0x556eac`, a per-material value not
 read yet.
@@ -111,10 +111,61 @@ read yet.
 (`D3DMCS_MATERIAL`) and 1 (`D3DMCS_COLOR1`, the vertex colour), and `D3DRS_EMISSIVEMATERIALSOURCE`
 (`0x94`) between 0/1/2, per material. One `SetMaterial` call site.
 
-HYPOTHESIS: object materials use `COLOR1` for ambient, so with white `D3DRS_AMBIENT` an object is lit by its
-**baked vertex colours** plus point lights. The engine does not parse vertex colours for dynamic meshes or
-characters yet. That's the next step: find the colour-source flags per material (`setLightingColorSource`,
-IAT `0x7ca598`) and the vertex-colour data in the `.ldb` dynamic-mesh / KFS records.
+~~HYPOTHESIS: object materials use `COLOR1` for ambient~~ — **ruled out**, see next section.
+
+## Colour source, `D3DMATERIAL8` and global ambient (2026-11-02, static)
+
+**Colour-source word (VERIFIED, e2mfc `setLightingColorSource` `0x10025130`, driver `0x1001771a`…`0x10017849`).**
+`P_Material+0x2c` holds four 2-bit fields. The driver maps each to one render state; field value 0 =
+`D3DMCS_MATERIAL`, 1 = `D3DMCS_COLOR1`, 2 = `D3DMCS_COLOR2`:
+
+| Bits | Render state |
+|------|--------------|
+| `0x03` | `D3DRS_AMBIENTMATERIALSOURCE` (`0x93`) |
+| `0x0c` | `D3DRS_DIFFUSEMATERIALSOURCE` (`0x91`) |
+| `0x30` | `D3DRS_SPECULARMATERIALSOURCE` (`0x92`) |
+| `0xc0` | `D3DRS_EMISSIVEMATERIALSOURCE` (`0x94`) |
+
+`D3DRS_COLORVERTEX` (`0x8d`) = 1 only when the word is non-zero. The `P_Material` constructor
+(`0x100230d0`, store at `0x1002322f`) sets the word to 0.
+
+**Who sets it (VERIFIED).** Only the exe calls it (IAT `0x7ca598`, 8 sites); e2mfc has no internal caller and
+no other module imports it:
+
+| Site(s) | Function | Value | Meaning |
+|---------|----------|-------|---------|
+| `0x65e01f`, `0x65e0b7`, `0x65e218`, `0x65e360` | `0x65dafb` (`X_Decal`, string "X_Decal: Multiple alpha files…") | 4 | diffuse = vertex colour |
+| `0x4a8ab3` | `0x4a8aa0` (no direct caller; vtable) | 4 | diffuse = vertex colour |
+| `0x59fab3` | `0x59fa61` | 5 | ambient + diffuse = vertex colour |
+| `0x5a01bd`, `0x5a02e5` | `0x5a007d` (global templates, e.g. `0x8b00b8`) | 5 | ambient + diffuse = vertex colour |
+
+The object material builder `0x554d30`…`0x557800` never calls it, so object materials keep **0**:
+vertex colours do not enter lighting.
+
+**`D3DMATERIAL8` (VERIFIED, driver `0x1001785f`…`0x100179c5`, the only `SetMaterial` call `[vt+0xa8]`).**
+Diffuse / Ambient / Specular / Emissive = `P_Material` `getDiffuseColor` (`+0x44`) / `getAmbientColor` (`+0x34`) /
+`getSpecularColor` (`+0x54`) / `getEmissiveColor` (`+0x64`) × 1/255 (`0x10063784`); Power = `getSpecularExponent`.
+Constructor defaults: diffuse and specular 255, emissive 0.
+
+**Global ambient (VERIFIED, static).** The object behind `[ebp-0x20]` at `0x10016608` is not the material
+(the material arrives separately via `getDeviceMaterial` → `P_D3DMaterialInfo`). `P_Scene::getAmbientColor`
+(`0x10003280`) returns `this+0x54`, so the same offset as the `D3DRS_AMBIENT` read. STRONGLY SUPPORTED:
+that object is the `P_Scene`. The `P_Scene` constructor (`0x10018820`, `0x1001887b`…) sets ambient to
+`(0, 0, 0, 255)`. Neither `P_Scene::setAmbientColor` (`0x100031e0`, `0x10003220`) has a caller or address
+reference in e2mfc, and no module imports them. So `D3DRS_AMBIENT` stays **black**.
+
+**Engine consequence.** D3D fixed-function per vertex, for an object material (colour source 0):
+
+    colour = emissive + ambient_mat × 0 + Σ lights diffuse_mat · light/255 · max(N·L, 0) · atten(d)
+
+The white object ambient captured at `0x556eac` contributes nothing. Objects are lit by emissive plus
+point lights only. The engine's directional `shade` (`render3d.rs`, non-lightmapped polygons) is a guess.
+
+**Object diffuse/emissive (VERIFIED, static, `0x5560a5`… and `0x5561c5`…).** The builder reads a mode
+from the runtime material at `+0x46` (`0x574970`): mode 1 → `setEmissiveColor(c)`, mode 2 →
+`setDiffuseColor(c)`, where `c` is a colour argument. Other values set neither (emissive stays 0, diffuse 255).
+Blend at `+0x56` (`0x5749d0`): 0 `COPY`, 1 `ADD`, 2 `MUL`. UNKNOWN: which runtime class holds `+0x46`, the source of `c`,
+and the per-material values.
 
 ## Open (golden data needed)
 
