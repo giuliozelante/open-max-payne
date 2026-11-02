@@ -41,6 +41,16 @@ STRONGLY SUPPORTED: the per-state section a script runs is the state passed alon
 section names the state the FSM came **from** (`t_toilet`: `closed: [open] …`), while commands and events use
 the current state (`d_fan01` `rotate`: `[1st] DO_Animate(1st); FSM_Switch(2nd)`).
 
+## `FSM_Randomize` (VERIFIED, static, `0x6e3310`)
+
+Registrar `0x6e8250` (allocator built at `0x6e86e0`). The handler takes the state count (`0x6e3770`: size of
+record `+0x98`), picks `rand() % count` (MSVCRT `rand`, IAT `0x7ca368`), fetches that name (`0x6e3790`),
+lowercases it (`tolower`, IAT `0x7ca328`) and continues exactly like `FSM_Switch` (same `+0x382` guard and warning
+`0x89b294`). 23 retail uses.
+
+The engine uses the MSVCRT generator (`seed·214013 + 2531011`, bits 16..30) from the unseeded start value 1.
+HYPOTHESIS: retail never calls `srand`; not checked.
+
 ## Engine
 
 `SceneFsm::state` starts at `default_state`. `FSM_Switch` and `FSM_Send` follow the handlers above. Event
@@ -54,5 +64,4 @@ lists and runs the state section last. Delivery is immediate; retail lags it by 
 
 - Startup scripts still run only the `DO_SetHitpoints` / `DO_Hide` / `T_Enable` calls; `FSM_Send` at startup
   (ceiling fans: `FSM_Send(rotate)`) is not dispatched yet.
-- `FSM_Randomize` (23 uses), handler not read.
 - Script executor `0x6e2cd0` / `0x6dfb30` internals (call order, how the delay applies).
