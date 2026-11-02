@@ -89,17 +89,31 @@ pub fn run_3d_walkthrough(
     world_sphere: Option<&str>,
     shot: Option<CameraFlyover>,
 ) -> Result<(), String> {
-    let mut window = Window::new(
-        title,
-        W,
-        H,
-        WindowOptions {
-            resize: false,
-            ..WindowOptions::default()
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    window.set_target_fps(60);
+    // Hardware: a resizable winit window with a wgpu swapchain. Software (or no GPU): minifb.
+    let mut winit_window = if hardware_renderer() {
+        crate::frontend::WinitFrontend::new(title, W as u32, H as u32).ok()
+    } else {
+        None
+    };
+    let open_soft = || -> Result<Window, String> {
+        let mut window = Window::new(
+            title,
+            W,
+            H,
+            WindowOptions {
+                resize: false,
+                ..WindowOptions::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        window.set_target_fps(60);
+        Ok(window)
+    };
+    let mut soft_window = if winit_window.is_none() {
+        Some(open_soft()?)
+    } else {
+        None
+    };
 
     let (catalog_player, johnny_rig) = load_character_rigs(level_path);
     let player_rig = player_skin
@@ -242,11 +256,14 @@ pub fn run_3d_walkthrough(
     scene.apply_startup_hitpoints();
     scene.apply_startup_hides();
     scene.apply_startup_enables();
-    let mut gpu = if hardware_renderer() {
-        crate::gpu::GpuRenderer::new(&scene)
-    } else {
-        None
-    };
+    // Built after the material surfaces, so batches follow the draw policies.
+    let mut gpu = winit_window
+        .as_ref()
+        .and_then(|front| crate::gpu::GpuRenderer::for_window(&scene, front));
+    if gpu.is_none() && winit_window.is_some() {
+        winit_window = None;
+        soft_window = Some(open_soft()?);
+    }
     println!(
         "  3D Engine: renderer = {}",
         if gpu.is_some() {
@@ -259,9 +276,21 @@ pub fn run_3d_walkthrough(
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
+    let mut background = vec![0u32; W * H];
     let base_dt = 1.0 / 60.0f32;
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
+    loop {
+        if let Some(front) = winit_window.as_mut() {
+            front.pump();
+        }
+        let window: &dyn crate::frontend::Frontend = match (&winit_window, &soft_window) {
+            (Some(front), _) => front,
+            (None, Some(soft)) => soft,
+            (None, None) => break,
+        };
+        if !window.is_open() || window.is_key_down(Key::Escape) {
+            break;
+        }
         if let Some(shot) = shot.as_ref() {
             if shot_clock >= shot.duration || window.is_key_pressed(Key::Space, KeyRepeat::No) {
                 break;
@@ -562,8 +591,9 @@ pub fn run_3d_walkthrough(
         const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
         // 1. Render static room meshes (with inward-normal backface culling)
-        if let (Some(gpu), false) = (gpu.as_mut(), wireframe) {
-            let mut characters = Vec::new();
+        let mut characters = Vec::new();
+        let mut scene_view = None;
+        if gpu.is_some() && !wireframe {
             for en in &enemies {
                 if let Some(erig) = bodies.get(en.rig_index) {
                     let moving = en.walk_phase > 0.0;
@@ -601,14 +631,7 @@ pub fn run_3d_walkthrough(
                     shade: character_shade(false),
                 });
             }
-            gpu.render(
-                &scene,
-                (cam_pos, cam_right, cam_up, cam_fwd),
-                use_lightmaps,
-                &characters,
-                &mut fb,
-                &mut zb,
-            );
+            scene_view = Some((cam_pos, cam_right, cam_up, cam_fwd));
         } else {
             for sm in &scene.static_meshes {
                 render_poly_batch(
@@ -704,6 +727,13 @@ pub fn run_3d_walkthrough(
             }
         }
 
+        // Hardware: everything drawn so far (sky, wireframe geometry) is the background; the HUD
+        // below goes to a transparent overlay above the GPU scene.
+        if gpu.is_some() {
+            background.copy_from_slice(&fb);
+            fb.fill(crate::gpu::HUD_CLEAR);
+        }
+
         // 5. Render muzzle flash / bullet tracer when firing
         if shot_timer > 0.10 {
             draw_line(
@@ -729,9 +759,22 @@ pub fn run_3d_walkthrough(
             fb[(cy_scr as i32 + d) as usize * W + cx] = cross_col;
         }
 
-        window
-            .update_with_buffer(&fb, W, H)
-            .map_err(|e| e.to_string())?;
+        match (gpu.as_mut(), winit_window.as_ref(), soft_window.as_mut()) {
+            (Some((renderer, surface)), Some(front), _) => renderer.present(
+                surface,
+                front.size(),
+                &scene,
+                scene_view,
+                use_lightmaps,
+                &characters,
+                &background,
+                &fb,
+            ),
+            (_, _, Some(soft)) => soft
+                .update_with_buffer(&fb, W, H)
+                .map_err(|e| e.to_string())?,
+            _ => break,
+        }
     }
     Ok(())
 }

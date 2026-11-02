@@ -57,7 +57,206 @@ pub struct GpuRenderer {
     depth: wgpu::Texture,
     color_out: wgpu::Buffer,
     depth_out: wgpu::Buffer,
+    full_shader: wgpu::ShaderModule,
+    full_layout: wgpu::PipelineLayout,
+    image_layout: wgpu::BindGroupLayout,
+    /// Fullscreen passes inside the scene pass: the CPU sky behind, the CPU HUD on top.
+    background: wgpu::RenderPipeline,
+    hud: wgpu::RenderPipeline,
+    background_image: (wgpu::Texture, wgpu::BindGroup),
+    overlay_image: (wgpu::Texture, wgpu::BindGroup),
 }
+
+/// The window's swapchain plus the offscreen colour and depth targets at window size.
+pub struct GpuSurface {
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    color: wgpu::Texture,
+    depth: wgpu::Texture,
+    color_group: wgpu::BindGroup,
+    blit: wgpu::RenderPipeline,
+}
+
+impl GpuSurface {
+    fn new(
+        renderer: &GpuRenderer,
+        surface: wgpu::Surface<'static>,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        surface.configure(&renderer.device, &config);
+        let entry = if format.is_srgb() {
+            "fs_blit_srgb"
+        } else {
+            "fs_image"
+        };
+        let blit = fullscreen_pipeline(
+            &renderer.device,
+            &renderer.full_layout,
+            &renderer.full_shader,
+            entry,
+            format,
+            None,
+            false,
+        );
+        let (color, depth, color_group) = window_targets(renderer, config.width, config.height);
+        Self {
+            surface,
+            config,
+            color,
+            depth,
+            color_group,
+            blit,
+        }
+    }
+
+    fn resize(&mut self, renderer: &GpuRenderer, width: u32, height: u32) {
+        if (width, height) == (self.config.width, self.config.height) || width == 0 || height == 0 {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&renderer.device, &self.config);
+        (self.color, self.depth, self.color_group) = window_targets(renderer, width, height);
+    }
+}
+
+fn window_targets(
+    renderer: &GpuRenderer,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::Texture, wgpu::BindGroup) {
+    let target = |format, usage| {
+        renderer.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    };
+    let color = target(
+        COLOR_FORMAT,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    );
+    let depth = target(DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT);
+    let group = image_group(
+        &renderer.device,
+        &renderer.image_layout,
+        &color.create_view(&Default::default()),
+        &renderer.binder.tex_sampler,
+    );
+    (color, depth, group)
+}
+
+fn image_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+/// Fullscreen triangle sampling one image; `in_scene` adds the depth state the scene pass needs.
+fn fullscreen_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    fragment: &str,
+    format: wgpu::TextureFormat,
+    blend: Option<wgpu::BlendState>,
+    in_scene: bool,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("fullscreen"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_full"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: in_scene.then(|| wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(fragment),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+const FULLSCREEN_SHADER: &str = r#"
+@group(0) @binding(0) var img: texture_2d<f32>;
+@group(0) @binding(1) var img_sampler: sampler;
+struct V { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+@vertex
+fn vs_full(@builtin(vertex_index) i: u32) -> V {
+    let x = f32((i << 1u) & 2u);
+    let y = f32(i & 2u);
+    var o: V;
+    o.pos = vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+    o.uv = vec2f(x, y);
+    return o;
+}
+@fragment
+fn fs_image(v: V) -> @location(0) vec4f {
+    return textureSample(img, img_sampler, v.uv);
+}
+// The frame holds display values; an sRGB swapchain re-encodes them, so decode first.
+@fragment
+fn fs_blit_srgb(v: V) -> @location(0) vec4f {
+    let c = textureSample(img, img_sampler, v.uv);
+    return vec4f(pow(c.rgb, vec3f(2.2)), 1.0);
+}
+"#;
 
 /// Layouts, samplers and the 1x1 white fallback texture, kept to create bind groups later.
 struct Binder {
@@ -333,6 +532,20 @@ fn fs(i: Out) -> Frag {
 }
 "#;
 
+/// `0x00RRGGBB` frame pixels as RGBA bytes; pixels equal to `transparent` get alpha 0.
+fn frame_rgba(pixels: &[u32], transparent: Option<u32>) -> Vec<u8> {
+    pixels
+        .iter()
+        .flat_map(|&p| {
+            let a = if Some(p) == transparent { 0 } else { 255 };
+            [(p >> 16) as u8, (p >> 8) as u8, p as u8, a]
+        })
+        .collect()
+}
+
+/// HUD pixels with this value are transparent in [`GpuRenderer::present`].
+pub const HUD_CLEAR: u32 = 0xff00_0000;
+
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -350,6 +563,44 @@ impl GpuRenderer {
         .ok()?;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+        Some(Self::build(device, queue, scene))
+    }
+
+    /// A renderer and swapchain for `frontend`'s window. `None` when no adapter, device or
+    /// surface is available.
+    pub fn for_window(
+        scene: &LdbScene,
+        frontend: &crate::frontend::WinitFrontend,
+    ) -> Option<(Self, GpuSurface)> {
+        let display = frontend.display_handle()?;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
+            Box::new(display),
+        ));
+        let surface = instance.create_surface(frontend.window.clone()).ok()?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+            apply_limit_buckets: false,
+        }))
+        .ok()?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+        let caps = surface.get_capabilities(&adapter);
+        // Prefer a non-sRGB format: the frame's values are already display values.
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| !f.is_srgb())
+            .or_else(|| caps.formats.first().copied())?;
+        let renderer = Self::build(device, queue, scene);
+        let (w, h) = frontend.size();
+        let surface = GpuSurface::new(&renderer, surface, format, w, h);
+        Some((renderer, surface))
+    }
+
+    fn build(device: wgpu::Device, queue: wgpu::Queue, scene: &LdbScene) -> Self {
         let (w, h) = (FRAME_W as u32, FRAME_H as u32);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -581,7 +832,55 @@ impl GpuRenderer {
         };
         let color_out = readback();
         let depth_out = readback();
-        Some(Self {
+
+        let full_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("fullscreen"),
+            source: wgpu::ShaderSource::Wgsl(FULLSCREEN_SHADER.into()),
+        });
+        let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("image"),
+            entries: &[texture_entry(0), sampler_entry(1)],
+        });
+        let full_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fullscreen"),
+            bind_group_layouts: &[Some(&image_layout)],
+            immediate_size: 0,
+        });
+        let fullscreen = |blend| {
+            fullscreen_pipeline(
+                &device,
+                &full_layout,
+                &full_shader,
+                "fs_image",
+                COLOR_FORMAT,
+                blend,
+                true,
+            )
+        };
+        let background = fullscreen(None);
+        let overlay_pipe = fullscreen(Some(wgpu::BlendState::ALPHA_BLENDING));
+        let frame_image = || {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let group = image_group(&device, &image_layout, &view, &binder.tex_sampler);
+            (texture, group)
+        };
+        let background_image = frame_image();
+        let overlay_image = frame_image();
+        Self {
             device,
             queue,
             opaque,
@@ -596,7 +895,14 @@ impl GpuRenderer {
             depth,
             color_out,
             depth_out,
-        })
+            full_shader,
+            full_layout,
+            image_layout,
+            background,
+            hud: overlay_pipe,
+            background_image,
+            overlay_image,
+        }
     }
 
     /// Draw the static batches and write covered pixels into `fb` and their view depth into `zb`.
@@ -609,40 +915,8 @@ impl GpuRenderer {
         fb: &mut [u32],
         zb: &mut [f32],
     ) {
-        let character_draws = self.prepare_characters(characters);
         let (w, h) = (FRAME_W as u32, FRAME_H as u32);
-        let fov_scale = (FRAME_H as f32) * 0.85;
-        let v4 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
-        let camera = CameraUniform {
-            pos: v4(pos),
-            right: v4(right),
-            up: v4(up),
-            fwd: v4(fwd),
-            params: [
-                fov_scale / (w as f32 * 0.5),
-                fov_scale / (h as f32 * 0.5),
-                if use_lightmaps { 1.0 } else { 0.0 },
-                FAR_Z,
-            ],
-            params2: [NEAR_Z, 0.0, 0.0, 0.0],
-        };
-        self.queue
-            .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&camera));
-        let rooms: BTreeMap<i32, [f32; 3]> =
-            scene.rooms.iter().map(|r| (r.id, r.world_origin)).collect();
-        let visible: Vec<bool> = scene
-            .dynamic_meshes
-            .iter()
-            .map(dynamic_mesh_drawn)
-            .collect();
-        for (idx, drawn) in visible.iter().enumerate() {
-            if let (true, Some((buffer, _))) = (*drawn, self.models.get(idx + 1)) {
-                let (mat, origin) = dynamic_world(scene, idx, &rooms);
-                let uniform = ModelUniform::new(mat, origin, false);
-                self.queue
-                    .write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
-            }
-        }
+        let frame = self.prepare_scene(scene, (pos, right, up, fwd), use_lightmaps, characters);
         let color_view = self.color.create_view(&Default::default());
         let depth_view = self.depth.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -670,39 +944,7 @@ impl GpuRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &self.camera_group, &[]);
-            // Opaque first, then the polygons that test but do not write depth (as render_poly_batch).
-            for writes_z in [true, false] {
-                pass.set_pipeline(if writes_z {
-                    &self.opaque
-                } else {
-                    &self.overlay
-                });
-                for draw in self.draws.iter().filter(|d| d.writes_z == writes_z) {
-                    let model = match draw.mesh {
-                        Some(i) if !visible.get(i).copied().unwrap_or(false) => continue,
-                        Some(i) => i + 1,
-                        None => 0,
-                    };
-                    pass.set_bind_group(1, &draw.group, &[]);
-                    pass.set_bind_group(2, &self.models[model].1, &[]);
-                    pass.set_vertex_buffer(0, draw.vertices.slice(..));
-                    pass.draw(0..draw.count, 0..1);
-                }
-                // Characters write depth like the software path (rasterize_tri with write_z).
-                if let (true, Some((buffer, _))) = (writes_z, self.characters.vertices.as_ref()) {
-                    pass.set_vertex_buffer(0, buffer.slice(..));
-                    for d in &character_draws {
-                        pass.set_bind_group(
-                            1,
-                            &self.characters.materials[&d.mesh][d.material],
-                            &[],
-                        );
-                        pass.set_bind_group(2, &self.characters.shades[d.shade].1 .1, &[]);
-                        pass.draw(d.start..d.start + d.count, 0..1);
-                    }
-                }
-            }
+            self.draw_scene(&mut pass, &frame);
         }
         let layout = wgpu::TexelCopyBufferLayout {
             offset: 0,
@@ -776,7 +1018,203 @@ struct CharacterDraw {
     count: u32,
 }
 
+/// Per-frame scene state: which dynamic meshes draw, and the character draws.
+struct SceneFrame {
+    visible: Vec<bool>,
+    characters: Vec<CharacterDraw>,
+}
+
 impl GpuRenderer {
+    /// Camera, dynamic mesh transforms and character triangles for this frame.
+    fn prepare_scene(
+        &mut self,
+        scene: &LdbScene,
+        (pos, right, up, fwd): GpuView,
+        use_lightmaps: bool,
+        characters: &[GpuCharacter],
+    ) -> SceneFrame {
+        let character_draws = self.prepare_characters(characters);
+        let (w, h) = (FRAME_W as f32, FRAME_H as f32);
+        let fov_scale = h * 0.85;
+        let v4 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
+        let camera = CameraUniform {
+            pos: v4(pos),
+            right: v4(right),
+            up: v4(up),
+            fwd: v4(fwd),
+            params: [
+                fov_scale / (w * 0.5),
+                fov_scale / (h * 0.5),
+                if use_lightmaps { 1.0 } else { 0.0 },
+                FAR_Z,
+            ],
+            params2: [NEAR_Z, 0.0, 0.0, 0.0],
+        };
+        self.queue
+            .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&camera));
+        let rooms: BTreeMap<i32, [f32; 3]> =
+            scene.rooms.iter().map(|r| (r.id, r.world_origin)).collect();
+        let visible: Vec<bool> = scene
+            .dynamic_meshes
+            .iter()
+            .map(dynamic_mesh_drawn)
+            .collect();
+        for (idx, drawn) in visible.iter().enumerate() {
+            if let (true, Some((buffer, _))) = (*drawn, self.models.get(idx + 1)) {
+                let (mat, origin) = dynamic_world(scene, idx, &rooms);
+                let uniform = ModelUniform::new(mat, origin, false);
+                self.queue
+                    .write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
+            }
+        }
+        SceneFrame {
+            visible,
+            characters: character_draws,
+        }
+    }
+
+    /// Opaque geometry and characters, then the polygons that test but do not write depth
+    /// (the order of render_poly_batch).
+    fn draw_scene(&self, pass: &mut wgpu::RenderPass, frame: &SceneFrame) {
+        pass.set_bind_group(0, &self.camera_group, &[]);
+        for writes_z in [true, false] {
+            pass.set_pipeline(if writes_z {
+                &self.opaque
+            } else {
+                &self.overlay
+            });
+            for draw in self.draws.iter().filter(|d| d.writes_z == writes_z) {
+                let model = match draw.mesh {
+                    Some(i) if !frame.visible.get(i).copied().unwrap_or(false) => continue,
+                    Some(i) => i + 1,
+                    None => 0,
+                };
+                pass.set_bind_group(1, &draw.group, &[]);
+                pass.set_bind_group(2, &self.models[model].1, &[]);
+                pass.set_vertex_buffer(0, draw.vertices.slice(..));
+                pass.draw(0..draw.count, 0..1);
+            }
+            // Characters write depth like the software path (rasterize_tri with write_z).
+            if let (true, Some((buffer, _))) = (writes_z, self.characters.vertices.as_ref()) {
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                for d in &frame.characters {
+                    pass.set_bind_group(1, &self.characters.materials[&d.mesh][d.material], &[]);
+                    pass.set_bind_group(2, &self.characters.shades[d.shade].1 .1, &[]);
+                    pass.draw(d.start..d.start + d.count, 0..1);
+                }
+            }
+        }
+    }
+
+    /// One window frame: `background` (the CPU sky) behind, the 3D scene when `view` is given,
+    /// `hud` on top (pixels equal to [`HUD_CLEAR`] are transparent), then a blit to the
+    /// swapchain at window size.
+    #[allow(clippy::too_many_arguments)]
+    pub fn present(
+        &mut self,
+        surface: &mut GpuSurface,
+        window_size: (u32, u32),
+        scene: &LdbScene,
+        view: Option<GpuView>,
+        use_lightmaps: bool,
+        characters: &[GpuCharacter],
+        background: &[u32],
+        hud: &[u32],
+    ) {
+        surface.resize(self, window_size.0, window_size.1);
+        let frame = view.map(|v| self.prepare_scene(scene, v, use_lightmaps, characters));
+        let size = wgpu::Extent3d {
+            width: FRAME_W as u32,
+            height: FRAME_H as u32,
+            depth_or_array_layers: 1,
+        };
+        let layout = wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * FRAME_W as u32),
+            rows_per_image: Some(FRAME_H as u32),
+        };
+        for (image, pixels, transparent) in [
+            (&self.background_image.0, background, None),
+            (&self.overlay_image.0, hud, Some(HUD_CLEAR)),
+        ] {
+            self.queue.write_texture(
+                image.as_image_copy(),
+                &frame_rgba(pixels, transparent),
+                layout,
+                size,
+            );
+        }
+        let output = match surface.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            _ => {
+                surface.surface.configure(&self.device, &surface.config);
+                return;
+            }
+        };
+        let color_view = surface.color.create_view(&Default::default());
+        let depth_view = surface.depth.create_view(&Default::default());
+        let out_view = output.texture.create_view(&Default::default());
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("frame"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.background);
+            pass.set_bind_group(0, &self.background_image.1, &[]);
+            pass.draw(0..3, 0..1);
+            if let Some(frame) = &frame {
+                self.draw_scene(&mut pass, frame);
+            }
+            pass.set_pipeline(&self.hud);
+            pass.set_bind_group(0, &self.overlay_image.1, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blit"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &out_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&surface.blit);
+            pass.set_bind_group(0, &surface.color_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(output);
+    }
+
     /// Upload this frame's character triangles, creating texture groups and shade models on
     /// first use. Returns the draws in buffer order.
     fn prepare_characters(&mut self, characters: &[GpuCharacter]) -> Vec<CharacterDraw> {
@@ -1170,6 +1608,17 @@ mod tests {
                 sw_fb[center]
             );
         }
+    }
+
+    #[test]
+    fn hud_clear_pixels_become_transparent_and_drawn_ones_opaque() {
+        let hud = [HUD_CLEAR, 0x00ff_dd66, 0x0000_0000];
+        assert_eq!(
+            frame_rgba(&hud, Some(HUD_CLEAR)),
+            vec![0, 0, 0, 0, 0xff, 0xdd, 0x66, 0xff, 0, 0, 0, 0xff]
+        );
+        // The background keeps every pixel opaque.
+        assert!(frame_rgba(&hud, None).chunks(4).all(|c| c[3] == 0xff));
     }
 
     #[test]

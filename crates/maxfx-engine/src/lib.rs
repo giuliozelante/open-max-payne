@@ -1,5 +1,6 @@
 //! Native Max Payne 1 engine — level decoder, 3D walkthrough renderer, and KF2/SKD inspector.
 
+pub mod frontend;
 pub mod gpu;
 pub mod kf2;
 pub mod menu_ui;
