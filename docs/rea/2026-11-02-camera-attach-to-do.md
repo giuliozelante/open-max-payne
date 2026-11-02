@@ -26,6 +26,10 @@ takes the eye from the DO's world pose. Forward is the DO's z axis and up its y 
 startup flyover (`camera_flyover`). Right is up × forward, matching the player camera. The player keeps moving
 underneath; retail disables controls with a separate `GM_SetPlayerControls`.
 
+`GM_SetPlayerControls(bool)` (61 uses) clears or sets `LdbScene::player_controls`. While it is off,
+`render3d` ignores movement, jump, interact and fire; look keys stay live. HYPOTHESIS from the name and the
+cutscene pairing only; the `MaxPayne_GameMode` handler has not been read.
+
 ## Open
 
 - The view pose has not been checked against a retail frame.
