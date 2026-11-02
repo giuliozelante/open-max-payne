@@ -249,12 +249,51 @@ faces, `0x1000b` one byte per face (smoothing group? UNKNOWN), `0x1000c` materia
 built at load time. The method is UNKNOWN.
 
 **Engine consequence (STRONGLY SUPPORTED):** a lit object pixel is `texture × clamp(Σ point/spot lights ·
-max(N·L,0) · atten)`, per vertex then Gouraud, with black ambient and zero emissive. Light selection: see above. Still UNKNOWN: whether static lights are enabled for lightmapped level geometry. Next
-capture: log `LightEnable` / `SetLight` (device vt `+0xb8` / `+0xb0`) per draw.
+max(N·L,0) · atten)`, per vertex then Gouraud, with black ambient and zero emissive. Light selection: see above.
+Lightmapped level geometry gets no lights; see next section.
+
+## Lights per draw: level geometry is unlit by point lights (2026-11-02)
+
+**Driver code (VERIFIED, static).** For a material with lighting enabled (`[vt+0x40]`), the pre-draw path
+(`0x100165c1`…`0x100166ba`) sets `D3DRS_LIGHTING` = 1 and `D3DRS_AMBIENT`, then computes
+`n = min(light list size, getMaximumLightsPerObject(), device cap [+0x110]+0x20c)`. The light list is the
+8-byte `(key, index)` vector at `+0x24`/`+0x28` of the object's device object. It then calls
+`LightEnable(index, TRUE)` (device vt `+0xb8`) for the first `n`. The post-draw method `0x10016a60` recomputes
+`n` the same way and disables those lights (`0x10016ad1`…`0x10016af9`). So the enabled set per draw is exactly
+the object's own light list. Lights do not leak from one draw to the next. The other `+0xb8` calls in the driver are on
+non-device vtables.
+
+**Golden data (VERIFIED, winedbg, house save loaded with `-skipstartup <save>`).** Breakpoint on
+`driver+0x16ad1` (driver at `0x1c00000`): logged `n` (`edi`), the device object (`ebx`), and the cached stage
+states (stage 0 / 1 `COLOROP`, stage 0 `TEXCOORDINDEX`) for 6000 lit draws:
+
+| Draws | Stage 0 | Stage 1 | Lights `n` | Device objects |
+|------:|---------|---------|-----------:|---------------:|
+| 5687 | `ADD` (7), uv1 | `MODULATE` (4) | **0** | level geometry (two objects take 2557 and 1386 of these draws) |
+| 250 | `MODULATE` (4), uv0 | disabled | 6 | one (`0x7163000`) |
+| 63 | `SELECTARG1` (2), uv0 | disabled | 0 | — |
+
+The lightmap template's `DIFFUSE` term is therefore **zero** in retail: level polygons are
+`texture × lightmap`. The only draws with lights are the single-stage object material, which is a character (Max). Its
+6 lights fit under the cap of 8.
+
+**Ruled out:** static point lights adding to lightmapped level polygons (in the house, every such draw had `n = 0`).
+Not checked: other levels and dynamic lights (muzzle flashes, `0x77cfb1`…). A dynamic light could still enter a
+level object's list.
+
+**Engine consequence:** none. `render3d::rasterize_tri` already draws lightmapped polygons as
+`lightmap_modulate(texture, lightmap)` with no vertex diffuse.
+
+**Capture recipe notes:** the minimum install reads `D:\DISK1\Levels` from `cd.ini` (`0x40ae60`) and only checks
+that the path exists. A directory `cd/DISK1/Levels -> <install>/Levels` with `dosdevices/d:` pointed at `cd`
+passes the check without the CD (restore the link afterwards). Launch directly with
+`wine winedbg --file C:\…\script.txt Z:\…\MaxPayne.exe -nodialog -skipstartup C:\…\save.mps`. Paths with spaces
+or under `/tmp/claude-…` (leading `-` path component) failed with "Couldn't start process" / "Path not found",
+and so did the `explorer /desktop` + `cmd` wrapper this time.
 
 ## Open (golden data needed)
 
 1. ~~Object ambient~~ (done above: white).
-2. Do static point lights also add to lightmapped level polygons? The `ADD(lightmap, DIFFUSE)` stage is now
-   VERIFIED, but which lights are enabled per draw is not (light collision lists,
-   `P_BaseObject::addLightCollision`). Capture `LightEnable` per draw.
+2. ~~Do static point lights also add to lightmapped level polygons?~~ No (see above, house only).
+3. Dynamic lights (`setFalloffRange` at `0x77cfb1`, `0x77d08e`, `0x77d5c8`): do they enter level-object light lists?
+   Capture `n` at `driver+0x16ad1` while firing a weapon.
