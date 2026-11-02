@@ -342,6 +342,10 @@ fn which(bin: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
+
+    /// Serializes tests that change process-wide `OPENMAXFX_*` variables.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn detects_italian_not_data() {
@@ -377,6 +381,7 @@ mod tests {
 
     #[test]
     fn play_backend_defaults_to_retail() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: test process; restore after.
         let prev = std::env::var_os("OPENMAXFX_PLAY");
         std::env::remove_var("OPENMAXFX_PLAY");
@@ -393,6 +398,7 @@ mod tests {
 
     #[test]
     fn native_engine_missing_errors() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev_play = std::env::var_os("OPENMAXFX_PLAY");
         let prev_eng = std::env::var_os("OPENMAXFX_ENGINE");
         std::env::set_var("OPENMAXFX_PLAY", "native");
