@@ -301,7 +301,22 @@ queued and dispatched on the next `step_dynamic_anims`, which stands in for the 
 
 - ~~Prove RTTI of `LocalCharacterInput+0x1b5` receiver~~ — moot: the DO tick caller is `0x6e1a00` via vt `+0x1c` (above).
 - ~~Wire Pause/Resume/Stop/Invert messages~~ — done above.
-- `DO_EnableCollisions` (`0x6f4300` → `0x6f43f0`), `EnableContinuousUpdate` (`0x6f4320`).
+- `DO_EnableCollisions(b)`: the bytes are read, the meaning is not (see below). `EnableContinuousUpdate` (`0x6f4320`) is unread.
+
+  VERIFIED, static: `0x6f4300` takes the bool (`0x74e5b0` = message `+0x30`) and `0x6f43f0` stores it at DO `+0x4ae`.
+  `0x6f4410` then rewrites three bytes from `+0x143` (base object), `+0x4ae` and `+0x4ad` (set at DO load, `0x6f2c9b`):
+
+  | `+0x143` | `+0x4ae` | `+0x4ad` | `+0x181` | `+0x182` | `+0x183` |
+  |:-:|:-:|:-:|:-:|:-:|:-:|
+  | 0 | – | – | 0 | ff | 0 |
+  | 1 | 1 | 1 | ff | 0 | ff |
+  | 1 | 0 | 1 | 0 | 0 | ff |
+  | 1 | 1 | 0 | ff | 0 | 0 |
+  | 1 | 0 | 0 | 0 | ff | 0 |
+
+  UNKNOWN: what `+0x181`/`+0x182`/`+0x183` gate. Writers at `0x6d8834`/`0x6d8850`/`0x6d896d` and a reader of `+0x183` at
+  `0x6d97bd` are the next leads. HYPOTHESIS, not used in code: one byte per collision class (characters, none,
+  projectiles). The engine leaves `DO_EnableCollisions` unhandled until this is read.
 - Lag semantics: the end/start lists go through `X_LaggedMessage` with the overshoot as delay (`0x6e2c00`). Exact
   delivery frame is UNKNOWN.
 - Curve tag `0x71`; runtime channel counts.
