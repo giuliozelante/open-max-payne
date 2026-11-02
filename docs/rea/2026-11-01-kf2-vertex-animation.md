@@ -165,8 +165,30 @@ entry was not hit in this sample, so it may be reached another way.
 STRONGLY SUPPORTED: KF2 bones are e2mfc scene nodes (`P_BaseObject` children of the object animation) whose local
 transform sits at `+0x2c`. The exe does not sample keyframes itself. It snapshots node matrices into a per-bone
 48-byte array (for skinning or blending). The keyframe interpolation that moves the nodes lives in e2mfc's
-controller code. Next: find which e2mfc export writes `P_BaseObject+0x2c` each frame (watchpoint on one bone's
-`+0x2c` under a launch-time capture). **Capture tooling:** attaching with winedbg crashes the game here; launch under winedbg and gate
+code that writes the node matrices. **Correction:** e2mfc exports no keyframe or controller symbols (1200
+exports checked), and the exe imports no rotation or matrix setter for `P_BaseObject`. So the keyframe sampler is
+in the exe and writes `+0x2c` directly. Next: a watchpoint on one bone's `+0x2c` under a launch-time capture.
+
+## Skin matrices in the VA apply (VERIFIED, static, `0x57c860`)
+
+The exe's call sites of `P_BaseObject::calculateObjectToWorldMatrix` (IAT `0x7ca4ac`) include `0x57c92d` and
+`0x57ca4b`, the two per-frame `getChild` callers in capture 2. The loop, per bone *i*:
+
+1. Copy 48 bytes from `this+0x121`[*i*] into the output entry `this+0x131`[*i*] (both vectors of 48-byte
+   `M_Matrix4x3`).
+2. Bone node = child *i* of the object animation (`0x57baa0`, then vslot `+0x64`). If bit 5 of `node+0xe0` is
+   clear, call `calculateObjectToWorldMatrix` on it.
+3. `out = out × node.objectToWorld`: 3×3 rows times `node+0x5c`, then translation `out.t × R + node+0x5c+0x24`.
+4. The same with the root: child 0 of a second animation (`0x57ba90`). After its own world update, the matrix at
+   `root+0x8c` (world-to-object) is applied.
+
+STRONGLY SUPPORTED: skin matrix *i* = `bind⁻¹ᵢ × boneWorldᵢ × rootWorld⁻¹` (row-vector order). Vertices therefore
+end up in the root's object space.
+
+**Engine comparison:** `kf2::skin_vertices` uses `poseᵢ × inv(bindᵢ)` with the bind taken from `Pose.kf2` at t = 0,
+composed in model space. That matches retail when the root sits at identity. Retail reads `bind⁻¹` from a stored
+array (`+0x121`), not from `Pose.kf2`. UNKNOWN: where `+0x121` is filled. It is reset in `0x57b890`, and the init
+chain `0x57ab60` → `0x57ad20` (→ `0x57b320`, `0x57b530`) is the next read. **Capture tooling:** attaching with winedbg crashes the game here; launch under winedbg and gate
 the breakpoints on a later event instead.
 
 ## Open
