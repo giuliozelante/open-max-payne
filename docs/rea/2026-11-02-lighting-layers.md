@@ -202,22 +202,37 @@ Only `P_PointLight` (`0x5f9ee7`) and `P_SpotLight` (`0x5f9c87`) are constructed.
 `P_Scene::setAmbientColor`. `P_VirtualLight::setMaximumLightsPerObject(8)` at `0x40deb5`. More
 `setFalloffRange` calls at `0x77cfb1`, `0x77d08e`, `0x77d5c8` (dynamic lights, not read yet).
 
-## Open: does lighting reach object pixels?
+## Lit stage programs (VERIFIED, golden data 2026-11-02)
 
-Driver stage combiner `0x10007c70`: for a **texture** layer (`layer & 0x78000 == 0x8000`) with blend `COPY` on
-stage 0 (`0x10008581`), both candidate stage setups use op 2 / 3 with the texture as the selected argument.
-That is HYPOTHESIS `SELECTARG(TEXTURE)`, which drops the vertex diffuse. The `MUL` branch uses op 4 `MODULATE` with `CURRENT`. The object
-builder adds no shading layer, only a `COPY` texture layer (golden data above). So either object materials are
-unlit at the pixel (texture only), or e2mfc / the driver inserts a diffuse term somewhere not found yet.
-`enableLighting` (`0x10025020`) sets `+0x28 = 1` and recomputes vertex-format bits (`0x10025ac0`), with no layer change seen.
+**Capture:** winedbg launch (`-skipstartup`), driver loaded at `0x1c00000` under the debugger (it moved to
+`0x1b00000` without one, so rebase per run with `info share`). Gate: first `SetMaterial` (`+0x179c5`). The
+menu never reaches it, so the menu draws nothing lit. Then each request to the cached `SetTextureStageState`
+wrapper `+0x2f3b0` (args `stage, type, value` at `[esp+4]`) was logged with the current `D3DMATERIAL8` diffuse.
+The driver caches stage states at `+0x84b64 + (stage·32 + type)·12` (value, valid flag). Save loaded in
+the house, Max on screen; 4000 requests, 72 lit materials. (`D3DTA`: 0 diffuse, 1 current, 2 texture; `D3DTOP`:
+1 disable, 2 selectarg1, 4 modulate, 7 add.)
 
-**Golden data to settle it:** in a loaded level, break on the driver's `SetTextureStageState` calls during a
-character draw and log stage 0 `COLOROP` / `COLORARG1` / `COLORARG2`. Until then the engine keeps its
-directional `shade` for non-lightmapped polygons. Don't swap in point-light lighting before this is settled.
+| Count | Lit | Stage 0 | Stage 1 | Result |
+|------:|-----|---------|---------|--------|
+| 69 | yes | `ADD(TEXTURE uv1, DIFFUSE)` | `MODULATE(TEXTURE uv0, CURRENT)` | texture × (lightmap + vertex diffuse) |
+| 2 | yes | `MODULATE(TEXTURE uv0, DIFFUSE)` | disabled | texture × vertex diffuse |
+| 2 | no | `SELECTARG1(TEXTURE uv0)` | `MODULATE(TEXTURE uv1, CURRENT)` | texture × lightmap |
+
+- The 69 match the `0x8b0718` level template, so the template is confirmed.
+- A lit single-texture `COPY` layer becomes `MODULATE(TEXTURE, DIFFUSE)`. So the stage-0 `SELECTARG` HYPOTHESIS is
+  **ruled out**: lighting does reach object pixels. Mapping the 2 single-stage draws to object/character materials
+  is STRONGLY SUPPORTED (single texture, lit, matches the `0x554d30` layer list), not tied to a specific mesh.
+- All 72 lit materials had diffuse `(255, 255, 255)`. `setDiffuseColor` from the KFS colour `c` only runs in the
+  `0x556000`/`0x556120` helpers. When those run is not mapped, so the default diffuse 255 is what reached D3D here.
+
+**Engine consequence (STRONGLY SUPPORTED):** a lit object pixel is `texture × clamp(Σ point/spot lights ·
+max(N·L,0) · atten)`, per vertex then Gouraud, with black ambient and zero emissive. Still UNKNOWN: which ≤ 8 lights
+`P_VirtualLight` picks per object, and whether static lights are enabled for lightmapped level geometry. Next
+capture: log `LightEnable` / `SetLight` (device vt `+0xb8` / `+0xb0`) per draw.
 
 ## Open (golden data needed)
 
 1. ~~Object ambient~~ (done above: white).
-2. Do static point lights also add to lightmapped level polygons (the template has `DIFFUSE_ADD`), or are
-   they excluded (light collision lists, `P_BaseObject::addLightCollision`)? Compare a wall near a
-   lamp: lightmap only vs lightmap + point light.
+2. Do static point lights also add to lightmapped level polygons? The `ADD(lightmap, DIFFUSE)` stage is now
+   VERIFIED, but which lights are enabled per draw is not (light collision lists,
+   `P_BaseObject::addLightCollision`). Capture `LightEnable` per draw.
