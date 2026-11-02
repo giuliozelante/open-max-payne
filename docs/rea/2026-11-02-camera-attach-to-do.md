@@ -36,9 +36,9 @@ underneath; retail disables controls with a separate `GM_SetPlayerControls`.
 `render3d` ignores movement, jump, interact and fire; look keys stay live. HYPOTHESIS from the name and the
 cutscene pairing only; the `MaxPayne_GameMode` handler has not been read.
 
-`MPHM_FadeToColor(from, to, seconds)` (47 uses on the HUD mode) ramps a full-screen colour linearly; the
+`MPHM_FadeToColor(from, to, seconds)` (HUD mode) ramps a full-screen colour linearly; the
 colours are `0xRRGGBBAA` (`0x0` → `0x000000ff` = fade to black). The engine holds an opaque target and drops
-the fade once a fade to alpha 0 ends. HYPOTHESIS from the argument patterns (all 160 retail calls fit); the
+the fade once a fade to alpha 0 ends. HYPOTHESIS from the argument patterns (all 189 occurrences in the retail `.ldb` files, FSM and track lists, fit); the
 handler has not been read. `MPHM_FlashToColor` (4 args, 101 uses) is not handled.
 
 ## Open
