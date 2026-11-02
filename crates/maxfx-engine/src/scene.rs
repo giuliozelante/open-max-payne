@@ -1325,6 +1325,21 @@ fn skip_hook_map(
     Some(out)
 }
 
+/// Embedded texture for `path` by full path, file name, then stem.
+fn lookup_texture(tex_lookup: &BTreeMap<String, usize>, path: &str) -> Option<usize> {
+    let mut clean = path.to_ascii_lowercase();
+    if let Some(stripped) = clean.strip_suffix(" new") {
+        clean = stripped.trim().to_string();
+    }
+    let base = clean.rsplit(['\\', '/']).next().unwrap_or(&clean);
+    let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
+    tex_lookup
+        .get(&clean)
+        .or_else(|| tex_lookup.get(base))
+        .or_else(|| tex_lookup.get(stem))
+        .copied()
+}
+
 /// Parse an entire `.ldb` byte buffer into a walkable [`LdbScene`].
 pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
     let import_off = super::ras_ldb_after_geometry(data)?;
@@ -1396,17 +1411,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
             } else {
                 -1
             };
-            let mut clean = texture_path.to_ascii_lowercase();
-            if let Some(stripped) = clean.strip_suffix(" new") {
-                clean = stripped.trim().to_string();
-            }
-            let base = clean.rsplit(['\\', '/']).next().unwrap_or(&clean);
-            let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
-            let texture_index = tex_lookup
-                .get(&clean)
-                .or_else(|| tex_lookup.get(base))
-                .or_else(|| tex_lookup.get(stem))
-                .copied();
+            let texture_index = lookup_texture(&tex_lookup, &texture_path);
             materials.insert(
                 id,
                 SceneMaterial {
@@ -1421,7 +1426,25 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
     }
 
     // 3. Material categories
-    let (_, _, after_cats) = super::parse_ras_ldb_import_material_categories_at(data, i)?;
+    let (_, categories, after_cats) = super::parse_ras_ldb_import_material_categories_at(data, i)?;
+    // 0x5dc800: a material record's texture file (+0x1c) wins over its name.
+    for category in &categories {
+        let records = std::iter::once((&category.texture, &category.path))
+            .chain(category.members.iter().map(|m| (&m.name, &m.path)));
+        for (name, file) in records {
+            if file.is_empty() {
+                continue;
+            }
+            let Some(index) = lookup_texture(&tex_lookup, file) else {
+                continue;
+            };
+            for material in materials.values_mut() {
+                if material.texture_path.eq_ignore_ascii_case(name) {
+                    material.texture_index = Some(index);
+                }
+            }
+        }
+    }
     i = after_cats;
 
     // 4. Lightmaps (`256×256` RGB planes)
@@ -2487,6 +2510,30 @@ mod tests {
         assert_eq!(door.posed_local().1, [1.0, 0.0, 2.0]);
         door.toggled = true;
         assert_eq!(door.posed_local().1, [1.2, 0.0, 2.0]);
+    }
+
+    #[test]
+    fn house_materials_use_their_record_texture_path() {
+        // 0x5dc800: a material record is (name +0xc, texture file +0x1c, bool, bool).
+        let path =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !path.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(path).unwrap()).expect("house");
+        let tex = |id: i32| {
+            let index = scene.materials[&id].texture_index.expect("textured");
+            scene.textures[index].path.clone()
+        };
+        assert!(tex(16).ends_with("MaxHouseWall01_512x512.jpg"));
+        assert!(tex(2).ends_with("Concrete01_128x128.jpg"));
+        let untextured: Vec<_> = scene
+            .materials
+            .values()
+            .filter(|m| m.texture_index.is_none())
+            .map(|m| m.texture_path.as_str())
+            .collect();
+        assert!(untextured.is_empty(), "{untextured:?}");
     }
 
     #[test]
