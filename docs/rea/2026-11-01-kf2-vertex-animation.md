@@ -117,10 +117,38 @@ Static rung:
 - `BoneMatrices@P_VirtualObject` at `0x862678`.
 - Debug format strings `VertexAnimation %s…` — no imm32 code refs.
 
+## `KF_ObjectAnimation` methods under load (2026-11-02, winedbg)
+
+`KF_ObjectAnimation` (vtable `0x7d0e94`) derives from e2mfc `P_BaseObject`; slots 2–8, 12–15, 17, 19–22 are import
+thunks (`addTo`, `setPosition`, `isInsideViewVolume`, `executeVisible`, …).
+
+**VERIFIED, static:** its `executeAlways` (slot 18, `0x551020`) does no sampling. If `+0x17e` or `+0x17d` is set,
+it calls `isInsideViewVolume` (slot `+0x30`) and sets or clears bit `0x10` of `+0xe0`, then returns false.
+
+**Capture.** House save, breakpoints on slot 16 and slots 23–39 (18 methods), 4000 stops logging `$eip` and the
+return address:
+
+| Method | Slot | Hits | What it is (static) | Callers |
+|--------|-----:|-----:|---------------------|---------|
+| `0x54fdf0` | 28 | 1700 | `hasAnimation(id)`: `std::map` lookup at `+0x169`, returns found ≠ end | slots 29/31, `0x550de9`, LODs `0x57fdf3` |
+| `0x54e270` | 31 | 821 | getter after the lookup | `0x54e2b1`, `0x54fe61`, LODs `0x57f4bf` |
+| `0x54e240` | 29 | 626 | getter | `0x54e2e0`, LODs `0x57f43f` |
+| `0x54e2a0` | 30 | 432 | getter | LODs `0x57f47f` |
+| `0x54dc00` | 24 | 422 | child count of the `+0x119` vector | `0x550e2e`, `0x550ea1` |
+
+The `0x550cxx`–`0x550exx` caller is a load routine (RTTI cast from `0x884680`, stream reads through
+`0x7caa9c`/`0x7ca9a4`), entered 211 times, once per animation object. The rest are lookups driven by
+`KF_ObjectAnimationLODs` (`0x57f4xx`).
+
+**Ruled out:** slots 16 and 23–39 as the per-frame bone sampler; none of them interpolates.
+Next candidates: the non-thunk slots 0–1 and 9–11 (`0x54c2e0`, `0x54bb80`, `0x551070`, `0x551090`, `0x5510b0`;
+`0x551070` returns the float `+0x17f` when `+0x17d` is set), and e2mfc's keyframe controller behind the
+`+0x169` map entries.
+
 ## Open
 
-- Dynamic: who enters `0x57cb70`.
+- ~~Dynamic: who enters `0x57cb70`.~~ Answered above (e2mfc `executeHierarchy`).
 - Exact type behind `+0x111` list (cast source is `P_BaseObject`).
 - What `+0x119` gate means when non-null (LOD side vs flag).
-- `KF_ObjectKeyframeAnimationCallback` bone sample path.
+- `KF_ObjectKeyframeAnimationCallback` bone sample path: slots 16/23–39 ruled out (capture above).
 - Character / `SKD` load → this VA tree.
