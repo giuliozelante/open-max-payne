@@ -268,40 +268,34 @@ impl SceneDynamicMesh {
             .map(|anim| anim.scripts.clone())
     }
 
-    /// Rest pose, the active `DO_Animate` track, or the toggled opening pose.
+    /// World pose ignoring the parent's motion: the track-local pose `L`
+    /// carried into the rest frame, `L · L0⁻¹ · W0` (`0x6e1a00`). At rest this is `W0`.
     pub fn posed_local(&self) -> ([f32; 9], [f32; 3]) {
+        let rest = (self.local_start_mat, self.local_start_pos);
+        let world = (self.world_mat, self.world_pos);
+        compose_pose(compose_pose(self.track_local(), invert_pose(rest)), world)
+    }
+
+    /// `L`: the active `DO_Animate` track, the toggled opening pose, or the rest pose.
+    fn track_local(&self) -> ([f32; 9], [f32; 3]) {
         if let Some(name) = &self.active_track {
             if let Some(anim) = self
                 .anims
                 .iter()
                 .find(|anim| anim.name.eq_ignore_ascii_case(name))
             {
-                return pose_on_track(self, anim);
+                return pose_on_track(self.track_time, anim);
             }
         }
-        if !self.toggled {
-            return (self.world_mat, self.world_pos);
-        }
-        let Some(anim) = self.opening_anim() else {
-            return (self.world_mat, self.world_pos);
-        };
-        if self.world_pos == self.local_start_pos {
-            (anim.end_mat, anim.end_pos)
-        } else {
-            (
-                self.world_mat,
-                [
-                    self.world_pos[0] + (anim.end_pos[0] - anim.start_pos[0]),
-                    self.world_pos[1] + (anim.end_pos[1] - anim.start_pos[1]),
-                    self.world_pos[2] + (anim.end_pos[2] - anim.start_pos[2]),
-                ],
-            )
+        match self.opening_anim() {
+            Some(anim) if self.toggled => (anim.end_mat, anim.end_pos),
+            _ => (self.local_start_mat, self.local_start_pos),
         }
     }
 }
 
-fn pose_on_track(mesh: &SceneDynamicMesh, anim: &SceneDynamicAnim) -> ([f32; 9], [f32; 3]) {
-    let time = mesh.track_time.min(anim.duration.max(0.0));
+fn pose_on_track(track_time: f32, anim: &SceneDynamicAnim) -> ([f32; 9], [f32; 3]) {
+    let time = track_time.min(anim.duration.max(0.0));
     let (w, t) = track_weights(
         &anim.curves,
         anim.start_pos,
@@ -309,34 +303,61 @@ fn pose_on_track(mesh: &SceneDynamicMesh, anim: &SceneDynamicAnim) -> ([f32; 9],
         anim.duration,
         time,
     );
-    let local = [
+    let pos = [
         anim.start_pos[0] + (anim.end_pos[0] - anim.start_pos[0]) * w,
         anim.start_pos[1] + (anim.end_pos[1] - anim.start_pos[1]) * w,
         anim.start_pos[2] + (anim.end_pos[2] - anim.start_pos[2]) * w,
     ];
-    if mesh.world_pos == mesh.local_start_pos {
-        let mat = if time <= 0.0 {
-            anim.start_mat
-        } else if time >= anim.duration {
-            anim.end_mat
-        } else {
-            crate::kf2::quat_to_mat(crate::kf2::quat_slerp(
-                crate::kf2::mat_to_quat(anim.start_mat),
-                crate::kf2::mat_to_quat(anim.end_mat),
-                t,
-            ))
-        };
-        (mat, local)
+    let mat = if time <= 0.0 {
+        anim.start_mat
+    } else if time >= anim.duration {
+        anim.end_mat
     } else {
-        (
-            mesh.world_mat,
-            [
-                mesh.world_pos[0] + (local[0] - anim.start_pos[0]),
-                mesh.world_pos[1] + (local[1] - anim.start_pos[1]),
-                mesh.world_pos[2] + (local[2] - anim.start_pos[2]),
-            ],
-        )
+        crate::kf2::quat_to_mat(crate::kf2::quat_slerp(
+            crate::kf2::mat_to_quat(anim.start_mat),
+            crate::kf2::mat_to_quat(anim.end_mat),
+            t,
+        ))
+    };
+    (mat, pos)
+}
+
+/// Apply `first`, then `then` (retail row-vector `first · then`).
+fn compose_pose(first: ([f32; 9], [f32; 3]), then: ([f32; 9], [f32; 3])) -> ([f32; 9], [f32; 3]) {
+    let mut mat = [0.0f32; 9];
+    for c in 0..3 {
+        let col = xform_point(
+            then.0,
+            [0.0; 3],
+            [first.0[c * 3], first.0[c * 3 + 1], first.0[c * 3 + 2]],
+        );
+        mat[c * 3..c * 3 + 3].copy_from_slice(&col);
     }
+    (mat, xform_point(then.0, then.1, first.1))
+}
+
+fn invert_pose((m, p): ([f32; 9], [f32; 3])) -> ([f32; 9], [f32; 3]) {
+    let det = m[0] * (m[4] * m[8] - m[7] * m[5]) - m[3] * (m[1] * m[8] - m[7] * m[2])
+        + m[6] * (m[1] * m[5] - m[4] * m[2]);
+    if det.abs() < 1.0e-12 {
+        return (
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [-p[0], -p[1], -p[2]],
+        );
+    }
+    let inv = [
+        (m[4] * m[8] - m[7] * m[5]) / det,
+        (m[7] * m[2] - m[1] * m[8]) / det,
+        (m[1] * m[5] - m[4] * m[2]) / det,
+        (m[6] * m[5] - m[3] * m[8]) / det,
+        (m[0] * m[8] - m[6] * m[2]) / det,
+        (m[3] * m[2] - m[0] * m[5]) / det,
+        (m[3] * m[7] - m[6] * m[4]) / det,
+        (m[6] * m[1] - m[0] * m[7]) / det,
+        (m[0] * m[4] - m[3] * m[1]) / det,
+    ];
+    let t = xform_point(inv, [0.0; 3], p);
+    (inv, [-t[0], -t[1], -t[2]])
 }
 
 /// Retail sampler `0x5ff100`: translation lerp weight is the distance curve
@@ -555,6 +576,22 @@ impl<'a> Message<'a> {
 }
 
 impl LdbScene {
+    /// World pose of dynamic mesh `index`, following its parent's motion:
+    /// `posed_local · W0(parent)⁻¹ · world(parent)` (`0x6e1a00`, parent `[+0x189]`).
+    /// Room origin is not added.
+    pub fn dynamic_world_pose(&self, index: usize) -> ([f32; 9], [f32; 3]) {
+        let mesh = &self.dynamic_meshes[index];
+        let own = mesh.posed_local();
+        let Some(pi) = parent_name(&mesh.name)
+            .and_then(|p| self.dynamic_meshes.iter().position(|m| m.name == p))
+        else {
+            return own;
+        };
+        let parent = &self.dynamic_meshes[pi];
+        let rest = invert_pose((parent.world_mat, parent.world_pos));
+        compose_pose(compose_pose(own, rest), self.dynamic_world_pose(pi))
+    }
+
     /// Match the receiver as stored, then the same path with `.DO` appended.
     pub fn resolve_mesh_mut<'a>(
         &'a mut self,
@@ -2450,6 +2487,56 @@ mod tests {
         assert_eq!(door.posed_local().1, [1.0, 0.0, 2.0]);
         door.toggled = true;
         assert_eq!(door.posed_local().1, [1.2, 0.0, 2.0]);
+    }
+
+    #[test]
+    fn child_mesh_turns_with_its_animating_parent() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let mut parent = door_mesh(vec![track("open", [0.0; 3])]);
+        parent.name = "::room::hinge.DO".into();
+        parent.world_pos = [0.0; 3];
+        let mut child = door_mesh(Vec::new());
+        child.name = "::room::hinge::panel.DO".into();
+        child.local_start_pos = [1.0, 0.0, 0.0];
+        child.world_pos = [1.0, 0.0, 0.0];
+        scene.dynamic_meshes.push(parent);
+        scene.dynamic_meshes.push(child);
+        scene.dynamic_meshes[0].play_track("open");
+        scene.dynamic_meshes[0].track_time = 1.3;
+        let (mat, pos) = scene.dynamic_world_pose(1);
+        // Parent end pose maps x to -z, so the panel swings from +x to -z.
+        assert_eq!(pos, [0.0, 0.0, -1.0]);
+        assert_eq!(&mat[0..3], &[0.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn house_child_rest_world_is_local_then_parent_world() {
+        // 0x6e1a00: X = L · X(parent); with R191 = B = I the rest world is L0 · W0(parent).
+        let path =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !path.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(path).unwrap()).expect("house");
+        let mut children = 0;
+        for mesh in &scene.dynamic_meshes {
+            let Some(parent) = parent_name(&mesh.name)
+                .and_then(|p| scene.dynamic_meshes.iter().find(|m| m.name == p))
+            else {
+                continue;
+            };
+            children += 1;
+            let pos = xform_point(parent.world_mat, parent.world_pos, mesh.local_start_pos);
+            for k in 0..3 {
+                assert!(
+                    (pos[k] - mesh.world_pos[k]).abs() < 1.0e-3,
+                    "{}: {pos:?} vs {:?}",
+                    mesh.name,
+                    mesh.world_pos
+                );
+            }
+        }
+        assert!(children > 0);
     }
 
     #[test]

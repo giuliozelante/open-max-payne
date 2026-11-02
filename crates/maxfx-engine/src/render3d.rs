@@ -11,7 +11,7 @@
 use crate::kf2::{load_character_rigs, load_skin_body, pose_mesh, CharacterRig};
 use crate::scene::{
     decode_texture_blob, material_policy, CameraFlyover, DecodedLightmap, DecodedTexture, LdbScene,
-    MaterialPolicy, SceneDynamicMesh, ScenePoly, SceneVertex,
+    MaterialPolicy, ScenePoly, SceneVertex,
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use std::collections::BTreeMap;
@@ -789,11 +789,11 @@ fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32
             }
         }
     }
-    for dm in &scene.dynamic_meshes {
+    for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
         if dm.hidden || dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
             continue;
         }
-        let (xform, origin) = dynamic_world(dm, rooms);
+        let (xform, origin) = dynamic_world(scene, idx, rooms);
         for poly in &dm.polys {
             if poly.vertices.len() < 3 || !blocks_character(scene, poly.material_id) {
                 continue;
@@ -881,14 +881,14 @@ fn draw_dynamic_meshes(
     fb: &mut [u32],
     zb: &mut [f32],
 ) {
-    for dm in &scene.dynamic_meshes {
+    for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
         if dm.hidden {
             continue;
         }
         if dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
             continue;
         }
-        let (mat, origin) = dynamic_world(dm, room_origins);
+        let (mat, origin) = dynamic_world(scene, idx, room_origins);
         render_poly_batch(
             &dm.polys,
             mat,
@@ -920,7 +920,7 @@ fn aim_hit_dynamic(
         if dm.hidden || dm.hitpoints.is_none() || dm.polys.is_empty() {
             continue;
         }
-        let (mat, pos) = dynamic_world(dm, rooms);
+        let (mat, pos) = dynamic_world(scene, idx, rooms);
         let mut min = [f32::INFINITY; 3];
         let mut max = [f32::NEG_INFINITY; 3];
         for poly in &dm.polys {
@@ -1005,9 +1005,16 @@ fn catalog_root(path: &Path) -> PathBuf {
     }
 }
 
-fn dynamic_world(dm: &SceneDynamicMesh, rooms: &BTreeMap<i32, [f32; 3]>) -> ([f32; 9], [f32; 3]) {
-    let ro = rooms.get(&dm.room_id).copied().unwrap_or([0.0; 3]);
-    let (mat, pos) = dm.posed_local();
+fn dynamic_world(
+    scene: &LdbScene,
+    idx: usize,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+) -> ([f32; 9], [f32; 3]) {
+    let ro = rooms
+        .get(&scene.dynamic_meshes[idx].room_id)
+        .copied()
+        .unwrap_or([0.0; 3]);
+    let (mat, pos) = scene.dynamic_world_pose(idx);
     (mat, [ro[0] + pos[0], ro[1] + pos[1], ro[2] + pos[2]])
 }
 
