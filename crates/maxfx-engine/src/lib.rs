@@ -6,6 +6,7 @@ pub mod render3d;
 pub mod scene;
 
 use openras::RasArchive;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -2524,6 +2525,30 @@ pub fn parse_graphic_novel_pages(text: &str) -> Vec<NovelPageDef> {
     pages
 }
 
+/// One archive or loose file. Same search as the catalogs: loose `data/`, then `x_data.ras`.
+pub fn read_game_bytes(game_dir: &Path, win_path: &str) -> Option<Vec<u8>> {
+    GameSource::open(game_dir).read(win_path)
+}
+
+/// Raw SharedDB text for `breakable` and `dynamic`, from loose `data/` or `x_data.ras`.
+pub fn load_sound_catalogs(game_dir: &Path) -> BTreeMap<String, String> {
+    let mut src = GameSource::open(game_dir);
+    let mut catalogs = BTreeMap::new();
+    for (category, win_path) in [
+        ("breakable", r"\data\database\sounds\breakable.txt"),
+        ("dynamic", r"\data\database\sounds\dynamic.txt"),
+    ] {
+        let Some(bytes) = src.read(win_path) else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        catalogs.insert(category.to_string(), text);
+    }
+    catalogs
+}
+
 /// Filename inside `[cue]` in `sounds/story.txt`. `empty` reads `[Empty]`.
 pub fn story_sound_filename(text: &str, cue: &str) -> Option<String> {
     let header = format!("[{}]", cue.trim());
@@ -2531,7 +2556,8 @@ pub fn story_sound_filename(text: &str, cue: &str) -> Option<String> {
     for line in text.lines() {
         let trimmed = line.trim();
         if !grab {
-            if trimmed.eq_ignore_ascii_case(&header) {
+            let head = trimmed.split("//").next().unwrap_or("").trim();
+            if head.eq_ignore_ascii_case(&header) {
                 grab = true;
             }
             continue;
@@ -3856,6 +3882,38 @@ mod tests {
             story_sound_filename(&story, &intro.sound).as_deref(),
             Some("story\\part1\\P1L0a_001.wav")
         );
+    }
+
+    #[test]
+    fn sound_catalogs_load_breakable_and_dynamic() {
+        let game = std::path::Path::new("/home/gzelante/Games/MaxPayne1");
+        if !game.join("x_data.ras").is_file() {
+            return;
+        }
+        let catalogs = load_sound_catalogs(game);
+        assert_eq!(
+            story_sound_filename(
+                catalogs.get("breakable").expect("breakable"),
+                "window_break_medium"
+            )
+            .as_deref(),
+            Some(r"breakable\glass\break_glass_medium.wav")
+        );
+        assert_eq!(
+            story_sound_filename(
+                catalogs.get("dynamic").expect("dynamic"),
+                "door_wood_locked"
+            )
+            .as_deref(),
+            Some(r"dynamic\door\door_wood_locked3.wav")
+        );
+        let win = story_wav_win_path(r"breakable\glass\break_glass_medium.wav");
+        assert_eq!(
+            win,
+            r"\data\database\sounds\breakable\glass\break_glass_medium.wav"
+        );
+        let wav = read_game_bytes(game, &win).expect("break wav");
+        assert!(wav.starts_with(b"RIFF"));
     }
 
     #[test]

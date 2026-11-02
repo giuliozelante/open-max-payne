@@ -80,8 +80,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   input("#game-dir").value = paths.game_default;
   input("#pack-folder").value = `${paths.out}/sample-mod`;
   input("#pack-out").value = `${paths.root}/my-mod.mpm`;
-  input("#maxed-level").value =
-    `${paths.game_default}/data.disabled-hires/database/levels/front_end/Tutorial.ldb`;
+  input("#maxed-level").value = paths.game_default;
   input("#pfx-input").value =
     `${paths.root}/vendor/max-fx-tools/ParticleFX_files/Examples/Fire_Medium.pse`;
   input("#pfx-bitmaps").value =

@@ -212,8 +212,16 @@ pub struct SceneDynamicMesh {
     pub local_start_mat: [f32; 9],
     pub local_start_pos: [f32; 3],
     pub toggled: bool,
+    /// Set by `DO_Hide`. Parsed meshes start visible.
+    pub hidden: bool,
+    /// Set by `DO_SetHitpoints`. `None` means the mesh is not damaged by shots.
+    pub hitpoints: Option<i32>,
     pub polys: Vec<ScenePoly>,
     pub anims: Vec<SceneDynamicAnim>,
+    /// Track started by `DO_Animate`. Held at the end pose after it finishes.
+    pub active_track: Option<String>,
+    pub track_time: f32,
+    pub track_duration: f32,
 }
 
 impl SceneDynamicMesh {
@@ -229,8 +237,48 @@ impl SceneDynamicMesh {
             })
     }
 
-    /// Rest pose, or the opening track's end pose once `toggled`.
+    /// Start `track_name`. Unknown names do nothing.
+    pub fn play_track(&mut self, track_name: &str) -> bool {
+        let Some(track) = self
+            .anims
+            .iter()
+            .find(|anim| anim.name.eq_ignore_ascii_case(track_name))
+        else {
+            return false;
+        };
+        self.track_duration = track.duration;
+        self.track_time = 0.0;
+        self.active_track = Some(track.name.clone());
+        true
+    }
+
+    /// Advance the active track. Returns its scripts once, on the frame it ends.
+    pub fn step_animation(&mut self, dt: f32) -> Option<Vec<String>> {
+        let name = self.active_track.as_ref()?.clone();
+        if self.track_duration <= 0.0 || self.track_time >= self.track_duration {
+            return None;
+        }
+        self.track_time = (self.track_time + dt).min(self.track_duration);
+        if self.track_time < self.track_duration {
+            return None;
+        }
+        self.anims
+            .iter()
+            .find(|anim| anim.name.eq_ignore_ascii_case(&name))
+            .map(|anim| anim.scripts.clone())
+    }
+
+    /// Rest pose, the active `DO_Animate` track, or the toggled opening pose.
     pub fn posed_local(&self) -> ([f32; 9], [f32; 3]) {
+        if let Some(name) = &self.active_track {
+            if let Some(anim) = self
+                .anims
+                .iter()
+                .find(|anim| anim.name.eq_ignore_ascii_case(name))
+            {
+                return pose_on_track(self, anim);
+            }
+        }
         if !self.toggled {
             return (self.world_mat, self.world_pos);
         }
@@ -250,6 +298,56 @@ impl SceneDynamicMesh {
             )
         }
     }
+}
+
+fn pose_on_track(mesh: &SceneDynamicMesh, anim: &SceneDynamicAnim) -> ([f32; 9], [f32; 3]) {
+    let time = mesh.track_time.min(anim.duration.max(0.0));
+    let w = anim_weight(anim, time);
+    let local = [
+        anim.start_pos[0] + (anim.end_pos[0] - anim.start_pos[0]) * w,
+        anim.start_pos[1] + (anim.end_pos[1] - anim.start_pos[1]) * w,
+        anim.start_pos[2] + (anim.end_pos[2] - anim.start_pos[2]) * w,
+    ];
+    if mesh.world_pos == mesh.local_start_pos {
+        let mat = if w >= 1.0 {
+            anim.end_mat
+        } else {
+            anim.start_mat
+        };
+        (mat, local)
+    } else {
+        (
+            mesh.world_mat,
+            [
+                mesh.world_pos[0] + (local[0] - anim.start_pos[0]),
+                mesh.world_pos[1] + (local[1] - anim.start_pos[1]),
+                mesh.world_pos[2] + (local[2] - anim.start_pos[2]),
+            ],
+        )
+    }
+}
+
+fn anim_weight(anim: &SceneDynamicAnim, time: f32) -> f32 {
+    let delta = dist3(anim.end_pos, anim.start_pos);
+    let mut best: &[f32] = &[];
+    let mut best_err = f32::MAX;
+    for samples in &anim.curves {
+        let Some(&last) = samples.last() else {
+            continue;
+        };
+        if samples.len() < 2 {
+            continue;
+        }
+        let err = (last.abs() - delta).abs();
+        if err < best_err {
+            best_err = err;
+            best = samples;
+        }
+    }
+    if delta <= 0.05 || best_err > (delta * 0.05).max(0.5) {
+        best = &[];
+    }
+    curve_weight(best, anim.duration, time)
 }
 
 #[derive(Debug, Clone)]
@@ -278,7 +376,8 @@ pub struct SceneFsm {
     pub states: Vec<String>,
     pub default_state: String,
     pub startup_actions: Vec<String>,
-    pub hooks: Vec<(String, Vec<String>)>,
+    /// `(hook name, calls with no state, per-state calls in file order)`.
+    pub hooks: Vec<(String, Vec<String>, Vec<(String, Vec<String>)>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -314,6 +413,7 @@ pub struct SceneTrigger {
     pub pos: [f32; 3],
     pub radius: f32,
     pub trigger_type: i32,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -360,6 +460,393 @@ pub struct LdbScene {
     pub point_lights: Vec<ScenePointLight>,
     pub rooms: Vec<SceneRoom>,
     pub bytes_consumed: usize,
+    /// Category name → SharedDB text (`dynamic.txt` and the same block shape).
+    pub sound_catalogs: BTreeMap<String, String>,
+    /// Sounds a verb asked to play. Dispatch only enqueues them.
+    pub sound_queue: Vec<QueuedSound>,
+}
+
+/// One `A_Play3DSound` accepted by a mesh or trigger that this scene actually stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedSound {
+    pub category: String,
+    pub cue: String,
+    pub filename: Option<String>,
+}
+
+/// One `Receiver->Verb(args);` call stored on an anim, FSM, or trigger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message<'a> {
+    pub receiver: &'a str,
+    pub verb: &'a str,
+    pub args: Vec<&'a str>,
+}
+
+impl<'a> Message<'a> {
+    pub fn parse(raw: &'a str) -> Option<Self> {
+        let trimmed = raw.trim().trim_end_matches(';').trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let (receiver, call_part) = if let Some((receiver, call)) = trimmed.split_once("->") {
+            (receiver.trim(), call.trim())
+        } else if let Some((receiver, call)) = trimmed.split_once(' ') {
+            (receiver.trim(), call.trim())
+        } else {
+            ("this", trimmed)
+        };
+        if receiver.is_empty() || call_part.is_empty() {
+            return None;
+        }
+        let (verb, args) = if let Some((verb, args)) = call_part.split_once('(') {
+            let body = args.trim_end_matches(')').trim();
+            let parsed = if body.is_empty() {
+                Vec::new()
+            } else {
+                body.split(',')
+                    .map(|part| part.trim().trim_matches('"'))
+                    .filter(|part| !part.is_empty())
+                    .collect()
+            };
+            (verb.trim(), parsed)
+        } else {
+            (call_part.trim(), Vec::new())
+        };
+        if verb.is_empty() {
+            None
+        } else {
+            Some(Self {
+                receiver,
+                verb,
+                args,
+            })
+        }
+    }
+}
+
+impl LdbScene {
+    /// Match the receiver as stored, then the same path with `.DO` appended.
+    pub fn resolve_mesh_mut<'a>(
+        &'a mut self,
+        context_name: &str,
+        receiver: &str,
+    ) -> Option<&'a mut SceneDynamicMesh> {
+        if let Some(index) = self
+            .dynamic_meshes
+            .iter()
+            .position(|mesh| mesh.name.eq_ignore_ascii_case(receiver))
+        {
+            return Some(&mut self.dynamic_meshes[index]);
+        }
+        let target = mesh_target_name(context_name, receiver)?;
+        if target.eq_ignore_ascii_case(receiver) {
+            return None;
+        }
+        self.dynamic_meshes
+            .iter_mut()
+            .find(|mesh| mesh.name.eq_ignore_ascii_case(&target))
+    }
+
+    /// Run one stored message. Unknown verbs do nothing.
+    pub fn dispatch_message(&mut self, context_name: &str, raw_msg: &str) -> bool {
+        let Some(msg) = Message::parse(raw_msg) else {
+            return false;
+        };
+        match msg.verb.to_ascii_lowercase().as_str() {
+            "do_animate" => {
+                let Some(track_name) = msg.args.first().copied() else {
+                    return false;
+                };
+                self.resolve_mesh_mut(context_name, msg.receiver)
+                    .is_some_and(|mesh| mesh.play_track(track_name))
+            }
+            "t_enable" => {
+                let enabled = match msg.args.first().copied().unwrap_or("") {
+                    "false" | "0" => false,
+                    "true" | "1" => true,
+                    _ => return false,
+                };
+                self.resolve_trigger_mut(context_name, msg.receiver)
+                    .is_some_and(|trigger| {
+                        trigger.enabled = enabled;
+                        true
+                    })
+            }
+            "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
+            "do_hide" => {
+                let hidden = match msg.args.first().copied().unwrap_or("") {
+                    "true" | "1" => true,
+                    "false" | "0" => false,
+                    _ => return false,
+                };
+                self.resolve_mesh_mut(context_name, msg.receiver)
+                    .is_some_and(|mesh| {
+                        mesh.hidden = hidden;
+                        true
+                    })
+            }
+            "do_sethitpoints" => {
+                let Some(points) = msg.args.first().and_then(|arg| arg.parse::<i32>().ok()) else {
+                    return false;
+                };
+                self.resolve_mesh_mut(context_name, msg.receiver)
+                    .is_some_and(|mesh| {
+                        mesh.hitpoints = Some(points);
+                        true
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Match the receiver as stored, then the same path with `.TRIGGER` appended.
+    pub fn resolve_trigger_mut<'a>(
+        &'a mut self,
+        context_name: &str,
+        receiver: &str,
+    ) -> Option<&'a mut SceneTrigger> {
+        if let Some(index) = self
+            .triggers
+            .iter()
+            .position(|trigger| trigger.name.eq_ignore_ascii_case(receiver))
+        {
+            return Some(&mut self.triggers[index]);
+        }
+        let target = trigger_target_name(context_name, receiver)?;
+        if target.eq_ignore_ascii_case(receiver) {
+            return None;
+        }
+        self.triggers
+            .iter_mut()
+            .find(|trigger| trigger.name.eq_ignore_ascii_case(&target))
+    }
+
+    fn queue_3d_sound(&mut self, context_name: &str, receiver: &str, args: &[&str]) -> bool {
+        let category = args.first().copied().unwrap_or("");
+        let cue = args.get(1).copied().unwrap_or("");
+        if category.is_empty() || cue.is_empty() {
+            return false;
+        }
+        let resolved = self.resolve_trigger_mut(context_name, receiver).is_some()
+            || self.resolve_mesh_mut(context_name, receiver).is_some();
+        if !resolved {
+            return false;
+        }
+        let catalog_loaded = self
+            .sound_catalogs
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case(category));
+        let filename = self
+            .sound_catalogs
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(category))
+            .and_then(|(_, text)| crate::story_sound_filename(text, cue));
+        if catalog_loaded && filename.is_none() {
+            return false;
+        }
+        self.sound_queue.push(QueuedSound {
+            category: category.to_string(),
+            cue: cue.to_string(),
+            filename,
+        });
+        true
+    }
+
+    /// Run startup `DO_SetHitpoints` calls. Other startup verbs stay untouched.
+    pub fn apply_startup_hitpoints(&mut self) {
+        let scripts: Vec<(String, String)> = self
+            .fsms
+            .iter()
+            .flat_map(|fsm| {
+                fsm.startup_actions.iter().filter_map(|act| {
+                    let verb = Message::parse(act)?.verb.to_ascii_lowercase();
+                    (verb == "do_sethitpoints").then(|| (fsm.name.clone(), act.clone()))
+                })
+            })
+            .collect();
+        for (name, act) in scripts {
+            self.dispatch_message(&name, &act);
+        }
+    }
+
+    /// Startup `DO_Hide` only. Other startup verbs stay untouched.
+    pub fn apply_startup_hides(&mut self) {
+        let scripts: Vec<(String, String)> = self
+            .fsms
+            .iter()
+            .flat_map(|fsm| {
+                fsm.startup_actions.iter().filter_map(|act| {
+                    let verb = Message::parse(act)?.verb.to_ascii_lowercase();
+                    (verb == "do_hide").then(|| (fsm.name.clone(), act.clone()))
+                })
+            })
+            .collect();
+        for (name, act) in scripts {
+            self.dispatch_message(&name, &act);
+        }
+    }
+
+    /// Startup `T_Enable` only. Other startup verbs stay untouched.
+    pub fn apply_startup_enables(&mut self) {
+        let scripts: Vec<(String, String)> = self
+            .fsms
+            .iter()
+            .flat_map(|fsm| {
+                fsm.startup_actions.iter().filter_map(|act| {
+                    let verb = Message::parse(act)?.verb.to_ascii_lowercase();
+                    (verb == "t_enable").then(|| (fsm.name.clone(), act.clone()))
+                })
+            })
+            .collect();
+        for (name, act) in scripts {
+            self.dispatch_message(&name, &act);
+        }
+    }
+
+    /// Subtract `amount` from a mesh that has hit points. At zero, run its `DO_OnDeath` hook.
+    pub fn damage_mesh(&mut self, index: usize, amount: i32) -> bool {
+        let Some(mesh) = self.dynamic_meshes.get_mut(index) else {
+            return false;
+        };
+        let Some(points) = mesh.hitpoints else {
+            return false;
+        };
+        if points <= 0 {
+            return false;
+        }
+        let next = points.saturating_sub(amount.max(0));
+        mesh.hitpoints = Some(next);
+        if next > 0 {
+            return false;
+        }
+        let fsm_name = strip_mesh_suffix(&mesh.name).to_string();
+        self.dispatch_hook(&fsm_name, "DO_OnDeath")
+    }
+
+    fn dispatch_hook(&mut self, fsm_name: &str, hook_name: &str) -> bool {
+        let scripts = self
+            .fsms
+            .iter()
+            .find(|fsm| fsm.name.eq_ignore_ascii_case(fsm_name))
+            .and_then(|fsm| {
+                fsm.hooks
+                    .iter()
+                    .find(|(name, _, _)| name.eq_ignore_ascii_case(hook_name))
+                    .map(|(_, acts, _)| acts.clone())
+            });
+        let Some(scripts) = scripts else {
+            return false;
+        };
+        let mut ran = false;
+        for act in &scripts {
+            ran |= self.dispatch_message(fsm_name, act);
+        }
+        ran
+    }
+
+    /// `E` near an enabled trigger runs that FSM's unconditional `T_Activate` calls.
+    pub fn activate_nearest_trigger(
+        &mut self,
+        room_origins: &BTreeMap<i32, [f32; 3]>,
+        pos: [f32; 3],
+        max_d2: f32,
+    ) -> bool {
+        let mut best: Option<(usize, f32)> = None;
+        for (idx, trigger) in self.triggers.iter().enumerate() {
+            if !trigger.enabled {
+                continue;
+            }
+            let ro = room_origins
+                .get(&trigger.room_id)
+                .copied()
+                .unwrap_or([0.0; 3]);
+            let wx = ro[0] + trigger.pos[0];
+            let wy = ro[1] + trigger.pos[1];
+            let wz = ro[2] + trigger.pos[2];
+            let d2 = (wx - pos[0]).powi(2) + (wy - pos[1]).powi(2) + (wz - pos[2]).powi(2);
+            if d2 < max_d2 && best.is_none_or(|(_, best_d2)| d2 < best_d2) {
+                best = Some((idx, d2));
+            }
+        }
+        let Some((idx, _)) = best else {
+            return false;
+        };
+        let fsm_name = strip_trigger_suffix(&self.triggers[idx].name).to_string();
+        self.dispatch_hook(&fsm_name, "T_Activate")
+    }
+
+    pub fn step_dynamic_anims(&mut self, dt: f32) {
+        let mut pending = Vec::new();
+        for mesh in &mut self.dynamic_meshes {
+            if let Some(scripts) = mesh.step_animation(dt) {
+                pending.push((mesh.name.clone(), scripts));
+            }
+        }
+        for (name, scripts) in pending {
+            for script in &scripts {
+                self.dispatch_message(&name, script);
+            }
+        }
+    }
+}
+
+fn mesh_target_name(context_name: &str, receiver: &str) -> Option<String> {
+    let target = match receiver {
+        "this" => context_name.to_string(),
+        "parent" => format!("{}.DO", parent_path(context_name)?),
+        path if path.starts_with("::") => {
+            if path.to_ascii_lowercase().ends_with(".do") {
+                path.to_string()
+            } else {
+                format!("{path}.DO")
+            }
+        }
+        rel => format!("{}::{rel}.DO", parent_path(context_name)?),
+    };
+    Some(target)
+}
+
+fn trigger_target_name(context_name: &str, receiver: &str) -> Option<String> {
+    let target = match receiver {
+        "this" => context_name.to_string(),
+        "parent" => format!("{}.TRIGGER", parent_path(context_name)?),
+        path if path.starts_with("::") => {
+            if path.to_ascii_lowercase().ends_with(".trigger") {
+                path.to_string()
+            } else {
+                format!("{path}.TRIGGER")
+            }
+        }
+        rel if rel.to_ascii_lowercase().ends_with(".trigger") => {
+            format!("{}::{rel}", parent_path(context_name)?)
+        }
+        rel => format!("{}::{rel}.TRIGGER", parent_path(context_name)?),
+    };
+    Some(target)
+}
+
+fn strip_trigger_suffix(name: &str) -> &str {
+    if name.to_ascii_lowercase().ends_with(".trigger") {
+        &name[..name.len() - ".trigger".len()]
+    } else {
+        name
+    }
+}
+
+fn strip_mesh_suffix(name: &str) -> &str {
+    if name.to_ascii_lowercase().ends_with(".do") {
+        &name[..name.len() - 3]
+    } else {
+        name
+    }
+}
+
+fn parent_path(context_name: &str) -> Option<&str> {
+    let stripped = context_name
+        .strip_suffix(".DO")
+        .or_else(|| context_name.strip_suffix(".TRIGGER"))
+        .unwrap_or(context_name);
+    stripped.rsplit_once("::").map(|(parent, _)| parent)
 }
 
 fn read_i32(data: &[u8], i: &mut usize) -> Option<i32> {
@@ -740,7 +1227,10 @@ fn read_mesh_polys_resolved(
     Some(polys)
 }
 
-fn skip_hook_map(data: &[u8], i: &mut usize) -> Option<Vec<(String, Vec<String>)>> {
+fn skip_hook_map(
+    data: &[u8],
+    i: &mut usize,
+) -> Option<Vec<(String, Vec<String>, Vec<(String, Vec<String>)>)>> {
     if *data.get(*i)? != 0x1f {
         return None;
     }
@@ -755,14 +1245,15 @@ fn skip_hook_map(data: &[u8], i: &mut usize) -> Option<Vec<(String, Vec<String>)
         }
         *i += 1;
         let c2 = read_i32(data, i)? as usize;
+        let mut state_actions = Vec::with_capacity(c2);
         for _ in 0..c2 {
-            let _state_name = read_str(data, i)?;
-            let mut s_acts = read_str_list(data, i, 0x1c)?;
-            acts.append(&mut s_acts);
+            let state_name = read_str(data, i)?;
+            let s_acts = read_str_list(data, i, 0x1c)?;
+            state_actions.push((state_name, s_acts));
         }
         let mut after = read_str_list(data, i, 0x1c)?;
         acts.append(&mut after);
-        out.push((hname, acts));
+        out.push((hname, acts, state_actions));
     }
     Some(out)
 }
@@ -1166,6 +1657,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                 pos,
                 radius,
                 trigger_type,
+                enabled: true,
             });
         }
     }
@@ -1247,8 +1739,13 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     local_start_mat,
                     local_start_pos,
                     toggled: false,
+                    hidden: false,
+                    hitpoints: None,
                     polys,
                     anims,
+                    active_track: None,
+                    track_time: 0.0,
+                    track_duration: 0.0,
                 });
             }
         }
@@ -1396,11 +1893,14 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
 
     // Apply FSM `C_Teleport("::Room::Jumppoint")` scripts to characters starting in `::Teleport`
     for fsm in &fsms {
-        let all_acts = fsm
-            .startup_actions
-            .iter()
-            .chain(fsm.states.iter())
-            .chain(fsm.hooks.iter().flat_map(|(_, h)| h.iter()));
+        let all_acts =
+            fsm.startup_actions
+                .iter()
+                .chain(fsm.states.iter())
+                .chain(fsm.hooks.iter().flat_map(|(_, h, states)| {
+                    h.iter()
+                        .chain(states.iter().flat_map(|(_, acts)| acts.iter()))
+                }));
         for act in all_acts {
             let lower = act.to_ascii_lowercase();
             if let Some(arrow_pos) = lower.find("->c_teleport(") {
@@ -1440,6 +1940,8 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         point_lights,
         rooms,
         bytes_consumed: i,
+        sound_catalogs: BTreeMap::new(),
+        sound_queue: Vec::new(),
     })
 }
 
@@ -1720,6 +2222,8 @@ mod tests {
             point_lights: Vec::new(),
             rooms,
             bytes_consumed: 0,
+            sound_catalogs: BTreeMap::new(),
+            sound_queue: Vec::new(),
         }
     }
 
@@ -1891,8 +2395,13 @@ mod tests {
             local_start_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             local_start_pos: [0.0, 0.0, 0.0],
             toggled: false,
+            hidden: false,
+            hitpoints: None,
             polys: Vec::new(),
             anims,
+            active_track: None,
+            track_time: 0.0,
+            track_duration: 0.0,
         }
     }
 
@@ -1937,5 +2446,785 @@ mod tests {
         let anim = door.opening_anim().expect("open track");
         assert_eq!(anim.name, "open");
         assert!((anim.duration - 1.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn message_parse_reads_a_stored_call() {
+        let msg = Message::parse("::Bathroom::lid.DO->DO_Animate(open);").unwrap();
+        assert_eq!(msg.receiver, "::Bathroom::lid.DO");
+        assert_eq!(msg.verb, "DO_Animate");
+        assert_eq!(msg.args, ["open"]);
+        let bare = Message::parse("DO_Animate(1)").unwrap();
+        assert_eq!(bare.receiver, "this");
+        assert_eq!(bare.args, ["1"]);
+    }
+
+    #[test]
+    fn do_animate_starts_the_named_track() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let mut door = door_mesh(vec![
+            track("open", [0.4, 0.0, 0.0]),
+            track("open2", [0.0; 3]),
+        ]);
+        door.name = "::startroom::door_dummy::Door.DO".into();
+        door.anims[0].scripts = vec!["::startroom::door_dummy::Door.DO->DO_Animate(open2);".into()];
+        scene.dynamic_meshes.push(door);
+        let started = scene.dispatch_message(
+            "::startroom::door_dummy::Door::t1.TRIGGER",
+            "parent->do_animate(open);",
+        );
+        assert!(started);
+        assert_eq!(
+            scene.dynamic_meshes[0].active_track.as_deref(),
+            Some("open")
+        );
+        scene.step_dynamic_anims(1.3);
+        assert_eq!(
+            scene.dynamic_meshes[0].active_track.as_deref(),
+            Some("open2")
+        );
+    }
+
+    #[test]
+    fn retail_do_animate_strings_start_the_named_mesh() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if house.is_file() {
+            let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+            let call = "::Bathroom::lid.DO->DO_Animate(open);";
+            assert!(scene.dispatch_message("", call));
+            let lid = scene
+                .dynamic_meshes
+                .iter()
+                .find(|mesh| mesh.name == "::Bathroom::lid.DO")
+                .expect("lid");
+            assert_eq!(lid.active_track.as_deref(), Some("open"));
+        }
+        let startup = std::path::Path::new(
+            "/tmp/omp-xdata-ref/data/database/levels/front_end/Startup_level.ldb",
+        );
+        if startup.is_file() {
+            let mut scene = parse_ldb_scene(&std::fs::read(startup).unwrap()).expect("startup");
+            let call = "::startroom::cam_rotator::cam_rotator::altitude::camera.DO->DO_Animate(1);";
+            assert!(scene.dispatch_message("", call));
+            let cam = scene
+                .dynamic_meshes
+                .iter()
+                .find(|mesh| mesh.name.ends_with("altitude::camera.DO"))
+                .expect("camera");
+            assert_eq!(cam.active_track.as_deref(), Some("1"));
+        }
+    }
+
+    #[test]
+    fn test_dispatch_t_enable_disables_trigger() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.triggers.push(SceneTrigger {
+            name: "::Bathroom::t_toilet.TRIGGER".into(),
+            room_id: 0,
+            pos: [0.0; 3],
+            radius: 0.2,
+            trigger_type: 0,
+            enabled: true,
+        });
+        let dispatched = scene.dispatch_message(
+            "::Bathroom::lid.DO",
+            "::Bathroom::t_toilet.TRIGGER->T_Enable(false);",
+        );
+        assert!(
+            dispatched,
+            "T_Enable must be recognized by dispatch_message"
+        );
+        let trigger = scene
+            .triggers
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case("::Bathroom::t_toilet.TRIGGER"))
+            .expect("trigger must exist");
+        assert!(!trigger.enabled, "T_Enable(false) must disable the trigger");
+    }
+
+    #[test]
+    fn retail_t_enable_disables_the_bathroom_trigger() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let name = "::Bathroom::t_toilet.TRIGGER";
+        assert!(
+            scene
+                .triggers
+                .iter()
+                .any(|t| t.name.eq_ignore_ascii_case(name) && t.enabled),
+            "parsed trigger starts enabled"
+        );
+        assert!(scene.dispatch_message(
+            "::Bathroom::lid.DO",
+            "::Bathroom::t_toilet.TRIGGER->T_Enable(false);",
+        ));
+        let trigger = scene
+            .triggers
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(name))
+            .expect("trigger");
+        assert!(!trigger.enabled);
+    }
+
+    #[test]
+    fn unparsed_emitter_fails_closed() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.triggers.push(SceneTrigger {
+            name: "::Bathroom::t_toilet.TRIGGER".into(),
+            room_id: 0,
+            pos: [0.0; 3],
+            radius: 0.2,
+            trigger_type: 0,
+            enabled: true,
+        });
+        let res = scene.dispatch_message(
+            "::Bathroom::lid.DO",
+            "::Bathroom::water_faucet->PS_StopAllEmissions(\"\");",
+        );
+        assert!(!res, "unparsed emitter receiver must fail closed");
+        assert!(scene.triggers[0].enabled);
+        assert!(scene.sound_queue.is_empty());
+    }
+
+    #[test]
+    fn test_dispatch_a_play3d_sound_on_action_button_trigger() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let receiver = "::babys_room::New mesh 24::Action button trigger 01";
+        scene.triggers.push(SceneTrigger {
+            name: receiver.into(),
+            room_id: 0,
+            pos: [0.0; 3],
+            radius: 0.2,
+            trigger_type: 0,
+            enabled: true,
+        });
+        scene.sound_catalogs.insert(
+            "dynamic".into(),
+            "[door_wood_locked] // rattle\n{\n[Sound]\nFilename = dynamic\\door\\door_wood_locked3.wav;\n}\n"
+                .into(),
+        );
+        let dispatched = scene.dispatch_message(
+            "::babys_room::New mesh 24",
+            "::babys_room::New mesh 24::Action button trigger 01->A_Play3DSound(dynamic, door_wood_locked, \"\");",
+        );
+        assert!(
+            dispatched,
+            "A_Play3DSound on an action button trigger must dispatch"
+        );
+        assert_eq!(scene.sound_queue.len(), 1);
+        assert_eq!(scene.sound_queue[0].category, "dynamic");
+        assert_eq!(scene.sound_queue[0].cue, "door_wood_locked");
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"dynamic\door\door_wood_locked3.wav")
+        );
+    }
+
+    #[test]
+    fn retail_a_play3dsound_queues_the_locked_door_cue() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        let catalog = std::path::Path::new("/tmp/omp-xdata-ref/data/database/sounds/dynamic.txt");
+        if !house.is_file() || !catalog.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let receiver = "::babys_room::New mesh 24::Action button trigger 01";
+        let near: Vec<_> = scene
+            .triggers
+            .iter()
+            .filter(|trigger| {
+                trigger
+                    .name
+                    .to_ascii_lowercase()
+                    .contains("action button trigger 01")
+            })
+            .map(|trigger| trigger.name.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            scene.triggers.iter().any(|trigger| {
+                trigger.name.eq_ignore_ascii_case(receiver)
+                    || trigger
+                        .name
+                        .eq_ignore_ascii_case(&format!("{receiver}.TRIGGER"))
+            }),
+            "parsed names: {near:?}"
+        );
+        scene
+            .sound_catalogs
+            .insert("dynamic".into(), std::fs::read_to_string(catalog).unwrap());
+        let call = format!("{receiver}->A_Play3DSound(dynamic, door_wood_locked, \"\");");
+        assert!(scene.dispatch_message("::babys_room::New mesh 24", &call));
+        assert_eq!(scene.sound_queue.len(), 1);
+        assert_eq!(scene.sound_queue[0].cue, "door_wood_locked");
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"dynamic\door\door_wood_locked3.wav")
+        );
+    }
+
+    #[test]
+    fn e_near_the_action_button_queues_the_locked_door() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        let catalog = std::path::Path::new("/tmp/omp-xdata-ref/data/database/sounds/dynamic.txt");
+        if !house.is_file() || !catalog.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let fsm_name = "::babys_room::New mesh 24::Action button trigger 01";
+        let call = format!("{fsm_name}->A_Play3DSound(dynamic, door_wood_locked, \"\");");
+        let fsm = scene
+            .fsms
+            .iter()
+            .find(|fsm| fsm.name.eq_ignore_ascii_case(fsm_name))
+            .expect("action fsm");
+        let activate = fsm
+            .hooks
+            .iter()
+            .find(|(name, _, _)| name.eq_ignore_ascii_case("T_Activate"))
+            .expect("activate");
+        assert!(
+            activate.1.iter().any(|act| act == &call),
+            "unconditional={:?} states={:?}",
+            activate.1,
+            activate.2
+        );
+        scene
+            .sound_catalogs
+            .insert("dynamic".into(), std::fs::read_to_string(catalog).unwrap());
+        let trigger = scene
+            .triggers
+            .iter()
+            .find(|trigger| {
+                trigger.name.eq_ignore_ascii_case(fsm_name)
+                    || trigger
+                        .name
+                        .eq_ignore_ascii_case(&format!("{fsm_name}.TRIGGER"))
+            })
+            .expect("trigger");
+        let origins: BTreeMap<i32, [f32; 3]> = scene
+            .rooms
+            .iter()
+            .map(|room| (room.id, room.world_origin))
+            .collect();
+        let ro = origins.get(&trigger.room_id).copied().unwrap_or([0.0; 3]);
+        let at = [
+            ro[0] + trigger.pos[0],
+            ro[1] + trigger.pos[1],
+            ro[2] + trigger.pos[2],
+        ];
+        assert!(scene.activate_nearest_trigger(&origins, at, 36.0));
+        assert_eq!(scene.sound_queue.len(), 1);
+        assert_eq!(scene.sound_queue[0].cue, "door_wood_locked");
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"dynamic\door\door_wood_locked3.wav")
+        );
+        scene.sound_queue.clear();
+        let far = [at[0] + 100.0, at[1], at[2]];
+        assert!(!scene.activate_nearest_trigger(&origins, far, 36.0));
+        assert!(scene.sound_queue.is_empty());
+    }
+
+    #[test]
+    fn test_dispatch_do_hide_hides_dynamic_mesh() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let mut mesh = door_mesh(Vec::new());
+        mesh.name = "::Bathroom::glass01.DO".into();
+        mesh.hidden = false;
+        scene.dynamic_meshes.push(mesh);
+        let dispatched = scene.dispatch_message(
+            "::Bathroom::glass01.DO",
+            "::Bathroom::glass01.DO->do_hide(true);",
+        );
+        assert!(dispatched, "do_hide must be recognized by dispatch_message");
+        let mesh = scene
+            .dynamic_meshes
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case("::Bathroom::glass01.DO"))
+            .expect("glass mesh must exist");
+        assert!(mesh.hidden, "do_hide(true) must set mesh.hidden == true");
+    }
+
+    #[test]
+    fn glass_death_hook_hides_the_mesh() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let fsm = scene
+            .fsms
+            .iter()
+            .find(|fsm| fsm.name.eq_ignore_ascii_case("::Bathroom::glass01"))
+            .expect("glass fsm");
+        let death = fsm
+            .hooks
+            .iter()
+            .find(|(name, _, _)| name.eq_ignore_ascii_case("DO_OnDeath"))
+            .expect("death hook");
+        assert!(
+            death
+                .1
+                .iter()
+                .any(|act| act.eq_ignore_ascii_case("::Bathroom::glass01.DO->do_hide(true);")),
+            "hooks={:?}",
+            fsm.hooks
+                .iter()
+                .map(|(name, acts, states)| (name.clone(), acts.clone(), states.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fsm.startup_actions,
+            ["::Bathroom::glass01.DO->DO_SetHitpoints(20);"]
+        );
+        let bullet = fsm
+            .hooks
+            .iter()
+            .find(|(name, _, _)| name.eq_ignore_ascii_case("DO_BulletCollides"))
+            .map(|(_, acts, _)| acts.as_slice())
+            .unwrap_or(&[]);
+        assert!(bullet.is_empty());
+        let projectile = "::Bathroom::glass01->P_CreateProjectile(debris_glass, 1);";
+        assert!(
+            death.1.iter().any(|act| act == projectile),
+            "death={:?}",
+            death.1
+        );
+        assert!(!scene.dispatch_message("::Bathroom::glass01", projectile));
+        assert!(scene.sound_queue.is_empty());
+    }
+
+    #[test]
+    fn toilet_lid_open_is_the_activate_hook() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let fsm = scene
+            .fsms
+            .iter()
+            .find(|fsm| fsm.name.eq_ignore_ascii_case("::Bathroom::t_toilet"))
+            .expect("toilet fsm");
+        assert_eq!(fsm.states, ["closed", "open"]);
+        assert_eq!(fsm.default_state, "open");
+        let activate = fsm
+            .hooks
+            .iter()
+            .find(|(name, _, _)| name == "T_Activate")
+            .expect("activate");
+        assert!(activate.1.is_empty(), "unconditional={:?}", activate.1);
+        assert_eq!(
+            activate.2,
+            [
+                (
+                    "closed".to_string(),
+                    vec![
+                        "::Bathroom::lid.DO->DO_Animate(open);".to_string(),
+                        "::Bathroom::t_toilet.TRIGGER->T_Enable(false);".to_string(),
+                    ],
+                ),
+                (
+                    "open".to_string(),
+                    vec![
+                        "::Bathroom::lid.DO->DO_Animate(close);".to_string(),
+                        "::Bathroom::t_toilet.TRIGGER->T_Enable(false);".to_string(),
+                    ],
+                ),
+            ]
+        );
+        let lid = scene
+            .dynamic_meshes
+            .iter()
+            .find(|mesh| mesh.name.eq_ignore_ascii_case("::Bathroom::lid.DO"))
+            .expect("lid");
+        let names: Vec<_> = lid.anims.iter().map(|anim| anim.name.as_str()).collect();
+        assert_eq!(names, ["close", "open"], "anims={names:?}");
+    }
+
+    #[test]
+    fn bathroom_unconditional_hooks_outside_glass_use_known_verbs() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let known = [
+            "do_animate",
+            "t_enable",
+            "a_play3dsound",
+            "do_hide",
+            "do_sethitpoints",
+            "ps_starteffect",
+            "ps_stopallemissions",
+            "p_createprojectile",
+        ];
+        let mut other = Vec::new();
+        for fsm in scene.fsms.iter().filter(|fsm| {
+            fsm.name.to_ascii_lowercase().contains("bathroom")
+                && !fsm.name.eq_ignore_ascii_case("::Bathroom::glass01")
+        }) {
+            for (hook, acts, _) in &fsm.hooks {
+                for act in acts {
+                    let Some(msg) = Message::parse(act) else {
+                        continue;
+                    };
+                    let verb = msg.verb.to_ascii_lowercase();
+                    if !known.contains(&verb.as_str()) {
+                        other.push(format!("{} / {} / {act}", fsm.name, hook));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            other,
+            [
+                "::Bathroom::camera2 / start / ::Bathroom::camera2.DO->CAM_AttachToDO(100, false);",
+                "::Bathroom::lid / DO_MovedToInvalidPosition / ::Bathroom::lid.DO->DO_InvertAnimation();",
+                "::Bathroom::water_faucet / T_Activate / ::Bathroom::water_faucet->A_StopAll3DSounds(\"\");",
+            ]
+        );
+        let faucet = scene
+            .fsms
+            .iter()
+            .find(|fsm| fsm.name.eq_ignore_ascii_case("::Bathroom::water_faucet"))
+            .expect("faucet");
+        let activate = faucet
+            .hooks
+            .iter()
+            .find(|(name, _, _)| name == "T_Activate")
+            .expect("faucet activate");
+        assert!(activate.2.is_empty(), "states={:?}", activate.2);
+        assert_eq!(
+            activate.1,
+            [
+                "::Bathroom::water_faucet->PS_StopAllEmissions(\"\");",
+                "::Bathroom::water_faucet->A_StopAll3DSounds(\"\");",
+                "::Bathroom::water_faucet->ps_starteffect(faucet_open_clear, \"\");",
+                "::Bathroom::water_faucet->A_Play3DSound(dynamic, faucet_open, \"\");",
+            ]
+        );
+    }
+
+    #[test]
+    fn four_beretta_shots_break_the_bathroom_glass() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        scene.apply_startup_hitpoints();
+        let index = scene
+            .dynamic_meshes
+            .iter()
+            .position(|mesh| mesh.name.eq_ignore_ascii_case("::Bathroom::glass01.DO"))
+            .expect("glass");
+        assert_eq!(scene.dynamic_meshes[index].hitpoints, Some(20));
+        assert!(!scene.dynamic_meshes[index].hidden);
+        for _ in 0..3 {
+            assert!(!scene.damage_mesh(index, 5));
+            assert!(!scene.dynamic_meshes[index].hidden);
+        }
+        assert!(scene.damage_mesh(index, 5));
+        assert!(scene.dynamic_meshes[index].hidden);
+        assert_eq!(scene.dynamic_meshes[index].hitpoints, Some(0));
+    }
+
+    #[test]
+    fn four_beretta_shots_break_the_second_bathroom_pane() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        scene.apply_startup_hitpoints();
+        let index = scene
+            .dynamic_meshes
+            .iter()
+            .position(|mesh| mesh.name.eq_ignore_ascii_case("::Bathroom::glass02.DO"))
+            .expect("glass02");
+        assert_eq!(scene.dynamic_meshes[index].hitpoints, Some(20));
+        for _ in 0..3 {
+            assert!(!scene.damage_mesh(index, 5));
+        }
+        assert!(scene.damage_mesh(index, 5));
+        assert!(scene.dynamic_meshes[index].hidden);
+        assert_eq!(scene.dynamic_meshes[index].hitpoints, Some(0));
+    }
+
+    #[test]
+    fn house_death_hooks_that_do_not_start_with_hide() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let mut other = Vec::new();
+        for fsm in &scene.fsms {
+            let Some(first) = fsm.hooks.iter().find_map(|(name, acts, _)| {
+                if name.eq_ignore_ascii_case("DO_OnDeath") {
+                    acts.first().cloned()
+                } else {
+                    None
+                }
+            }) else {
+                continue;
+            };
+            let Some(msg) = Message::parse(&first) else {
+                continue;
+            };
+            if !msg.verb.eq_ignore_ascii_case("do_hide") {
+                other.push(format!("{} / {first}", fsm.name));
+            }
+        }
+        assert!(other.is_empty(), "{other:?}");
+    }
+
+    #[test]
+    fn startup_hides_the_broken_entrance_tv() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let hidden_at_start = [
+            "::entrance05::New mesh 57::tv5::tv01.DO",
+            "::entrance05::New mesh 57::tv5::tv02.DO",
+            "::entrance05::New mesh 57::tv5::tv03.DO",
+            "::entrance05::New mesh 57::tv5::tv04.DO",
+            "::entrance05::New mesh 57::tv5::tv_broken.DO",
+        ];
+        for name in hidden_at_start {
+            let mesh = scene
+                .dynamic_meshes
+                .iter()
+                .find(|mesh| mesh.name.eq_ignore_ascii_case(name))
+                .expect(name);
+            assert!(!mesh.hidden, "{name}");
+        }
+        scene.apply_startup_hides();
+        for name in hidden_at_start {
+            let mesh = scene
+                .dynamic_meshes
+                .iter()
+                .find(|mesh| mesh.name.eq_ignore_ascii_case(name))
+                .expect(name);
+            assert!(mesh.hidden, "{name}");
+        }
+        let glass = scene
+            .dynamic_meshes
+            .iter()
+            .find(|mesh| mesh.name.eq_ignore_ascii_case("::Bathroom::glass01.DO"))
+            .expect("glass");
+        assert!(!glass.hidden);
+    }
+
+    #[test]
+    fn startup_disables_the_bathroom_muffle_trigger() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let muffle = scene
+            .triggers
+            .iter()
+            .find(|trigger| {
+                trigger
+                    .name
+                    .eq_ignore_ascii_case("::Bathroom::muffle_sound_trigger.TRIGGER")
+            })
+            .expect("muffle");
+        assert!(muffle.enabled);
+        let toilet = scene
+            .triggers
+            .iter()
+            .find(|trigger| {
+                trigger
+                    .name
+                    .eq_ignore_ascii_case("::Bathroom::t_toilet.TRIGGER")
+            })
+            .expect("toilet");
+        assert!(toilet.enabled);
+        scene.apply_startup_enables();
+        let muffle = scene
+            .triggers
+            .iter()
+            .find(|trigger| {
+                trigger
+                    .name
+                    .eq_ignore_ascii_case("::Bathroom::muffle_sound_trigger.TRIGGER")
+            })
+            .expect("muffle");
+        assert!(!muffle.enabled);
+        let toilet = scene
+            .triggers
+            .iter()
+            .find(|trigger| {
+                trigger
+                    .name
+                    .eq_ignore_ascii_case("::Bathroom::t_toilet.TRIGGER")
+            })
+            .expect("toilet");
+        assert!(toilet.enabled);
+    }
+
+    #[test]
+    fn retail_do_hide_hides_bathroom_glass() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let name = "::Bathroom::glass01.DO";
+        let mesh = scene
+            .dynamic_meshes
+            .iter()
+            .find(|mesh| mesh.name.eq_ignore_ascii_case(name))
+            .expect("glass mesh");
+        assert!(!mesh.hidden);
+        assert!(scene.dispatch_message(name, "::Bathroom::glass01.DO->do_hide(true);"));
+        let mesh = scene
+            .dynamic_meshes
+            .iter()
+            .find(|mesh| mesh.name.eq_ignore_ascii_case(name))
+            .expect("glass mesh");
+        assert!(mesh.hidden);
+    }
+
+    #[test]
+    fn test_dispatch_a_play3d_sound_on_dynamic_mesh_without_do_suffix() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.sound_catalogs.insert(
+            "breakable".into(),
+            "[window_break_medium] // Glass breaking\n{\n[Sound]\nFilename = breakable\\glass\\break_glass_medium.wav;\n}\n"
+                .into(),
+        );
+        let mut mesh = door_mesh(Vec::new());
+        mesh.name = "::Bathroom::glass01.DO".into();
+        mesh.hidden = true;
+        scene.dynamic_meshes.push(mesh);
+        let dispatched = scene.dispatch_message(
+            "::Bathroom::glass01.DO",
+            "::Bathroom::glass01->A_Play3DSound(breakable, window_break_medium, \"\");",
+        );
+        assert!(
+            dispatched,
+            "a_play3dsound must resolve ::Bathroom::glass01 to ::Bathroom::glass01.DO"
+        );
+        assert_eq!(scene.sound_queue.len(), 1);
+        assert_eq!(scene.sound_queue[0].cue, "window_break_medium");
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"breakable\glass\break_glass_medium.wav")
+        );
+    }
+
+    #[test]
+    fn retail_glass_break_sound_resolves_the_mesh_without_do_suffix() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        let catalog = std::path::Path::new("/tmp/omp-xdata-ref/data/database/sounds/breakable.txt");
+        if !house.is_file() || !catalog.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        assert!(scene
+            .dynamic_meshes
+            .iter()
+            .any(|mesh| mesh.name.eq_ignore_ascii_case("::Bathroom::glass01.DO")));
+        scene.sound_catalogs.insert(
+            "breakable".into(),
+            std::fs::read_to_string(catalog).unwrap(),
+        );
+        assert!(scene.dispatch_message(
+            "::Bathroom::glass01.DO",
+            "::Bathroom::glass01->A_Play3DSound(breakable, window_break_medium, \"\");",
+        ));
+        assert_eq!(scene.sound_queue.len(), 1);
+        assert_eq!(scene.sound_queue[0].cue, "window_break_medium");
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"breakable\glass\break_glass_medium.wav")
+        );
+    }
+
+    #[test]
+    fn test_dispatch_drawer_opener_trigger_sound() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.sound_catalogs.insert(
+            "dynamic".into(),
+            "[Wooden_Desk_Drawer_Open]\n{\n[Sound]\nFilename = dynamic\\door\\Wooden_Desk_Drawer_Open.wav;\n}\n"
+                .into(),
+        );
+        scene.triggers.push(SceneTrigger {
+            name: "::entrance03::New mesh 62::drawer::drawer-opener.TRIGGER".into(),
+            room_id: 0,
+            pos: [0.0; 3],
+            radius: 0.2,
+            trigger_type: 0,
+            enabled: true,
+        });
+        let dispatched = scene.dispatch_message(
+            "::entrance03::New mesh 62::drawer.DO",
+            "::entrance03::New mesh 62::drawer::drawer-opener->A_Play3DSound(dynamic, Wooden_Desk_Drawer_Open, \"\");",
+        );
+        assert!(
+            dispatched,
+            "a_play3dsound must resolve drawer-opener to its .TRIGGER entity record"
+        );
+        assert_eq!(scene.sound_queue.len(), 1);
+        assert_eq!(scene.sound_queue[0].cue, "Wooden_Desk_Drawer_Open");
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"dynamic\door\Wooden_Desk_Drawer_Open.wav")
+        );
+    }
+
+    #[test]
+    fn retail_drawer_sound_resolves_drawer_opener_trigger() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        let catalog = std::path::Path::new("/tmp/omp-xdata-ref/data/database/sounds/dynamic.txt");
+        if !house.is_file() || !catalog.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let near: Vec<_> = scene
+            .triggers
+            .iter()
+            .filter(|trigger| trigger.name.to_ascii_lowercase().contains("drawer-opener"))
+            .map(|trigger| trigger.name.clone())
+            .collect::<Vec<_>>();
+        scene
+            .sound_catalogs
+            .insert("dynamic".into(), std::fs::read_to_string(catalog).unwrap());
+        let dispatched = scene.dispatch_message(
+            "::entrance03::New mesh 62::drawer.DO",
+            "::entrance03::New mesh 62::drawer::drawer-opener->A_Play3DSound(dynamic, Wooden_Desk_Drawer_Open, \"\");",
+        );
+        assert!(dispatched, "parsed trigger names: {near:?}");
+        let queued = scene.sound_queue.last().expect("queued sound");
+        assert_eq!(queued.cue, "Wooden_Desk_Drawer_Open");
+        assert_eq!(
+            queued.filename.as_deref(),
+            Some(r"dynamic\door\Wooden_Desk_Drawer_Open.wav")
+        );
     }
 }

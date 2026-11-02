@@ -737,8 +737,11 @@ fn launch_3d_level(path: String, state: State<'_, GameProc>) -> Result<String, S
         "maxfx-engine binary not found — build with: cargo build -p maxfx-engine".to_string()
     })?;
     let p = PathBuf::from(&path);
-    if !p.is_file() {
-        return Err(format!("Level file not found: {}", p.display()));
+    if !p.exists() {
+        return Err(format!(
+            "Level or game directory not found: {}",
+            p.display()
+        ));
     }
     let child = Command::new(&engine)
         .args(["--window", &path])

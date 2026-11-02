@@ -15,7 +15,8 @@ use crate::scene::{
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Child;
 
 const W: usize = 960;
 const H: usize = 600;
@@ -24,6 +25,8 @@ const FAR_Z: f32 = 220.0;
 const EYE_HEIGHT: f32 = 1.65;
 /// One `DetailOffset` step from `materials.txt`, in metres toward the camera.
 const DETAIL_OFFSET_M: f32 = 0.02;
+/// `data/database/shooting.h` `#define BERETTA_BULLETDAMAGE 5`.
+const BERETTA_BULLET_DAMAGE: i32 = 5;
 
 #[derive(Clone, Copy)]
 struct ProjVert {
@@ -211,6 +214,14 @@ pub fn run_3d_walkthrough(
         world_sphere.unwrap_or("none")
     );
 
+    if scene.sound_catalogs.is_empty() {
+        scene.sound_catalogs = crate::load_sound_catalogs(&catalog_root(level_path));
+    }
+    scene.apply_startup_hitpoints();
+    scene.apply_startup_hides();
+    scene.apply_startup_enables();
+    let mut break_voice: Option<Child> = None;
+
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
     let base_dt = 1.0 / 60.0f32;
@@ -265,6 +276,9 @@ pub fn run_3d_walkthrough(
         // Interact (`E`): trigger nearest dynamic mesh / door within 6m
         if window.is_key_pressed(Key::E, KeyRepeat::No) {
             toggle_nearest_dynamic_mesh(&mut scene, &room_origins, player_pos, 36.0);
+            if scene.activate_nearest_trigger(&room_origins, player_pos, 36.0) {
+                play_queued_sounds(&mut scene, &catalog_root(level_path), &mut break_voice);
+            }
         }
 
         // Look controls (Arrows + left-mouse drag)
@@ -407,23 +421,32 @@ pub fn run_3d_walkthrough(
                     }
                 }
             }
-            if let Some((idx, _)) = best_hit {
-                let en = &mut enemies[idx];
-                en.health -= 1;
-                en.hit_flash = 0.25;
-                println!(
-                    "  3D Engine: Hit {}! (health={})",
-                    en.name,
-                    en.health.max(0)
-                );
-            } else {
-                // Also allow shooting nearby breakable barrels / doors along aim ray
-                let probe = [
-                    player_pos[0] + aim_dir[0] * 4.0,
-                    player_pos[1] + aim_dir[1] * 4.0,
-                    player_pos[2] + aim_dir[2] * 4.0,
-                ];
-                toggle_nearest_dynamic_mesh(&mut scene, &room_origins, probe, 16.0);
+            let mesh_hit = aim_hit_dynamic(&scene, &room_origins, player_pos, aim_dir);
+            match (mesh_hit, best_hit) {
+                (Some((midx, mt)), enemy) if enemy.is_none_or(|(_, et)| mt < et) => {
+                    if scene.damage_mesh(midx, BERETTA_BULLET_DAMAGE) {
+                        println!("  3D Engine: {} broke", scene.dynamic_meshes[midx].name);
+                        play_queued_sounds(&mut scene, &catalog_root(level_path), &mut break_voice);
+                    }
+                }
+                (_, Some((idx, _))) => {
+                    let en = &mut enemies[idx];
+                    en.health -= 1;
+                    en.hit_flash = 0.25;
+                    println!(
+                        "  3D Engine: Hit {}! (health={})",
+                        en.name,
+                        en.health.max(0)
+                    );
+                }
+                _ => {
+                    let probe = [
+                        player_pos[0] + aim_dir[0] * 4.0,
+                        player_pos[1] + aim_dir[1] * 4.0,
+                        player_pos[2] + aim_dir[2] * 4.0,
+                    ];
+                    toggle_nearest_dynamic_mesh(&mut scene, &room_origins, probe, 16.0);
+                }
             }
         }
 
@@ -468,6 +491,7 @@ pub fn run_3d_walkthrough(
             third_person = false;
             shot_clock += base_dt;
         }
+        scene.step_dynamic_anims(base_dt);
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
 
@@ -523,28 +547,19 @@ pub fn run_3d_walkthrough(
         }
 
         // 2. Render dynamic meshes (doors, breakables, furniture, vans, cameras)
-        for dm in &scene.dynamic_meshes {
-            if dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
-                continue;
-            }
-            let (mat, origin) = dynamic_world(dm, &room_origins);
-            render_poly_batch(
-                &dm.polys,
-                mat,
-                origin,
-                &scene,
-                cam_pos,
-                cam_right,
-                cam_up,
-                cam_fwd,
-                fov_scale,
-                use_lightmaps,
-                wireframe,
-                false,
-                &mut fb,
-                &mut zb,
-            );
-        }
+        draw_dynamic_meshes(
+            &scene,
+            &room_origins,
+            cam_pos,
+            cam_right,
+            cam_up,
+            cam_fwd,
+            fov_scale,
+            use_lightmaps,
+            wireframe,
+            &mut fb,
+            &mut zb,
+        );
 
         // 3. Render each character with the skin the level named.
         for en in &enemies {
@@ -775,7 +790,7 @@ fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32
         }
     }
     for dm in &scene.dynamic_meshes {
-        if dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
+        if dm.hidden || dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
             continue;
         }
         let (xform, origin) = dynamic_world(dm, rooms);
@@ -850,6 +865,144 @@ fn chase_eye(player: [f32; 3], cam_fwd: [f32; 3], dist: f32) -> [f32; 3] {
         player[1] - cam_fwd[1] * dist + CHASE_UP,
         player[2] - cam_fwd[2] * dist,
     ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_dynamic_meshes(
+    scene: &LdbScene,
+    room_origins: &BTreeMap<i32, [f32; 3]>,
+    cam_pos: [f32; 3],
+    cam_right: [f32; 3],
+    cam_up: [f32; 3],
+    cam_fwd: [f32; 3],
+    fov_scale: f32,
+    use_lightmaps: bool,
+    wireframe: bool,
+    fb: &mut [u32],
+    zb: &mut [f32],
+) {
+    for dm in &scene.dynamic_meshes {
+        if dm.hidden {
+            continue;
+        }
+        if dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
+            continue;
+        }
+        let (mat, origin) = dynamic_world(dm, room_origins);
+        render_poly_batch(
+            &dm.polys,
+            mat,
+            origin,
+            scene,
+            cam_pos,
+            cam_right,
+            cam_up,
+            cam_fwd,
+            fov_scale,
+            use_lightmaps,
+            wireframe,
+            false,
+            fb,
+            zb,
+        );
+    }
+}
+
+/// Closest dynamic mesh that has hit points and whose posed bounds meet the ray.
+fn aim_hit_dynamic(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    origin: [f32; 3],
+    dir: [f32; 3],
+) -> Option<(usize, f32)> {
+    let mut best: Option<(usize, f32)> = None;
+    for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
+        if dm.hidden || dm.hitpoints.is_none() || dm.polys.is_empty() {
+            continue;
+        }
+        let (mat, pos) = dynamic_world(dm, rooms);
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for poly in &dm.polys {
+            for v in &poly.vertices {
+                let p = xform_point(mat, pos, v.pos);
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(p[axis]);
+                    max[axis] = max[axis].max(p[axis]);
+                }
+            }
+        }
+        for axis in 0..3 {
+            min[axis] -= 0.2;
+            max[axis] += 0.2;
+        }
+        if let Some(t) = ray_slab(origin, dir, min, max) {
+            if (0.2..=40.0).contains(&t) && best.is_none_or(|(_, b)| t < b) {
+                best = Some((idx, t));
+            }
+        }
+    }
+    best
+}
+
+fn ray_slab(origin: [f32; 3], dir: [f32; 3], min: [f32; 3], max: [f32; 3]) -> Option<f32> {
+    let mut tmin = 0.0f32;
+    let mut tmax = f32::INFINITY;
+    for i in 0..3 {
+        if dir[i].abs() < 1e-8 {
+            if origin[i] < min[i] || origin[i] > max[i] {
+                return None;
+            }
+            continue;
+        }
+        let inv = 1.0 / dir[i];
+        let (mut t1, mut t2) = ((min[i] - origin[i]) * inv, (max[i] - origin[i]) * inv);
+        if t1 > t2 {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        tmin = tmin.max(t1);
+        tmax = tmax.min(t2);
+        if tmin > tmax {
+            return None;
+        }
+    }
+    if tmax < 0.0 {
+        return None;
+    }
+    Some(if tmin >= 0.0 { tmin } else { tmax })
+}
+
+fn play_queued_sounds(scene: &mut LdbScene, game_dir: &Path, voice: &mut Option<Child>) {
+    let queued = std::mem::take(&mut scene.sound_queue);
+    for sound in queued {
+        let Some(filename) = sound.filename.as_deref() else {
+            continue;
+        };
+        let Some(bytes) = crate::read_game_bytes(game_dir, &crate::story_wav_win_path(filename))
+        else {
+            continue;
+        };
+        crate::menu_ui::stop_voice(voice);
+        *voice = crate::menu_ui::start_voice(&bytes);
+    }
+}
+
+fn catalog_root(path: &Path) -> PathBuf {
+    let start = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let mut dir = start;
+    loop {
+        if dir.join("x_data.ras").is_file() || dir.join("data").is_dir() {
+            return dir.to_path_buf();
+        }
+        match dir.parent() {
+            Some(parent) if parent != dir => dir = parent,
+            _ => return start.to_path_buf(),
+        }
+    }
 }
 
 fn dynamic_world(dm: &SceneDynamicMesh, rooms: &BTreeMap<i32, [f32; 3]>) -> ([f32; 9], [f32; 3]) {
@@ -1424,6 +1577,21 @@ fn load_world_sphere(level_path: &Path, name: &str) -> Option<DecodedTexture> {
     })
 }
 
+fn draw_line(fb: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, col: u32) {
+    let steps = (x1 - x0).abs().max((y1 - y0).abs()).ceil() as i32;
+    if steps <= 0 || steps > 4000 {
+        return;
+    }
+    for s in 0..=steps {
+        let t = s as f32 / steps as f32;
+        let x = (x0 + (x1 - x0) * t) as i32;
+        let y = (y0 + (y1 - y0) * t) as i32;
+        if x >= 0 && x < W as i32 && y >= 0 && y < H as i32 {
+            fb[y as usize * W + x as usize] = col;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1479,6 +1647,8 @@ mod tests {
             point_lights: Vec::new(),
             rooms: Vec::new(),
             bytes_consumed: 0,
+            sound_catalogs: BTreeMap::new(),
+            sound_queue: Vec::new(),
         }
     }
 
@@ -1530,8 +1700,13 @@ mod tests {
             local_start_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             local_start_pos: [0.0; 3],
             toggled: false,
+            hidden: false,
+            hitpoints: None,
             polys: vec![quad],
             anims: Vec::new(),
+            active_track: None,
+            track_time: 0.0,
+            track_duration: 0.0,
         });
         let rooms = BTreeMap::new();
         assert!(hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
@@ -1551,19 +1726,68 @@ mod tests {
     fn player_faces_the_look_direction() {
         assert!((player_mesh_yaw(0.4) - 0.4).abs() < 1e-6);
     }
-}
 
-fn draw_line(fb: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, col: u32) {
-    let steps = (x1 - x0).abs().max((y1 - y0).abs()).ceil() as i32;
-    if steps <= 0 || steps > 4000 {
-        return;
+    #[test]
+    fn hidden_dynamic_mesh_is_not_drawn() {
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(glass_quad(false));
+        assert!(
+            painted_pixels(&scene) > 0,
+            "visible glass must cover pixels"
+        );
+        scene.dynamic_meshes[0].hidden = true;
+        assert_eq!(
+            painted_pixels(&scene),
+            0,
+            "::Bathroom::glass01.DO must be skipped when hidden"
+        );
     }
-    for s in 0..=steps {
-        let t = s as f32 / steps as f32;
-        let x = (x0 + (x1 - x0) * t) as i32;
-        let y = (y0 + (y1 - y0) * t) as i32;
-        if x >= 0 && x < W as i32 && y >= 0 && y < H as i32 {
-            fb[y as usize * W + x as usize] = col;
+
+    fn glass_quad(hidden: bool) -> SceneDynamicMesh {
+        SceneDynamicMesh {
+            name: "::Bathroom::glass01.DO".into(),
+            room_id: 0,
+            world_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            world_pos: [0.0; 3],
+            local_start_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            local_start_pos: [0.0; 3],
+            toggled: false,
+            hidden,
+            hitpoints: None,
+            polys: vec![ScenePoly {
+                vertices: vec![
+                    vert([0.0, 0.0, -1.0]),
+                    vert([0.0, 2.0, -1.0]),
+                    vert([0.0, 2.0, 1.0]),
+                    vert([0.0, 0.0, 1.0]),
+                ],
+                normal: [1.0, 0.0, 0.0],
+                material_id: 1,
+                lightmap_id: -1,
+            }],
+            anims: Vec::new(),
+            active_track: None,
+            track_time: 0.0,
+            track_duration: 0.0,
         }
+    }
+
+    fn painted_pixels(scene: &LdbScene) -> usize {
+        let mut fb = vec![0u32; W * H];
+        let mut zb = vec![f32::INFINITY; W * H];
+        draw_dynamic_meshes(
+            scene,
+            &BTreeMap::new(),
+            [-4.0, 1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            (H as f32) * 0.85,
+            false,
+            false,
+            &mut fb,
+            &mut zb,
+        );
+        fb.iter().filter(|px| **px != 0).count()
     }
 }

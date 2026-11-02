@@ -117,7 +117,7 @@ pub fn show_novel_session(chrome: &[u8], pages: &[NovelShownPage]) {
     stop_voice(&mut voice);
 }
 
-fn start_voice(wav: &[u8]) -> Option<Child> {
+pub(crate) fn start_voice(wav: &[u8]) -> Option<Child> {
     if wav.len() < 12 || &wav[..4] != b"RIFF" {
         return None;
     }
@@ -141,7 +141,7 @@ fn start_voice(wav: &[u8]) -> Option<Child> {
     None
 }
 
-fn stop_voice(voice: &mut Option<Child>) {
+pub(crate) fn stop_voice(voice: &mut Option<Child>) {
     if let Some(child) = voice.take() {
         let mut child = child;
         let _ = child.kill();
