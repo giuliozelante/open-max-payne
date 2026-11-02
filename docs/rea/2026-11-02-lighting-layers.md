@@ -278,8 +278,7 @@ The lightmap template's `DIFFUSE` term is therefore **zero** in retail: level po
 6 lights fit under the cap of 8.
 
 **Ruled out:** static point lights adding to lightmapped level polygons (in the house, every such draw had `n = 0`).
-Not checked: other levels and dynamic lights (muzzle flashes, `0x77cfb1`…). A dynamic light could still enter a
-level object's list.
+Not checked: other levels. Dynamic lights do enter level objects' lists (see the second capture below).
 
 **Engine consequence:** none. `render3d::rasterize_tri` already draws lightmapped polygons as
 `lightmap_modulate(texture, lightmap)` with no vertex diffuse.
@@ -291,9 +290,37 @@ passes the check without the CD (restore the link afterwards). Launch directly w
 or under `/tmp/claude-…` (leading `-` path component) failed with "Couldn't start process" / "Path not found",
 and so did the `explorer /desktop` + `cmd` wrapper this time.
 
+## Dynamic lights do reach level geometry (2026-11-02, second capture)
+
+**Setup.** Same house save. `e2_d3d8_driver_mfc.dll` loaded at `0x1d60000` this time, not `0x1c00000`, so a
+fixed-address script fails (`Invalid address 0x1c16ad1`). The capture drove winedbg interactively through a FIFO:
+break on save load (`0x556eac`), read the driver base from `info share`, then break on the three particle
+emitter `setFalloffRange` calls (`0x77cfb1`, `0x77d08e`, `0x77d5c8`, all in `PS_RTParticleEmitter` code). On the
+first hit it logged 2000 draws at `driver+0x16ad1` (lights `n`, device object, stage cache at
+`driver+0x84b70`/`+0x84cf0`/`+0x84be8`), in three rounds. The player fired the pistol before rounds 1 and 2.
+
+| Round | Trigger | Lightmapped level draws (stage 0 `ADD` uv1, stage 1 `MODULATE`) | Character draws |
+|------:|---------|------------------------------------------------------------------|-----------------|
+| 0 | `0x77cfb1` (ambient effect, before the gun was drawn) | 1897 × `n = 0` | 82 × `n = 6` |
+| 1 | `0x77d08e` (shot) | **923 × `n = 1`**, 830 × `n = 0` | `n` = 3…8 |
+| 2 | `0x77d08e` (shot, later) | 1700 × `n = 0` | `n` = 3…7 |
+
+**VERIFIED (dynamic):** right after a shot, one light enters the light lists of level geometry. Two level
+objects took most of those draws (533 and 286). It is gone by the next round, which matches a muzzle-flash
+lifetime. Round 0's emitter light did not reach level geometry.
+
+So the level template (`0x8b0718`: `DIFFUSE_COPY` → lightmap `COPY` → `DIFFUSE_ADD` → texture `MUL`) evaluates to
+**texture × (lightmap + Σ dynamic point-light diffuse)**. The static point lights never contribute (first
+capture). Dynamic particle lights do, using the D3D point-light formula above.
+
+**Engine consequence:** `render3d` has no dynamic lights. Its muzzle flash is a sprite only, and lightmapped
+polygons get no diffuse term. To match retail, a shot should add a short-lived point light whose diffuse term is
+added to the lightmap before the texture multiply. The emitter's light colour, range and lifetime come from the
+particle effect data (`PS_RTParticleEmitter`, `0x77d08e` path) and are not read yet.
+
 ## Open (golden data needed)
 
 1. ~~Object ambient~~ (done above: white).
 2. ~~Do static point lights also add to lightmapped level polygons?~~ No (see above, house only).
-3. Dynamic lights (`setFalloffRange` at `0x77cfb1`, `0x77d08e`, `0x77d5c8`): do they enter level-object light lists?
-   Capture `n` at `driver+0x16ad1` while firing a weapon.
+3. ~~Dynamic lights: do they enter level-object light lists?~~ Yes, after a shot (second capture above).
+4. Muzzle-flash light parameters (colour, range, lifetime) from the particle effect data behind `0x77d08e`.
