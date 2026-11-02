@@ -22,8 +22,14 @@ HYPOTHESIS: arg 0 is the camera's weight in percent. 100 attaches and 0 detaches
 ## Engine
 
 `LdbScene::attached_camera` is the receiver DO for a positive weight and `None` for 0. While attached, `render3d`
-takes the eye from the DO's world pose. Forward is the DO's z axis and up its y axis, the same convention as the
-startup flyover (`camera_flyover`). Right is up × forward, matching the player camera. The player keeps moving
+takes the eye from the DO's world pose. Forward is the DO's **−z** axis and up its y axis. Right is up × forward,
+matching the player camera.
+
+STRONGLY SUPPORTED, −z: every cutscene camera DO checked (`::street02::camera1`, `::finito::camera2`,
+`::Bathroom::camera2`, the startup `altitude::camera`, P3L6 `altitude::camera1`) is the same 24-poly model, a
+frustum from the pivot at z = 0 widening to z = −1.25 (18 vertices at the wide end). Offline frames from
+`::street02::camera1` agree: −z looks down the street at the parked car, +z stares up at the hotel wall. P3L6's
+camera on the altitude mover shows the same split. This is the 3ds Max camera convention. The player keeps moving
 underneath; retail disables controls with a separate `GM_SetPlayerControls`.
 
 `GM_SetPlayerControls(bool)` (61 uses) clears or sets `LdbScene::player_controls`. While it is off,
@@ -32,6 +38,8 @@ cutscene pairing only; the `MaxPayne_GameMode` handler has not been read.
 
 ## Open
 
-- The view pose has not been checked against a retail frame.
+- The view pose has been checked only in offline engine frames, not against a retail frame.
+- The startup flyover (`camera_flyover`) still uses **+z** for its forward vector; by the evidence above that is
+  backwards. It is not changed here.
 - Blend between weights (does 50 mix the views?), arg 1, field of view (`GM_ChangeFOV`).
 - `CAM_AnimateInPlace` (184) and `CAM_AnimateParented` (64).
