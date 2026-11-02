@@ -222,6 +222,13 @@ cd studio && ./build.sh
 - Dynamic RE recipe: mount the CD and link `.wine/dosdevices/d:` to the mount point, or the game stops
   at the "minimum installation" dialog. Use `winedbg "Z:\…\MaxPayne.exe" -nodialog < script`
   (native winedbg; the gdb proxy loses sync on thread creation). Don't `wineserver -k` while the user is playing.
+  Use `cont`, never `pass`, on breakpoint stops: `pass` forwards `0x80000003` to the game and kills it.
+- Virtual desktop for debug runs (alt+tab no longer hides the game):
+  `wine explorer /desktop=OpenMaxPayne,1280x720 cmd /c "winedbg --file <script.txt> <MaxPayne.exe> -nodialog > <log> 2>&1"`
+  (all paths in `winepath -w` form). Piping a script on stdin does not work through explorer, and
+  winedbg's stdout is lost there. That is why it uses `--file` plus the `cmd` redirect. End the script with `detach`.
+  Per-app `AppDefaults\…\Explorer\Desktop` registry keys had no effect under winedbg (tried, reverted).
+  The desktop still looks fullscreen, probably because it follows the game's resolution.
 - [ ] Production caller of KF VA apply `0x57cb70`
 - [ ] Exact type in `LocalCharacterInput+0x1b5` on animating-DO frames
 - [ ] Pause/Resume/Stop/Invert message → vt wiring

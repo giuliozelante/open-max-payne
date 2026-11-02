@@ -56,7 +56,31 @@ Factory call into ctor `0x57a9f0` from `0x56169b` (inside `KF_VertexAnimationLOD
 LOD forwards after get: **`+0x5c` / `+0x64` / `+0x70` / … — never `+0x48`**.  
 LOD `+0x5c` (`0x561d90`) loops children and vcalls child `+0x5c` (≠ apply).
 
-## Dynamic attempt (2026-11-02) — INCONCLUSIVE
+## Caller found (2026-11-02) — in `e2mfc.dll`, not `MaxPayne.exe`
+
+**VERIFIED (dynamic + /proc maps + DLL exports):** after a save loads, `0x57cb70` is entered with
+`[esp]` = `e2mfc.dll` + `0x1ce8f`. `e2mfc.dll` is relocated at runtime (`0x8d0000` in one run,
+`0x9d0000` in the next; preferred base `0x10000000`). That is why the exe-only static search found no
+caller, and why the address looked like it was "outside every module".
+
+| e2mfc VA | Export (by ordinal) | Role |
+|----------|---------------------|------|
+| `0x1001cba0` | `P_BaseObject::executeHierarchy()` (protected) | Recursive scene walk; `0x1001ce8c: call [eax+0x48]` on each object, then children via `getFirstChild` `0x10040f60` and siblings via `[obj+0xec]` |
+| `0x10018ec0` | `P_Scene::render(P_Camera*)` | Calls `executeHierarchy` at `0x1001906f` (return `+0x19074`) |
+
+Chain: `P_Scene::render` → `P_BaseObject::executeHierarchy` (recursive, `0x1001d10f`) →
+`call [vt+0x48]` → `KF_VertexAnimation` apply `0x57cb70` → morph `0x57c860`. A `bool` is returned and
+tested at `0x1001ce8f` (`test al,al`).
+
+**STRONGLY SUPPORTED:** `P_BaseObject` slot `+0x48` = `executeAlways()`, `+0x4c` = `executeVisible()`.
+Both exports fold to the same default body `0x10035710`. `executeHierarchy` calls `+0x48`
+before the culling helper `0x1001c900` and calls `+0x4c` only after it (`0x1001d04b`). So KF vertex
+animation is applied in the scene graph's per-render "execute always" pass, not by a KF2-specific driver.
+
+Tooling: the earlier crashes were caused by the debugger script (`pass` forwarded `0x80000003`), not by the game.
+Use `cont`; `bt` is broken in this winedbg (`Unknown thread id`), so dump `x/32x $esp` instead.
+
+## Dynamic attempt (2026-11-02) — INCONCLUSIVE (superseded above)
 
 - The VA vtable `0x7d11b8` is a true primary (COL `0x7eb7c0`, offset 0), so the slot `+0x48` is correct
   (unlike the DO note, whose "primary" was a secondary vtable).
@@ -66,7 +90,15 @@ LOD `+0x5c` (`0x561d90`) loops children and vcalls child `+0x5c` (≠ apply).
   every DLL in the load log. The same stop then repeated with a page fault at `0xffbb11b0`, and the game
   crashed. Treat the return address as **UNKNOWN / unreliable**. Possibly the attach broke
   the stack, or the caller is generated code.
-- Next try: launch under `winedbg` from the start (that method was stable for the DO runs) in a virtual
+- Run from launch (2026-11-02): first hit right after a save loaded ("Riprendi Partita"), with
+  `[esp] = 0x9ece8f`, exactly `0x100000` away from the earlier `0x8ece8f`. No game-folder DLL has
+  a call returning to `…ce8f`. HYPOTHESIS: `[esp]` at entry is a heap value, not a return address,
+  so `0x57cb70` is reached by push+jmp or a tail jump, not a `call [reg+0x48]`. The process then died
+  because the script used `pass`, which forwards the debugger's own `0x80000003` breakpoint trap to the
+  game (a tooling error, not a game bug). Use `cont` on breakpoint stops.
+- Next try: dump `x/32x $esp` at each stop and pick the stack slots in `.text` (`0x401000`–`0x7c903c`)
+  that follow a call instruction.
+- Earlier plan: launch under `winedbg` from the start (that method was stable for the DO runs) in a virtual
   desktop, and break on `0x57c860` (morph) as well as `0x57cb70`.
 
 ## Who vcalls VA `+0x48`?
