@@ -164,8 +164,56 @@ point lights only. The engine's directional `shade` (`render3d.rs`, non-lightmap
 **Object diffuse/emissive (VERIFIED, static, `0x5560a5`… and `0x5561c5`…).** The builder reads a mode
 from the runtime material at `+0x46` (`0x574970`): mode 1 → `setEmissiveColor(c)`, mode 2 →
 `setDiffuseColor(c)`, where `c` is a colour argument. Other values set neither (emissive stays 0, diffuse 255).
-Blend at `+0x56` (`0x5749d0`): 0 `COPY`, 1 `ADD`, 2 `MUL`. UNKNOWN: which runtime class holds `+0x46`, the source of `c`,
-and the per-material values.
+Blend at `+0x56` (`0x5749d0`): 0 `COPY`, 1 `ADD`, 2 `MUL`. The colour `c` is the runtime material's `+0x26`
+(`0x574950`); ambient is `+0x16` (`0x574940`).
+
+## Object material record on disk (VERIFIED, static reader + KFS bytes)
+
+Object materials come from **KF2/KFS** files, not the `.ldb`. In `x_data.ras` the parent chunk `0x1000f` occurs
+in 305 `.kf2` and 157 `.kfs` files (e.g. `skins/young_max_payne/young_max_payne_L0.kfs` at offset 0) and in no
+`.ldb`. Chunk header: tag `0x0c` + `id`, `version`, `size` (see `docs/specs/rps_format.md`).
+
+`0x577570` reads chunk `0x1000f`: name string, `int count`, then `count` material sub-chunks (`0x83`-byte
+runtime records). `0x574a30` reads each sub-chunk `0x10010`, in this order (tags: `0x0d` string, `0x0e` bool,
+`0x14` int, `0x09` float):
+
+| # | Field | Runtime / setter |
+|---|-------|------------------|
+| 1 | name | `0x6dfb30` |
+| 2–6 | 5 bools | `0x5748e0`, `0x77b190`, `0x574900`, `0x574910`, `0x77c050` |
+| 7 | int **mode** | `0x574980` → `+0x46` |
+| 8 | int | `0x5749a0` → `+0x4a` |
+| 9 | int | `0x576410` |
+| 10 | 4 floats **ambient** | `+0x16` |
+| 11 | 4 floats **colour `c`** | `+0x26` |
+| 12 | 4 floats | `+0x36` (`0x574960`) |
+| 13–14 | 2 floats | `0x574930`, `0x5749c0` → `+0x62` |
+| 15–16 | 2 ints | `0x5749e0`, … |
+| 17 | float | … (reader continues past `0x574cbe`, not mapped) |
+
+Example, material `Face` in `young_max_payne_L0.kfs`: bools all 0; mode **2**, 0, 0; ambient
+`(255, 255, 255, 255)`, which matches the golden white at `0x556eac`; colour `(172, 143, 127, 255)`; third colour
+`(229, 229, 229, 255)`; then `1.0`, `8.0`, `0`, `0`, `50.0`; then bool 1 and texture sub-chunk `0x10011`
+(`FaceTexture`, four `face_maxpayne_*.jpg` frames). With mode 2, `c` becomes the D3D **diffuse** colour.
+
+## Lights the exe creates (VERIFIED, imports)
+
+Only `P_PointLight` (`0x5f9ee7`) and `P_SpotLight` (`0x5f9c87`) are constructed. No directional light, and no
+`P_Scene::setAmbientColor`. `P_VirtualLight::setMaximumLightsPerObject(8)` at `0x40deb5`. More
+`setFalloffRange` calls at `0x77cfb1`, `0x77d08e`, `0x77d5c8` (dynamic lights, not read yet).
+
+## Open: does lighting reach object pixels?
+
+Driver stage combiner `0x10007c70`: for a **texture** layer (`layer & 0x78000 == 0x8000`) with blend `COPY` on
+stage 0 (`0x10008581`), both candidate stage setups use op 2 / 3 with the texture as the selected argument.
+That is HYPOTHESIS `SELECTARG(TEXTURE)`, which drops the vertex diffuse. The `MUL` branch uses op 4 `MODULATE` with `CURRENT`. The object
+builder adds no shading layer, only a `COPY` texture layer (golden data above). So either object materials are
+unlit at the pixel (texture only), or e2mfc / the driver inserts a diffuse term somewhere not found yet.
+`enableLighting` (`0x10025020`) sets `+0x28 = 1` and recomputes vertex-format bits (`0x10025ac0`), with no layer change seen.
+
+**Golden data to settle it:** in a loaded level, break on the driver's `SetTextureStageState` calls during a
+character draw and log stage 0 `COLOROP` / `COLORARG1` / `COLORARG2`. Until then the engine keeps its
+directional `shade` for non-lightmapped polygons. Don't swap in point-light lighting before this is settled.
 
 ## Open (golden data needed)
 
