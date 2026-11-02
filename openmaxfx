@@ -153,7 +153,7 @@ cmd_test() {
 }
 
 cmd_play3d() {
-  local level="${1:-$HOME/Games/MaxPayne1/data.disabled-hires/database/levels/front_end/Tutorial.ldb}"
+  local level="${1:-$HOME/Games/MaxPayne1}"
   local bin="$ROOT/target/release/maxfx-engine"
   [[ -x "$bin" ]] || bin="$ROOT/target/debug/maxfx-engine"
   if [[ -x "$bin" ]]; then

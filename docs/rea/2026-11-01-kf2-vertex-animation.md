@@ -1,0 +1,126 @@
+# KF2 vertex animation (MaxPayne.exe)
+
+Artifact: `/home/gzelante/Games/MaxPayne1/MaxPayne.exe`  
+Evidence-only. Separate from DO_Animate mesh-curve path (`docs/rea/2026-11-01-do-animate-playback.md`).
+
+## Class
+
+`.?AVKF_VertexAnimation@KF2@@` — vtable `0x7d11b8` (secondary vt at `+0x10` = `0x7d11a8`).  
+Name thunk `0x57ba70` returns `0x884e7c` = `KF_VertexAnimation`.
+
+Ctor installs those vts at `0x57aa43` / `0x57aa49`. Slot0 `0x57a9d0` = deleting dtor.  
+Factory call into ctor `0x57a9f0` from `0x56169b` (inside `KF_VertexAnimationLODs` build at eh-prologue `0x561543`).
+
+## Related KF2 vtables
+
+| Class | Vt | Notes |
+|-------|-----|--------|
+| `KF_VirtualObject` | `0x7d0d90` | Base |
+| `KF_ObjectAnimation` | `0x7d0e94` | Driven object at VA `+0x115` |
+| `KF_VertexAnimationLODs` | `0x7d1074` | Owns VA children; `+0x48 = 0x422180` (returns `1`) |
+| `KF_VertexAnimation` | `0x7d11b8` | Apply at `+0x48` |
+| `KF_ObjectAnimationLODs` | `0x7d1334` | Parallel LOD; `+0x48` also stub `0x422180` |
+
+## Apply / morph
+
+| Addr | Vt slot | Role (bytes) |
+|------|---------|--------------|
+| `0x57cb70` | VA `+0x48` | Gate `0x57c850` = `[this+0x119]`; drives `+0x115` via vcalls `+0x64`/`+0x10`/`+0x30`; on success `E8` → `0x57c860` |
+| `0x57c860` | (callee) | Morph/skin: walks `+0x131`…`+0x135` (stride 24 via `0x2aaaaaab`/`sar 3`); **3×vec3 × 3×3** at `0x57c954`–`0x57c9a4`; matrix at `edi+0x5c` after `+0xe0` flag |
+| `0x57d4d0` | `+0x70` | → `0x57baa0` then vcall `+0x70` |
+| `0x57de60` | `+0x24` | If `[obj+0x17d]`, vcall `+0x24` on `0x57ba90()` |
+
+`0x57cb70`: **no** `E8` callers; sole imm32 ref = vt slot `0x7d1200`.  
+`0x57c860`: sole `E8` from `0x57cc38` (inside apply).
+
+## Object at `+0x115` / `+0x111` / `+0x119`
+
+| Addr | Role (bytes) |
+|------|----------------|
+| `0x57c3a0` | Alloc `0x19b`, ctor `0x54c1c0` → store at `+0x115` (callers `0x57b0ab`, `0x57b2d1`) |
+| `0x54c1c0` | vt `0x7d0e94` = `KF_ObjectAnimation` (after base `0x54b720`) |
+| `0x57c850` | return `[this+0x119]` (apply gate) |
+| `0x57baa0` | return `*([this+0x111])` |
+| `0x57ba90` | return `[this+0x115]` |
+| `0x57ba80` | vcall `+0x5c` on `+0x115` |
+
+`KF_ObjectAnimation` slots used here: `+0x5c = 0x54fbc0` → `[this+0x111]` → `0x56cbe0` (ptr-vector walk → `0x5584e0`); `+0x64 = 0x54dc20` = `([this+0x119])[index]`.
+
+## LOD container path
+
+`KF_VertexAnimationLODs` getter `0x562440`:
+
+- `[this+0x111]` as list base
+- `__RTDynamicCast` args: from `.?AVP_BaseObject@@` (`0x884700`) → `.?AVKF_VertexAnimation@KF2@@` (`0x884c00`)
+
+LOD forwards after get: **`+0x5c` / `+0x64` / `+0x70` / … — never `+0x48`**.  
+LOD `+0x5c` (`0x561d90`) loops children and vcalls child `+0x5c` (≠ apply).
+
+## Caller found (2026-11-02) — in `e2mfc.dll`, not `MaxPayne.exe`
+
+**VERIFIED (dynamic + /proc maps + DLL exports):** after a save loads, `0x57cb70` is entered with
+`[esp]` = `e2mfc.dll` + `0x1ce8f`. `e2mfc.dll` is relocated at runtime (`0x8d0000` in one run,
+`0x9d0000` in the next; preferred base `0x10000000`). That is why the exe-only static search found no
+caller, and why the address looked like it was "outside every module".
+
+| e2mfc VA | Export (by ordinal) | Role |
+|----------|---------------------|------|
+| `0x1001cba0` | `P_BaseObject::executeHierarchy()` (protected) | Recursive scene walk; `0x1001ce8c: call [eax+0x48]` on each object, then children via `getFirstChild` `0x10040f60` and siblings via `[obj+0xec]` |
+| `0x10018ec0` | `P_Scene::render(P_Camera*)` | Calls `executeHierarchy` at `0x1001906f` (return `+0x19074`) |
+
+Chain: `P_Scene::render` → `P_BaseObject::executeHierarchy` (recursive, `0x1001d10f`) →
+`call [vt+0x48]` → `KF_VertexAnimation` apply `0x57cb70` → morph `0x57c860`. A `bool` is returned and
+tested at `0x1001ce8f` (`test al,al`).
+
+**STRONGLY SUPPORTED:** `P_BaseObject` slot `+0x48` = `executeAlways()`, `+0x4c` = `executeVisible()`.
+Both exports fold to the same default body `0x10035710`. `executeHierarchy` calls `+0x48`
+before the culling helper `0x1001c900` and calls `+0x4c` only after it (`0x1001d04b`). So KF vertex
+animation is applied in the scene graph's per-render "execute always" pass, not by a KF2-specific driver.
+
+Tooling: the earlier crashes were caused by the debugger script (`pass` forwarded `0x80000003`), not by the game.
+Use `cont`; `bt` is broken in this winedbg (`Unknown thread id`), so dump `x/32x $esp` instead.
+
+## Dynamic attempt (2026-11-02) — INCONCLUSIVE (superseded above)
+
+- The VA vtable `0x7d11b8` is a true primary (COL `0x7eb7c0`, offset 0), so the slot `+0x48` is correct
+  (unlike the DO note, whose "primary" was a secondary vtable).
+- Not hit at all during boot, the menu or the new-game cutscene (runs 1–2).
+- Attaching `winedbg` to the running game in the house: `0x57cb70` was hit with `this = 0x68016b8`,
+  `[esp] = 0x8ece8f`. That address is outside every PE section (image ends at `0x8ca56e`) and outside
+  every DLL in the load log. The same stop then repeated with a page fault at `0xffbb11b0`, and the game
+  crashed. Treat the return address as **UNKNOWN / unreliable**. Possibly the attach broke
+  the stack, or the caller is generated code.
+- Run from launch (2026-11-02): first hit right after a save loaded ("Riprendi Partita"), with
+  `[esp] = 0x9ece8f`, exactly `0x100000` away from the earlier `0x8ece8f`. No game-folder DLL has
+  a call returning to `…ce8f`. HYPOTHESIS: `[esp]` at entry is a heap value, not a return address,
+  so `0x57cb70` is reached by push+jmp or a tail jump, not a `call [reg+0x48]`. The process then died
+  because the script used `pass`, which forwards the debugger's own `0x80000003` breakpoint trap to the
+  game (a tooling error, not a game bug). Use `cont` on breakpoint stops.
+- Next try: dump `x/32x $esp` at each stop and pick the stack slots in `.text` (`0x401000`–`0x7c903c`)
+  that follow a call instruction.
+- Earlier plan: launch under `winedbg` from the start (that method was stable for the DO runs) in a virtual
+  desktop, and break on `0x57c860` (morph) as well as `0x57cb70`.
+
+## Who vcalls VA `+0x48`?
+
+Static rung:
+
+- 44× `call [reg+0x48]` in `.text`. None in `0x57xxxx`.
+- Several that also test `[obj+0x125]` (e.g. `0x64d899`, `0x69570d`, `0x507be9`, `0x70a6b4`) then **cmp return to a char/id** from `0x512080` — different class family than KF apply (which returns `bool` in `al`).
+- LOD child API never selects slot `0x48`.
+
+**Gap:** production caller of `0x57cb70` not identified on static. Next rung = dynamic (break on `0x57cb70` under Wine) or REA `procedure_callers` once Ghidra answers (previously timed out).
+
+## Related strings
+
+- SKD mismatch `0x885019`… — **zero** imm32 code refs.
+- `BoneMatrices@P_VirtualObject` at `0x862678`.
+- Debug format strings `VertexAnimation %s…` — no imm32 code refs.
+
+## Open
+
+- Dynamic: who enters `0x57cb70`.
+- Exact type behind `+0x111` list (cast source is `P_BaseObject`).
+- What `+0x119` gate means when non-null (LOD side vs flag).
+- `KF_ObjectKeyframeAnimationCallback` bone sample path.
+- Character / `SKD` load → this VA tree.

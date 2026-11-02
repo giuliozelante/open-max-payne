@@ -1,24 +1,32 @@
 //! Interactive 3D third-person / first-person Max Payne 1 engine walkthrough (`maxfx-engine --window`).
 //!
 //! Features:
-//! - Third-person over-the-shoulder camera showing **Max Payne (`Payne_Max_L0.KFS`)** with walking
-//!   leg-swing animation + gun-aiming posture (`V` toggles 3rd-person / 1st-person)
+//! - Third-person over-the-shoulder camera showing **Max Payne (`Payne_Max_L0.KFS`)** skinned
+//!   with `PAYNE_MAX_L0.SKD` + `Stand.kf2` / `Run.kf2` (`V` toggles 3rd / 1st person)
 //! - Seamless room portal connectivity (`origin_v = origin_u - ex.relative_offset`)
 //! - Sloped floor plane interpolation + strict floor/wall boundary clamping (cannot fall out of world)
 //! - Visible 3D enemies (`doe_johnny_l0.kfs`) spawned via level `C_Teleport` FSM scripts + AI pursuit
 //! - Shooting (`F` / `Ctrl` / Right-Ctrl), Bullet-Time slow-motion (`B` / Right-Click), and `E` door/barrel interaction
 
-use crate::kf2::{load_character_meshes, KfsMesh};
-use crate::scene::{DecodedLightmap, DecodedTexture, LdbScene, ScenePoly, SceneVertex};
+use crate::kf2::{load_character_rigs, load_skin_body, pose_mesh, CharacterRig};
+use crate::scene::{
+    decode_texture_blob, material_policy, CameraFlyover, DecodedLightmap, DecodedTexture, LdbScene,
+    MaterialPolicy, SceneDynamicMesh, ScenePoly, SceneVertex,
+};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Child;
 
 const W: usize = 960;
 const H: usize = 600;
 const NEAR_Z: f32 = 0.15;
 const FAR_Z: f32 = 220.0;
 const EYE_HEIGHT: f32 = 1.65;
+/// One `DetailOffset` step from `materials.txt`, in metres toward the camera.
+const DETAIL_OFFSET_M: f32 = 0.02;
+/// `data/database/shooting.h` `#define BERETTA_BULLETDAMAGE 5`.
+const BERETTA_BULLET_DAMAGE: i32 = 5;
 
 #[derive(Clone, Copy)]
 struct ProjVert {
@@ -51,12 +59,19 @@ struct EnemyState {
     walk_phase: f32,
     health: i32,
     hit_flash: f32,
+    rig_index: usize,
+    pursues: bool,
+    invulnerable: bool,
 }
 
 pub fn run_3d_walkthrough(
     mut scene: LdbScene,
     level_path: &Path,
     title: &str,
+    player_start: Option<&str>,
+    player_skin: Option<&str>,
+    world_sphere: Option<&str>,
+    shot: Option<CameraFlyover>,
 ) -> Result<(), String> {
     let mut window = Window::new(
         title,
@@ -70,16 +85,43 @@ pub fn run_3d_walkthrough(
     .map_err(|e| e.to_string())?;
     window.set_target_fps(60);
 
-    let (player_mesh, enemy_mesh) = load_character_meshes(level_path);
+    let (catalog_player, johnny_rig) = load_character_rigs(level_path);
+    let player_rig = player_skin
+        .filter(|id| !id.is_empty())
+        .and_then(|id| load_skin_body(level_path, id).map(|body| body.rig))
+        .or(catalog_player);
+    let sky = world_sphere.and_then(|name| load_world_sphere(level_path, name));
 
     let mut room_origins: BTreeMap<i32, [f32; 3]> = BTreeMap::new();
     for r in &scene.rooms {
         room_origins.insert(r.id, r.world_origin);
     }
 
+    let mut bodies: Vec<CharacterRig> = Vec::new();
+    if let Some(johnny) = johnny_rig {
+        bodies.push(johnny);
+    }
+    let johnny_index = if bodies.is_empty() { None } else { Some(0) };
+    let mut skin_cache: BTreeMap<String, (usize, bool)> = BTreeMap::new();
+
     // Build active enemies from `scene.characters` (already C_Teleport-resolved)
     let mut enemies: Vec<EnemyState> = Vec::new();
     for ch in &scene.characters {
+        let key = ch.skin.to_ascii_lowercase();
+        let (rig_index, invulnerable) = if let Some(hit) = skin_cache.get(&key).copied() {
+            hit
+        } else if let Some(body) = load_skin_body(level_path, &ch.skin) {
+            let idx = bodies.len();
+            let inv = body.invulnerable;
+            bodies.push(body.rig);
+            skin_cache.insert(key, (idx, inv));
+            (idx, inv)
+        } else if let Some(idx) = johnny_index {
+            skin_cache.insert(key, (idx, false));
+            (idx, false)
+        } else {
+            continue;
+        };
         let ro = room_origins.get(&ch.room_id).copied().unwrap_or([0.0; 3]);
         let mut wy = ro[1] + ch.pos[1];
         if let Some(fy) = find_floor_y(
@@ -96,41 +138,45 @@ pub fn run_3d_walkthrough(
             world_pos: [ro[0] + ch.pos[0], wy, ro[2] + ch.pos[2]],
             yaw: 0.0,
             walk_phase: 0.0,
-            health: 2,
+            health: if ch.starts_dead() { 0 } else { 2 },
             hit_flash: 0.0,
+            rig_index,
+            pursues: ch.pursues(),
+            invulnerable,
         });
     }
-    // Also place an active mobster guard in ::Alley2 (room 2) if present so the player encounters
-    // an enemy right outside the StartRoom door.
-    if let Some(&alley2_ro) = room_origins.get(&2) {
-        if !enemies.iter().any(|e| e.room_id == 2) {
-            let gx = alley2_ro[0] - 8.0;
-            let gz = alley2_ro[2] + 1.0;
-            let gy =
-                find_floor_y(&scene, gx, alley2_ro[1] - 5.0, gz).unwrap_or(alley2_ro[1] - 10.0);
-            enemies.push(EnemyState {
-                name: "::Alley2::Guard_01".into(),
-                room_id: 2,
-                world_pos: [gx, gy, gz],
-                yaw: 0.0,
-                walk_phase: 0.0,
-                health: 2,
-                hit_flash: 0.0,
-            });
+    // Tutorial-only stand-in. The house has no room named Alley, so this stays out of New Game.
+    let alley_id = scene
+        .rooms
+        .iter()
+        .find(|r| r.name.to_ascii_lowercase().contains("alley"))
+        .map(|r| r.id);
+    if let Some(alley_id) = alley_id {
+        if let Some(&alley_ro) = room_origins.get(&alley_id) {
+            if !enemies.iter().any(|e| e.room_id == alley_id) {
+                let gx = alley_ro[0] - 8.0;
+                let gz = alley_ro[2] + 1.0;
+                let gy =
+                    find_floor_y(&scene, gx, alley_ro[1] - 5.0, gz).unwrap_or(alley_ro[1] - 10.0);
+                if let Some(rig_index) = johnny_index {
+                    enemies.push(EnemyState {
+                        name: "::Alley2::Guard_01".into(),
+                        room_id: alley_id,
+                        world_pos: [gx, gy, gz],
+                        yaw: 0.0,
+                        walk_phase: 0.0,
+                        health: 2,
+                        hit_flash: 0.0,
+                        rig_index,
+                        pursues: true,
+                        invulnerable: false,
+                    });
+                }
+            }
         }
     }
 
-    let mut jp_idx = scene
-        .jumppoints
-        .iter()
-        .position(|j| j.name.contains("StartRoom") && j.name.contains("Jumppoint"))
-        .or_else(|| {
-            scene
-                .jumppoints
-                .iter()
-                .position(|j| j.name.contains("Jumppoint"))
-        })
-        .unwrap_or(0);
+    let mut jp_idx = scene.spawn_jumppoint_index(player_start);
 
     let spawn_pos =
         |scene: &LdbScene, room_origins: &BTreeMap<i32, [f32; 3]>, idx: usize| -> [f32; 3] {
@@ -158,17 +204,34 @@ pub fn run_3d_walkthrough(
     let mut use_lightmaps = true;
     let mut wireframe = false;
     let mut last_mouse: Option<(f32, f32)> = None;
+    let mut anim_clock = 0.0f32;
+    let mut shot_clock = 0.0f32;
     println!(
-        "  3D Engine: Spawned ({} enemies loaded, player mesh={}) | WASD move, Mouse/Arrows look, F/Ctrl shoot, B/RightClick Bullet-Time, E interact, V 3rd/1st person, Tab next spawn, G fly/walk",
+        "  3D Engine: Spawned ({} actors, {} skins, player={}, sky={}) | WASD move, Mouse/Arrows look, F/Ctrl shoot, B/RightClick Bullet-Time, E interact, V 3rd/1st person, Tab next spawn, G fly/walk",
         enemies.len(),
-        player_mesh.is_some()
+        skin_cache.len(),
+        player_skin.unwrap_or("max_payne"),
+        world_sphere.unwrap_or("none")
     );
+
+    if scene.sound_catalogs.is_empty() {
+        scene.sound_catalogs = crate::load_sound_catalogs(&catalog_root(level_path));
+    }
+    scene.apply_startup_hitpoints();
+    scene.apply_startup_hides();
+    scene.apply_startup_enables();
+    let mut break_voice: Option<Child> = None;
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
     let base_dt = 1.0 / 60.0f32;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        if let Some(shot) = shot.as_ref() {
+            if shot_clock >= shot.duration || window.is_key_pressed(Key::Space, KeyRepeat::No) {
+                break;
+            }
+        }
         if window.is_key_pressed(Key::V, KeyRepeat::No) {
             third_person = !third_person;
         }
@@ -213,6 +276,9 @@ pub fn run_3d_walkthrough(
         // Interact (`E`): trigger nearest dynamic mesh / door within 6m
         if window.is_key_pressed(Key::E, KeyRepeat::No) {
             toggle_nearest_dynamic_mesh(&mut scene, &room_origins, player_pos, 36.0);
+            if scene.activate_nearest_trigger(&room_origins, player_pos, 36.0) {
+                play_queued_sounds(&mut scene, &catalog_root(level_path), &mut break_voice);
+            }
         }
 
         // Look controls (Arrows + left-mouse drag)
@@ -275,11 +341,13 @@ pub fn run_3d_walkthrough(
             mv[2] -= right[2];
         }
         let mv_len = (mv[0] * mv[0] + mv[2] * mv[2]).sqrt();
-        if mv_len > 0.01 {
+        let player_moving = mv_len > 0.01;
+        if player_moving {
             walk_phase += player_dt * speed * 1.9;
         } else {
             walk_phase = 0.0;
         }
+        anim_clock += player_dt;
 
         if fly_mode {
             if window.is_key_down(Key::Space) {
@@ -297,12 +365,12 @@ pub fn run_3d_walkthrough(
             let nx = player_pos[0] + dx;
             let nz = player_pos[2] + dz;
             // Strict boundary & wall check: never allow stepping off walkable floor into void!
-            if can_stand_at(&scene, nx, player_pos[1], nz) {
+            if can_stand_at(&scene, &room_origins, nx, player_pos[1], nz) {
                 player_pos[0] = nx;
                 player_pos[2] = nz;
-            } else if can_stand_at(&scene, nx, player_pos[1], player_pos[2]) {
+            } else if can_stand_at(&scene, &room_origins, nx, player_pos[1], player_pos[2]) {
                 player_pos[0] = nx;
-            } else if can_stand_at(&scene, player_pos[0], player_pos[1], nz) {
+            } else if can_stand_at(&scene, &room_origins, player_pos[0], player_pos[1], nz) {
                 player_pos[2] = nz;
             }
 
@@ -333,7 +401,7 @@ pub fn run_3d_walkthrough(
             // Raycast against living enemies
             let mut best_hit: Option<(usize, f32)> = None;
             for (idx, en) in enemies.iter().enumerate() {
-                if en.health <= 0 {
+                if en.health <= 0 || en.invulnerable {
                     continue;
                 }
                 let center = [en.world_pos[0], en.world_pos[1] + 1.0, en.world_pos[2]];
@@ -353,23 +421,32 @@ pub fn run_3d_walkthrough(
                     }
                 }
             }
-            if let Some((idx, _)) = best_hit {
-                let en = &mut enemies[idx];
-                en.health -= 1;
-                en.hit_flash = 0.25;
-                println!(
-                    "  3D Engine: Hit {}! (health={})",
-                    en.name,
-                    en.health.max(0)
-                );
-            } else {
-                // Also allow shooting nearby breakable barrels / doors along aim ray
-                let probe = [
-                    player_pos[0] + aim_dir[0] * 4.0,
-                    player_pos[1] + aim_dir[1] * 4.0,
-                    player_pos[2] + aim_dir[2] * 4.0,
-                ];
-                toggle_nearest_dynamic_mesh(&mut scene, &room_origins, probe, 16.0);
+            let mesh_hit = aim_hit_dynamic(&scene, &room_origins, player_pos, aim_dir);
+            match (mesh_hit, best_hit) {
+                (Some((midx, mt)), enemy) if enemy.is_none_or(|(_, et)| mt < et) => {
+                    if scene.damage_mesh(midx, BERETTA_BULLET_DAMAGE) {
+                        println!("  3D Engine: {} broke", scene.dynamic_meshes[midx].name);
+                        play_queued_sounds(&mut scene, &catalog_root(level_path), &mut break_voice);
+                    }
+                }
+                (_, Some((idx, _))) => {
+                    let en = &mut enemies[idx];
+                    en.health -= 1;
+                    en.hit_flash = 0.25;
+                    println!(
+                        "  3D Engine: Hit {}! (health={})",
+                        en.name,
+                        en.health.max(0)
+                    );
+                }
+                _ => {
+                    let probe = [
+                        player_pos[0] + aim_dir[0] * 4.0,
+                        player_pos[1] + aim_dir[1] * 4.0,
+                        player_pos[2] + aim_dir[2] * 4.0,
+                    ];
+                    toggle_nearest_dynamic_mesh(&mut scene, &room_origins, probe, 16.0);
+                }
             }
         }
 
@@ -377,7 +454,7 @@ pub fn run_3d_walkthrough(
         let player_feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
         for en in &mut enemies {
             en.hit_flash = (en.hit_flash - base_dt).max(0.0);
-            if en.health <= 0 {
+            if en.health <= 0 || !en.pursues {
                 continue;
             }
             let dx = player_feet[0] - en.world_pos[0];
@@ -390,7 +467,7 @@ pub fn run_3d_walkthrough(
                     let step = 2.6 * world_dt;
                     let nx = en.world_pos[0] + (dx / dist) * step;
                     let nz = en.world_pos[2] + (dz / dist) * step;
-                    if can_stand_at(&scene, nx, en.world_pos[1] + EYE_HEIGHT, nz) {
+                    if can_stand_at(&scene, &room_origins, nx, en.world_pos[1] + EYE_HEIGHT, nz) {
                         en.world_pos[0] = nx;
                         en.world_pos[2] = nz;
                         if let Some(fy) = find_floor_y(&scene, nx, en.world_pos[1] + EYE_HEIGHT, nz)
@@ -405,38 +482,48 @@ pub fn run_3d_walkthrough(
             }
         }
 
+        if let Some(shot) = shot.as_ref() {
+            let (pos, fwd) = shot.pose(shot_clock);
+            player_pos = pos;
+            let horiz = (fwd[0] * fwd[0] + fwd[2] * fwd[2]).sqrt().max(0.001);
+            pitch = fwd[1].atan2(horiz);
+            yaw = fwd[0].atan2(fwd[2]);
+            third_person = false;
+            shot_clock += base_dt;
+        }
+        scene.step_dynamic_anims(base_dt);
+        let (sy, cy) = yaw.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
+
         // Compute camera position (3rd-person over-the-shoulder vs 1st-person)
         let cam_right = [cy, 0.0, -sy];
         let cam_up = [-sy * sp, cp, -cy * sp];
         let cam_fwd = [sy * cp, sp, cy * cp];
         let cam_pos = if third_person && !fly_mode {
-            let mut dist = 2.05f32;
+            let mut dist = CHASE_BACK;
             while dist > 0.45 {
-                let cand_x = player_pos[0] - cam_fwd[0] * dist + cam_right[0] * 0.28;
-                let cand_y = player_pos[1] - cam_fwd[1] * dist + 0.18;
-                let cand_z = player_pos[2] - cam_fwd[2] * dist + cam_right[2] * 0.28;
-                if !hits_wall(&scene, cand_x, cand_y, cand_z) {
+                let cand = chase_eye(player_pos, cam_fwd, dist);
+                if !hits_wall(&scene, &room_origins, cand[0], cand[1], cand[2]) {
                     break;
                 }
                 dist -= 0.25;
             }
-            [
-                player_pos[0] - cam_fwd[0] * dist + cam_right[0] * 0.28,
-                player_pos[1] - cam_fwd[1] * dist + 0.18,
-                player_pos[2] - cam_fwd[2] * dist + cam_right[2] * 0.28,
-            ]
+            chase_eye(player_pos, cam_fwd, dist)
         } else {
             player_pos
         };
 
-        // Clear sky/ceiling + depth buffer
-        for y in 0..H {
-            let row_col = if y < H / 2 { 0x00161c28 } else { 0x001e1e22 };
-            fb[y * W..(y + 1) * W].fill(row_col);
+        let fov_scale = (H as f32) * 0.85;
+        // World sphere (house = sunset) or the flat ceiling when the level names none.
+        if let Some(ref tex) = sky {
+            paint_sky_strip(tex, cam_right, cam_up, cam_fwd, fov_scale, &mut fb);
+        } else {
+            for y in 0..H {
+                let row_col = if y < H / 2 { 0x00161c28 } else { 0x001e1e22 };
+                fb[y * W..(y + 1) * W].fill(row_col);
+            }
         }
         zb.fill(f32::INFINITY);
-
-        let fov_scale = (H as f32) * 0.85;
         const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
         // 1. Render static room meshes (with inward-normal backface culling)
@@ -460,58 +547,33 @@ pub fn run_3d_walkthrough(
         }
 
         // 2. Render dynamic meshes (doors, breakables, furniture, vans, cameras)
-        for dm in &scene.dynamic_meshes {
-            if dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
-                continue;
-            }
-            let ro = room_origins.get(&dm.room_id).copied().unwrap_or([0.0; 3]);
-            let (mat, pos) = if dm.toggled {
-                if let Some(anim) = dm.anims.last() {
-                    if dm.world_pos == dm.local_start_pos {
-                        (anim.end_mat, anim.end_pos)
-                    } else {
-                        (
-                            dm.world_mat,
-                            [
-                                dm.world_pos[0] + (anim.end_pos[0] - anim.start_pos[0]),
-                                dm.world_pos[1] + (anim.end_pos[1] - anim.start_pos[1]),
-                                dm.world_pos[2] + (anim.end_pos[2] - anim.start_pos[2]),
-                            ],
-                        )
-                    }
-                } else {
-                    (dm.world_mat, dm.world_pos)
-                }
-            } else {
-                (dm.world_mat, dm.world_pos)
-            };
-            let origin = [ro[0] + pos[0], ro[1] + pos[1], ro[2] + pos[2]];
-            render_poly_batch(
-                &dm.polys,
-                mat,
-                origin,
-                &scene,
-                cam_pos,
-                cam_right,
-                cam_up,
-                cam_fwd,
-                fov_scale,
-                use_lightmaps,
-                wireframe,
-                false,
-                &mut fb,
-                &mut zb,
-            );
-        }
+        draw_dynamic_meshes(
+            &scene,
+            &room_origins,
+            cam_pos,
+            cam_right,
+            cam_up,
+            cam_fwd,
+            fov_scale,
+            use_lightmaps,
+            wireframe,
+            &mut fb,
+            &mut zb,
+        );
 
-        // 3. Render Enemies (`doe_johnny_l0.kfs`)
-        if let Some(ref emesh) = enemy_mesh {
-            for en in &enemies {
+        // 3. Render each character with the skin the level named.
+        for en in &enemies {
+            if let Some(erig) = bodies.get(en.rig_index) {
                 render_kfs_character(
-                    emesh,
+                    erig,
                     en.world_pos,
                     en.yaw,
-                    en.walk_phase,
+                    if en.walk_phase > 0.0 {
+                        en.walk_phase
+                    } else {
+                        anim_clock
+                    },
+                    en.walk_phase > 0.0,
                     en.health <= 0,
                     en.hit_flash > 0.0,
                     cam_pos,
@@ -528,12 +590,17 @@ pub fn run_3d_walkthrough(
 
         // 4. Render Player (`Payne_Max_L0.KFS`) in 3rd-person view
         if third_person && !fly_mode {
-            if let Some(ref pmesh) = player_mesh {
+            if let Some(ref prig) = player_rig {
                 render_kfs_character(
-                    pmesh,
+                    prig,
                     player_feet,
-                    yaw + std::f32::consts::PI,
-                    walk_phase,
+                    player_mesh_yaw(yaw),
+                    if player_moving {
+                        walk_phase
+                    } else {
+                        anim_clock
+                    },
+                    player_moving,
                     false,
                     false,
                     cam_pos,
@@ -588,7 +655,7 @@ fn toggle_nearest_dynamic_mesh(
 ) {
     let mut best_dm: Option<(usize, f32)> = None;
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
-        if dm.anims.is_empty() {
+        if dm.opening_anim().is_none() {
             continue;
         }
         let ro = room_origins.get(&dm.room_id).copied().unwrap_or([0.0; 3]);
@@ -603,7 +670,7 @@ fn toggle_nearest_dynamic_mesh(
     if let Some((idx, _)) = best_dm {
         let dm = &mut scene.dynamic_meshes[idx];
         dm.toggled = !dm.toggled;
-        if let Some(anim) = dm.anims.last() {
+        if let Some(anim) = dm.opening_anim() {
             println!(
                 "  3D Engine: DO_Animate {} ({}) -> {:?}",
                 dm.name,
@@ -614,8 +681,14 @@ fn toggle_nearest_dynamic_mesh(
     }
 }
 
-fn can_stand_at(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> bool {
-    !hits_wall(scene, wx, wy, wz) && find_floor_y(scene, wx, wy, wz).is_some()
+fn can_stand_at(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    wx: f32,
+    wy: f32,
+    wz: f32,
+) -> bool {
+    !hits_wall(scene, rooms, wx, wy, wz) && find_floor_y(scene, wx, wy, wz).is_some()
 }
 
 fn find_floor_y(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> Option<f32> {
@@ -627,6 +700,9 @@ fn find_floor_y(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> Option<f32> {
         let oz = sm.world_origin[2];
         for poly in &sm.polys {
             if poly.normal[1] < 0.45 || poly.vertices.len() < 3 {
+                continue;
+            }
+            if !blocks_character(scene, poly.material_id) {
                 continue;
             }
             let v0 = [
@@ -660,7 +736,7 @@ fn find_floor_y(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> Option<f32> {
     best
 }
 
-fn hits_wall(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> bool {
+fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32, wz: f32) -> bool {
     let body_min_y = wy - EYE_HEIGHT + 0.35;
     let body_max_y = wy - 0.10;
     let radius = 0.38f32;
@@ -672,10 +748,8 @@ fn hits_wall(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> bool {
             if poly.normal[1].abs() > 0.45 || poly.vertices.len() < 3 {
                 continue;
             }
-            if let Some(mat) = scene.materials.get(&poly.material_id) {
-                if mat.category.contains("ai_node") {
-                    continue;
-                }
+            if !blocks_character(scene, poly.material_id) {
+                continue;
             }
             let mut min_x = f32::INFINITY;
             let mut max_x = f32::NEG_INFINITY;
@@ -715,7 +789,249 @@ fn hits_wall(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> bool {
             }
         }
     }
+    for dm in &scene.dynamic_meshes {
+        if dm.hidden || dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
+            continue;
+        }
+        let (xform, origin) = dynamic_world(dm, rooms);
+        for poly in &dm.polys {
+            if poly.vertices.len() < 3 || !blocks_character(scene, poly.material_id) {
+                continue;
+            }
+            let n = xform_dir(xform, poly.normal);
+            if n[1].abs() > 0.45 {
+                continue;
+            }
+            let mut min_x = f32::INFINITY;
+            let mut max_x = f32::NEG_INFINITY;
+            let mut min_y = f32::INFINITY;
+            let mut max_y = f32::NEG_INFINITY;
+            let mut min_z = f32::INFINITY;
+            let mut max_z = f32::NEG_INFINITY;
+            let mut world = Vec::with_capacity(poly.vertices.len());
+            for v in &poly.vertices {
+                let p = xform_point(xform, origin, v.pos);
+                world.push(p);
+                min_x = min_x.min(p[0]);
+                max_x = max_x.max(p[0]);
+                min_y = min_y.min(p[1]);
+                max_y = max_y.max(p[1]);
+                min_z = min_z.min(p[2]);
+                max_z = max_z.max(p[2]);
+            }
+            if body_max_y < min_y || body_min_y > max_y {
+                continue;
+            }
+            if wx < min_x - radius
+                || wx > max_x + radius
+                || wz < min_z - radius
+                || wz > max_z + radius
+            {
+                continue;
+            }
+            let plane_dist = (wx - world[0][0]) * n[0] + (wz - world[0][2]) * n[2];
+            if plane_dist.abs() < radius {
+                return true;
+            }
+        }
+    }
     false
+}
+
+fn poly_policy(scene: &LdbScene, material_id: i32) -> MaterialPolicy {
+    scene
+        .materials
+        .get(&material_id)
+        .map(|m| material_policy(&m.category))
+        .unwrap_or(MaterialPolicy {
+            draw: true,
+            character_collides: true,
+            writes_z: true,
+            detail_offset: 0,
+            skybox: false,
+        })
+}
+
+fn blocks_character(scene: &LdbScene, material_id: i32) -> bool {
+    poly_policy(scene, material_id).character_collides
+}
+
+const CHASE_BACK: f32 = 2.2;
+const CHASE_UP: f32 = 0.4;
+
+fn chase_eye(player: [f32; 3], cam_fwd: [f32; 3], dist: f32) -> [f32; 3] {
+    [
+        player[0] - cam_fwd[0] * dist,
+        player[1] - cam_fwd[1] * dist + CHASE_UP,
+        player[2] - cam_fwd[2] * dist,
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_dynamic_meshes(
+    scene: &LdbScene,
+    room_origins: &BTreeMap<i32, [f32; 3]>,
+    cam_pos: [f32; 3],
+    cam_right: [f32; 3],
+    cam_up: [f32; 3],
+    cam_fwd: [f32; 3],
+    fov_scale: f32,
+    use_lightmaps: bool,
+    wireframe: bool,
+    fb: &mut [u32],
+    zb: &mut [f32],
+) {
+    for dm in &scene.dynamic_meshes {
+        if dm.hidden {
+            continue;
+        }
+        if dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
+            continue;
+        }
+        let (mat, origin) = dynamic_world(dm, room_origins);
+        render_poly_batch(
+            &dm.polys,
+            mat,
+            origin,
+            scene,
+            cam_pos,
+            cam_right,
+            cam_up,
+            cam_fwd,
+            fov_scale,
+            use_lightmaps,
+            wireframe,
+            false,
+            fb,
+            zb,
+        );
+    }
+}
+
+/// Closest dynamic mesh that has hit points and whose posed bounds meet the ray.
+fn aim_hit_dynamic(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    origin: [f32; 3],
+    dir: [f32; 3],
+) -> Option<(usize, f32)> {
+    let mut best: Option<(usize, f32)> = None;
+    for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
+        if dm.hidden || dm.hitpoints.is_none() || dm.polys.is_empty() {
+            continue;
+        }
+        let (mat, pos) = dynamic_world(dm, rooms);
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for poly in &dm.polys {
+            for v in &poly.vertices {
+                let p = xform_point(mat, pos, v.pos);
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(p[axis]);
+                    max[axis] = max[axis].max(p[axis]);
+                }
+            }
+        }
+        for axis in 0..3 {
+            min[axis] -= 0.2;
+            max[axis] += 0.2;
+        }
+        if let Some(t) = ray_slab(origin, dir, min, max) {
+            if (0.2..=40.0).contains(&t) && best.is_none_or(|(_, b)| t < b) {
+                best = Some((idx, t));
+            }
+        }
+    }
+    best
+}
+
+fn ray_slab(origin: [f32; 3], dir: [f32; 3], min: [f32; 3], max: [f32; 3]) -> Option<f32> {
+    let mut tmin = 0.0f32;
+    let mut tmax = f32::INFINITY;
+    for i in 0..3 {
+        if dir[i].abs() < 1e-8 {
+            if origin[i] < min[i] || origin[i] > max[i] {
+                return None;
+            }
+            continue;
+        }
+        let inv = 1.0 / dir[i];
+        let (mut t1, mut t2) = ((min[i] - origin[i]) * inv, (max[i] - origin[i]) * inv);
+        if t1 > t2 {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        tmin = tmin.max(t1);
+        tmax = tmax.min(t2);
+        if tmin > tmax {
+            return None;
+        }
+    }
+    if tmax < 0.0 {
+        return None;
+    }
+    Some(if tmin >= 0.0 { tmin } else { tmax })
+}
+
+fn play_queued_sounds(scene: &mut LdbScene, game_dir: &Path, voice: &mut Option<Child>) {
+    let queued = std::mem::take(&mut scene.sound_queue);
+    for sound in queued {
+        let Some(filename) = sound.filename.as_deref() else {
+            continue;
+        };
+        let Some(bytes) = crate::read_game_bytes(game_dir, &crate::story_wav_win_path(filename))
+        else {
+            continue;
+        };
+        crate::menu_ui::stop_voice(voice);
+        *voice = crate::menu_ui::start_voice(&bytes);
+    }
+}
+
+fn catalog_root(path: &Path) -> PathBuf {
+    let start = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let mut dir = start;
+    loop {
+        if dir.join("x_data.ras").is_file() || dir.join("data").is_dir() {
+            return dir.to_path_buf();
+        }
+        match dir.parent() {
+            Some(parent) if parent != dir => dir = parent,
+            _ => return start.to_path_buf(),
+        }
+    }
+}
+
+fn dynamic_world(dm: &SceneDynamicMesh, rooms: &BTreeMap<i32, [f32; 3]>) -> ([f32; 9], [f32; 3]) {
+    let ro = rooms.get(&dm.room_id).copied().unwrap_or([0.0; 3]);
+    let (mat, pos) = dm.posed_local();
+    (mat, [ro[0] + pos[0], ro[1] + pos[1], ro[2] + pos[2]])
+}
+
+fn xform_dir(mat: [f32; 9], v: [f32; 3]) -> [f32; 3] {
+    [
+        mat[0] * v[0] + mat[3] * v[1] + mat[6] * v[2],
+        mat[1] * v[0] + mat[4] * v[1] + mat[7] * v[2],
+        mat[2] * v[0] + mat[5] * v[1] + mat[8] * v[2],
+    ]
+}
+
+fn xform_point(mat: [f32; 9], origin: [f32; 3], v: [f32; 3]) -> [f32; 3] {
+    let d = xform_dir(mat, v);
+    [d[0] + origin[0], d[1] + origin[1], d[2] + origin[2]]
+}
+
+/// Mesh yaw matches the look yaw, so the camera behind that look sits over the shoulder.
+fn player_mesh_yaw(look_yaw: f32) -> f32 {
+    look_yaw
+}
+
+/// Pull a decal toward the camera by its `DetailOffset` distance.
+fn decal_depth(z: f32, depth_bias: f32) -> f32 {
+    z - depth_bias
 }
 
 fn point_in_xz_tri(px: f32, pz: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> bool {
@@ -730,10 +1046,11 @@ fn point_in_xz_tri(px: f32, pz: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> b
 
 #[allow(clippy::too_many_arguments)]
 fn render_kfs_character(
-    mesh: &KfsMesh,
+    rig: &CharacterRig,
     world_pos: [f32; 3],
     yaw: f32,
-    walk_phase: f32,
+    anim_time: f32,
+    moving: bool,
     dead: bool,
     hit_flash: bool,
     cam_pos: [f32; 3],
@@ -748,18 +1065,24 @@ fn render_kfs_character(
     let half_w = W as f32 * 0.5;
     let half_h = H as f32 * 0.5;
     let (sy, cy) = yaw.sin_cos();
-    let leg_swing = walk_phase.sin() * 0.26;
+    let mesh = &rig.mesh;
+    let anim = if moving {
+        rig.walk.as_ref().or(rig.idle.as_ref())
+    } else {
+        rig.idle.as_ref().or(rig.walk.as_ref())
+    };
+    let posed = if dead {
+        mesh.vertices.clone()
+    } else {
+        pose_mesh(mesh, rig.skin.as_ref(), rig.bind.as_ref(), anim, anim_time)
+    };
 
     // Pre-transform character vertices into camera space
-    let mut cam_pts = Vec::with_capacity(mesh.vertices.len());
-    for &[lx, ly, lz] in &mesh.vertices {
+    let mut cam_pts = Vec::with_capacity(posed.len());
+    for &[lx, ly, lz] in &posed {
         let (px, py, pz) = if dead {
             // Lie flat on the floor when dead
             (lx, 0.18 + lz.abs() * 0.5, ly - 0.85)
-        } else if ly < 0.90 {
-            // Procedural leg swing during walk
-            let swing = if lx < 0.0 { leg_swing } else { -leg_swing };
-            (lx, ly, lz + swing * (0.90 - ly))
         } else {
             (lx, ly, lz)
         };
@@ -843,7 +1166,18 @@ fn render_kfs_character(
                     fb, proj[0].sx, proj[0].sy, proj[k].sx, proj[k].sy, 0x00ff8844,
                 );
             } else {
-                rasterize_tri(fb, zb, proj[0], proj[k], proj[k + 1], tex, None, shade);
+                rasterize_tri(
+                    fb,
+                    zb,
+                    proj[0],
+                    proj[k],
+                    proj[k + 1],
+                    tex,
+                    None,
+                    shade,
+                    true,
+                    0.0,
+                );
             }
         }
     }
@@ -866,112 +1200,159 @@ fn render_poly_batch(
     fb: &mut [u32],
     zb: &mut [f32],
 ) {
-    let half_w = W as f32 * 0.5;
-    let half_h = H as f32 * 0.5;
-
-    for poly in polys {
-        if let Some(m) = scene.materials.get(&poly.material_id) {
-            if m.category.contains("nodraw") {
+    for opaque in [true, false] {
+        for poly in polys {
+            let policy = poly_policy(scene, poly.material_id);
+            if !policy.draw || policy.writes_z != opaque {
                 continue;
             }
+            draw_poly(
+                poly,
+                policy,
+                mat,
+                origin,
+                scene,
+                cam_pos,
+                cam_right,
+                cam_up,
+                cam_fwd,
+                fov_scale,
+                use_lightmaps,
+                wireframe,
+                cull_backfaces,
+                fb,
+                zb,
+            );
         }
-        let wn = [
-            mat[0] * poly.normal[0] + mat[3] * poly.normal[1] + mat[6] * poly.normal[2],
-            mat[1] * poly.normal[0] + mat[4] * poly.normal[1] + mat[7] * poly.normal[2],
-            mat[2] * poly.normal[0] + mat[5] * poly.normal[1] + mat[8] * poly.normal[2],
-        ];
-        if cull_backfaces && !wireframe {
-            if let Some(SceneVertex { pos: p0, .. }) = poly.vertices.first() {
-                let wx0 = mat[0] * p0[0] + mat[3] * p0[1] + mat[6] * p0[2] + origin[0];
-                let wy0 = mat[1] * p0[0] + mat[4] * p0[1] + mat[7] * p0[2] + origin[1];
-                let wz0 = mat[2] * p0[0] + mat[5] * p0[1] + mat[8] * p0[2] + origin[2];
-                let to_poly = [wx0 - cam_pos[0], wy0 - cam_pos[1], wz0 - cam_pos[2]];
-                if (to_poly[0] * wn[0] + to_poly[1] * wn[1] + to_poly[2] * wn[2]) >= 0.05 {
-                    continue;
-                }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_poly(
+    poly: &ScenePoly,
+    policy: MaterialPolicy,
+    mat: [f32; 9],
+    origin: [f32; 3],
+    scene: &LdbScene,
+    cam_pos: [f32; 3],
+    cam_right: [f32; 3],
+    cam_up: [f32; 3],
+    cam_fwd: [f32; 3],
+    fov_scale: f32,
+    use_lightmaps: bool,
+    wireframe: bool,
+    cull_backfaces: bool,
+    fb: &mut [u32],
+    zb: &mut [f32],
+) {
+    let half_w = W as f32 * 0.5;
+    let half_h = H as f32 * 0.5;
+    let wn = [
+        mat[0] * poly.normal[0] + mat[3] * poly.normal[1] + mat[6] * poly.normal[2],
+        mat[1] * poly.normal[0] + mat[4] * poly.normal[1] + mat[7] * poly.normal[2],
+        mat[2] * poly.normal[0] + mat[5] * poly.normal[1] + mat[8] * poly.normal[2],
+    ];
+    if cull_backfaces && !wireframe {
+        if let Some(SceneVertex { pos: p0, .. }) = poly.vertices.first() {
+            let wx0 = mat[0] * p0[0] + mat[3] * p0[1] + mat[6] * p0[2] + origin[0];
+            let wy0 = mat[1] * p0[0] + mat[4] * p0[1] + mat[7] * p0[2] + origin[1];
+            let wz0 = mat[2] * p0[0] + mat[5] * p0[1] + mat[8] * p0[2] + origin[2];
+            let to_poly = [wx0 - cam_pos[0], wy0 - cam_pos[1], wz0 - cam_pos[2]];
+            if (to_poly[0] * wn[0] + to_poly[1] * wn[1] + to_poly[2] * wn[2]) >= 0.05 {
+                return;
             }
         }
+    }
 
-        let tex = scene
-            .materials
-            .get(&poly.material_id)
-            .and_then(|m| m.texture_index)
-            .and_then(|ti| scene.textures.get(ti));
-        let lmap = if use_lightmaps && poly.lightmap_id >= 0 {
-            scene.lightmaps.get(poly.lightmap_id as usize)
+    let tex = scene
+        .materials
+        .get(&poly.material_id)
+        .and_then(|m| m.texture_index)
+        .and_then(|ti| scene.textures.get(ti));
+    let lmap = if use_lightmaps && poly.lightmap_id >= 0 {
+        scene.lightmaps.get(poly.lightmap_id as usize)
+    } else {
+        None
+    };
+
+    let mut cam_verts = Vec::with_capacity(poly.vertices.len());
+    let mut all_behind = true;
+    let mut all_far = true;
+    for v in &poly.vertices {
+        let p = v.pos;
+        let wx = mat[0] * p[0] + mat[3] * p[1] + mat[6] * p[2] + origin[0];
+        let wy = mat[1] * p[0] + mat[4] * p[1] + mat[7] * p[2] + origin[1];
+        let wz = mat[2] * p[0] + mat[5] * p[1] + mat[8] * p[2] + origin[2];
+        let dx = wx - cam_pos[0];
+        let dy = wy - cam_pos[1];
+        let dz = wz - cam_pos[2];
+        let cx = dx * cam_right[0] + dy * cam_right[1] + dz * cam_right[2];
+        let cy = dx * cam_up[0] + dy * cam_up[1] + dz * cam_up[2];
+        let cz = dx * cam_fwd[0] + dy * cam_fwd[1] + dz * cam_fwd[2];
+        if cz >= NEAR_Z {
+            all_behind = false;
+        }
+        if cz <= FAR_Z {
+            all_far = false;
+        }
+        cam_verts.push(CamVert {
+            cx,
+            cy,
+            cz,
+            u: v.uv[0],
+            v: v.uv[1],
+            lu: v.luv[0],
+            lv: v.luv[1],
+        });
+    }
+    if all_behind || all_far {
+        return;
+    }
+
+    let clipped = clip_near_plane(&cam_verts);
+    if clipped.len() < 3 {
+        return;
+    }
+
+    let mut proj = Vec::with_capacity(clipped.len());
+    for cv in &clipped {
+        let inv_z = 1.0 / cv.cz;
+        let sx = half_w + cv.cx * fov_scale * inv_z;
+        let sy = half_h - cv.cy * fov_scale * inv_z;
+        proj.push(ProjVert {
+            sx,
+            sy,
+            inv_z,
+            u_over_z: cv.u * inv_z,
+            v_over_z: cv.v * inv_z,
+            lu_over_z: cv.lu * inv_z,
+            lv_over_z: cv.lv * inv_z,
+        });
+    }
+
+    let shade = ((wn[0] * 0.35 + wn[1] * 0.75 + wn[2] * 0.55).abs() * 0.55 + 0.45).clamp(0.35, 1.0);
+
+    for k in 1..proj.len() - 1 {
+        let p0 = proj[0];
+        let p1 = proj[k];
+        let p2 = proj[k + 1];
+        if wireframe {
+            draw_line(fb, p0.sx, p0.sy, p1.sx, p1.sy, 0x0066ccff);
+            draw_line(fb, p1.sx, p1.sy, p2.sx, p2.sy, 0x0066ccff);
+            draw_line(fb, p2.sx, p2.sy, p0.sx, p0.sy, 0x0066ccff);
         } else {
-            None
-        };
-
-        let mut cam_verts = Vec::with_capacity(poly.vertices.len());
-        let mut all_behind = true;
-        let mut all_far = true;
-        for v in &poly.vertices {
-            let p = v.pos;
-            let wx = mat[0] * p[0] + mat[3] * p[1] + mat[6] * p[2] + origin[0];
-            let wy = mat[1] * p[0] + mat[4] * p[1] + mat[7] * p[2] + origin[1];
-            let wz = mat[2] * p[0] + mat[5] * p[1] + mat[8] * p[2] + origin[2];
-            let dx = wx - cam_pos[0];
-            let dy = wy - cam_pos[1];
-            let dz = wz - cam_pos[2];
-            let cx = dx * cam_right[0] + dy * cam_right[1] + dz * cam_right[2];
-            let cy = dx * cam_up[0] + dy * cam_up[1] + dz * cam_up[2];
-            let cz = dx * cam_fwd[0] + dy * cam_fwd[1] + dz * cam_fwd[2];
-            if cz >= NEAR_Z {
-                all_behind = false;
-            }
-            if cz <= FAR_Z {
-                all_far = false;
-            }
-            cam_verts.push(CamVert {
-                cx,
-                cy,
-                cz,
-                u: v.uv[0],
-                v: v.uv[1],
-                lu: v.luv[0],
-                lv: v.luv[1],
-            });
-        }
-        if all_behind || all_far {
-            continue;
-        }
-
-        let clipped = clip_near_plane(&cam_verts);
-        if clipped.len() < 3 {
-            continue;
-        }
-
-        let mut proj = Vec::with_capacity(clipped.len());
-        for cv in &clipped {
-            let inv_z = 1.0 / cv.cz;
-            let sx = half_w + cv.cx * fov_scale * inv_z;
-            let sy = half_h - cv.cy * fov_scale * inv_z;
-            proj.push(ProjVert {
-                sx,
-                sy,
-                inv_z,
-                u_over_z: cv.u * inv_z,
-                v_over_z: cv.v * inv_z,
-                lu_over_z: cv.lu * inv_z,
-                lv_over_z: cv.lv * inv_z,
-            });
-        }
-
-        let shade =
-            ((wn[0] * 0.35 + wn[1] * 0.75 + wn[2] * 0.55).abs() * 0.55 + 0.45).clamp(0.35, 1.0);
-
-        for k in 1..proj.len() - 1 {
-            let p0 = proj[0];
-            let p1 = proj[k];
-            let p2 = proj[k + 1];
-            if wireframe {
-                draw_line(fb, p0.sx, p0.sy, p1.sx, p1.sy, 0x0066ccff);
-                draw_line(fb, p1.sx, p1.sy, p2.sx, p2.sy, 0x0066ccff);
-                draw_line(fb, p2.sx, p2.sy, p0.sx, p0.sy, 0x0066ccff);
-            } else {
-                rasterize_tri(fb, zb, p0, p1, p2, tex, lmap, shade);
-            }
+            rasterize_tri(
+                fb,
+                zb,
+                p0,
+                p1,
+                p2,
+                tex,
+                lmap,
+                shade,
+                policy.writes_z,
+                policy.detail_offset as f32 * DETAIL_OFFSET_M,
+            );
         }
     }
 }
@@ -1012,6 +1393,8 @@ fn rasterize_tri(
     tex: Option<&DecodedTexture>,
     lmap: Option<&DecodedLightmap>,
     shade: f32,
+    write_z: bool,
+    depth_bias: f32,
 ) {
     let area = (p1.sx - p0.sx) * (p2.sy - p0.sy) - (p2.sx - p0.sx) * (p1.sy - p0.sy);
     if area.abs() < 1e-3 {
@@ -1042,12 +1425,14 @@ fn rasterize_tri(
             if inv_z <= 0.0 {
                 continue;
             }
-            let z = 1.0 / inv_z;
+            let z = decal_depth(1.0 / inv_z, depth_bias);
             let idx = row + x;
             if z >= zb[idx] {
                 continue;
             }
-            zb[idx] = z;
+            if write_z {
+                zb[idx] = z;
+            }
 
             let u = (w0 * p0.u_over_z + w1 * p1.u_over_z + w2 * p2.u_over_z) * z;
             let v = (w0 * p0.v_over_z + w1 * p1.v_over_z + w2 * p2.v_over_z) * z;
@@ -1094,6 +1479,104 @@ fn rasterize_tri(
     }
 }
 
+/// `bg_sunset_all.tga` is a 360°×90° strip: bottom edge on the horizon, top edge at the zenith.
+pub(crate) fn sky_strip_uv(dir: [f32; 3]) -> [f32; 2] {
+    let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2])
+        .sqrt()
+        .max(1e-8);
+    let x = dir[0] / len;
+    let y = dir[1] / len;
+    let z = dir[2] / len;
+    let u = (x.atan2(z) / std::f32::consts::TAU + 0.5).rem_euclid(1.0);
+    let lat = y.clamp(-1.0, 1.0).asin().max(0.0);
+    let v = (1.0 - lat / (std::f32::consts::FRAC_PI_2)).clamp(0.0, 0.999);
+    [u, v]
+}
+
+fn paint_sky_strip(
+    tex: &DecodedTexture,
+    cam_right: [f32; 3],
+    cam_up: [f32; 3],
+    cam_fwd: [f32; 3],
+    fov_scale: f32,
+    fb: &mut [u32],
+) {
+    let half_w = W as f32 * 0.5;
+    let half_h = H as f32 * 0.5;
+    let tw = tex.width.max(1);
+    let th = tex.height.max(1);
+    for y in 0..H {
+        for x in 0..W {
+            let cx = (x as f32 + 0.5 - half_w) / fov_scale;
+            let cy = (half_h - (y as f32 + 0.5)) / fov_scale;
+            let dir = [
+                cam_right[0] * cx + cam_up[0] * cy + cam_fwd[0],
+                cam_right[1] * cx + cam_up[1] * cy + cam_fwd[1],
+                cam_right[2] * cx + cam_up[2] * cy + cam_fwd[2],
+            ];
+            let [u, v] = sky_strip_uv(dir);
+            let tx = ((u * tw as f32) as u32).min(tw - 1);
+            let ty = ((v * th as f32) as u32).min(th - 1);
+            fb[y * W + x] = tex.pixels[(ty * tw + tx) as usize];
+        }
+    }
+}
+
+fn world_sphere_roots(level_path: &Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![std::path::PathBuf::from(
+        "/tmp/omp-xdata-ref/data/database/worldspheres",
+    )];
+    for anc in level_path.ancestors() {
+        dirs.push(anc.join("data/database/worldspheres"));
+        dirs.push(anc.join("xdata/data/database/worldspheres"));
+    }
+    dirs
+}
+
+fn read_ci(dirs: &[std::path::PathBuf], name: &str) -> Option<Vec<u8>> {
+    let want = name.to_ascii_lowercase();
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for ent in rd.flatten() {
+            if ent
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&want)
+            {
+                if let Ok(bytes) = std::fs::read(ent.path()) {
+                    return Some(bytes);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn load_world_sphere(level_path: &Path, name: &str) -> Option<DecodedTexture> {
+    let roots = world_sphere_roots(level_path);
+    let catalog = read_ci(&roots, "worldspheres.txt")
+        .or_else(|| crate::kf2::load_bytes_from_ras(level_path, &["worldspheres.txt"]))?;
+    let catalog = String::from_utf8_lossy(&catalog);
+    let export = crate::world_sphere_export(&catalog, name)?;
+    let kf2 = read_ci(&roots, &export)
+        .or_else(|| crate::kf2::load_bytes_from_ras(level_path, &[&export]))?;
+    let image = crate::first_image_name(&kf2)?;
+    let mut tex_dirs: Vec<std::path::PathBuf> = roots.iter().map(|r| r.join("textures")).collect();
+    tex_dirs.extend(roots.iter().cloned());
+    let bytes = read_ci(&tex_dirs, &image)
+        .or_else(|| crate::kf2::load_bytes_from_ras(level_path, &[&image]))?;
+    let (width, height, pixels) = decode_texture_blob(&bytes)?;
+    Some(DecodedTexture {
+        path: image,
+        flag: 4,
+        width,
+        height,
+        pixels,
+    })
+}
+
 fn draw_line(fb: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, col: u32) {
     let steps = (x1 - x0).abs().max((y1 - y0).abs()).ceil() as i32;
     if steps <= 0 || steps > 4000 {
@@ -1106,5 +1589,205 @@ fn draw_line(fb: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, col: u32) {
         if x >= 0 && x < W as i32 && y >= 0 && y < H as i32 {
             fb[y as usize * W + x as usize] = col;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::{SceneDynamicMesh, SceneMaterial, ScenePoly, SceneVertex};
+
+    #[test]
+    fn chase_eye_sits_behind_and_above_the_player() {
+        let eye = chase_eye([0.0, 1.6, 0.0], [0.0, 0.0, 1.0], CHASE_BACK);
+        assert!(eye[0].abs() < 1e-4);
+        assert!((eye[1] - 2.0).abs() < 1e-4);
+        assert!((eye[2] + CHASE_BACK).abs() < 1e-4);
+    }
+
+    #[test]
+    fn sunset_strip_keeps_the_sun_on_the_horizon() {
+        let ahead = sky_strip_uv([0.0, 0.0, 1.0]);
+        assert!((ahead[0] - 0.5).abs() < 0.02);
+        assert!(
+            ahead[1] > 0.95,
+            "horizon sits on the bottom edge, got {}",
+            ahead[1]
+        );
+        let up = sky_strip_uv([0.0, 1.0, 0.0]);
+        assert!(up[1] < 0.05, "zenith sits on the top edge, got {}", up[1]);
+        let right = sky_strip_uv([1.0, 0.0, 0.0]);
+        assert!((right[0] - 0.75).abs() < 0.02);
+    }
+
+    #[test]
+    fn house_sunset_strip_loads_when_the_catalog_is_present() {
+        let catalog = Path::new("/tmp/omp-xdata-ref/data/database/worldspheres/worldspheres.txt");
+        if !catalog.is_file() {
+            return;
+        }
+        let tex = load_world_sphere(Path::new("/tmp/omp-xdata-ref"), "sunset").expect("sunset");
+        assert_eq!(tex.width, 1024);
+        assert_eq!(tex.height, 256);
+    }
+
+    fn empty_scene() -> LdbScene {
+        LdbScene {
+            textures: Vec::new(),
+            materials: BTreeMap::new(),
+            lightmaps: Vec::new(),
+            exits: Vec::new(),
+            static_meshes: Vec::new(),
+            jumppoints: Vec::new(),
+            fsms: Vec::new(),
+            characters: Vec::new(),
+            triggers: Vec::new(),
+            dynamic_meshes: Vec::new(),
+            items: Vec::new(),
+            point_lights: Vec::new(),
+            rooms: Vec::new(),
+            bytes_consumed: 0,
+            sound_catalogs: BTreeMap::new(),
+            sound_queue: Vec::new(),
+        }
+    }
+
+    fn vert(pos: [f32; 3]) -> SceneVertex {
+        SceneVertex {
+            pos,
+            uv: [0.0; 2],
+            luv: [0.0; 2],
+        }
+    }
+
+    #[test]
+    fn closed_wood_door_blocks_and_dummy_does_not() {
+        let mut scene = empty_scene();
+        scene.materials.insert(
+            1,
+            SceneMaterial {
+                id: 1,
+                category: "wood".into(),
+                texture_path: String::new(),
+                texture_index: None,
+            },
+        );
+        scene.materials.insert(
+            2,
+            SceneMaterial {
+                id: 2,
+                category: "dummy".into(),
+                texture_path: String::new(),
+                texture_index: None,
+            },
+        );
+        let quad = ScenePoly {
+            vertices: vec![
+                vert([0.0, 0.0, -1.0]),
+                vert([0.0, 2.0, -1.0]),
+                vert([0.0, 2.0, 1.0]),
+                vert([0.0, 0.0, 1.0]),
+            ],
+            normal: [1.0, 0.0, 0.0],
+            material_id: 1,
+            lightmap_id: -1,
+        };
+        scene.dynamic_meshes.push(SceneDynamicMesh {
+            name: "StartRoom::door".into(),
+            room_id: 1,
+            world_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            world_pos: [0.0; 3],
+            local_start_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            local_start_pos: [0.0; 3],
+            toggled: false,
+            hidden: false,
+            hitpoints: None,
+            polys: vec![quad],
+            anims: Vec::new(),
+            active_track: None,
+            track_time: 0.0,
+            track_duration: 0.0,
+        });
+        let rooms = BTreeMap::new();
+        assert!(hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+        scene.dynamic_meshes[0].polys[0].material_id = 2;
+        assert!(!hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+    }
+
+    #[test]
+    fn graffiti_depth_is_closer_than_the_wall() {
+        let wall = decal_depth(2.0, 0.0);
+        let leaflet = decal_depth(2.0, DETAIL_OFFSET_M);
+        assert!(leaflet < wall);
+        assert!((wall - leaflet - 0.02).abs() < 1e-5);
+    }
+
+    #[test]
+    fn player_faces_the_look_direction() {
+        assert!((player_mesh_yaw(0.4) - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hidden_dynamic_mesh_is_not_drawn() {
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(glass_quad(false));
+        assert!(
+            painted_pixels(&scene) > 0,
+            "visible glass must cover pixels"
+        );
+        scene.dynamic_meshes[0].hidden = true;
+        assert_eq!(
+            painted_pixels(&scene),
+            0,
+            "::Bathroom::glass01.DO must be skipped when hidden"
+        );
+    }
+
+    fn glass_quad(hidden: bool) -> SceneDynamicMesh {
+        SceneDynamicMesh {
+            name: "::Bathroom::glass01.DO".into(),
+            room_id: 0,
+            world_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            world_pos: [0.0; 3],
+            local_start_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            local_start_pos: [0.0; 3],
+            toggled: false,
+            hidden,
+            hitpoints: None,
+            polys: vec![ScenePoly {
+                vertices: vec![
+                    vert([0.0, 0.0, -1.0]),
+                    vert([0.0, 2.0, -1.0]),
+                    vert([0.0, 2.0, 1.0]),
+                    vert([0.0, 0.0, 1.0]),
+                ],
+                normal: [1.0, 0.0, 0.0],
+                material_id: 1,
+                lightmap_id: -1,
+            }],
+            anims: Vec::new(),
+            active_track: None,
+            track_time: 0.0,
+            track_duration: 0.0,
+        }
+    }
+
+    fn painted_pixels(scene: &LdbScene) -> usize {
+        let mut fb = vec![0u32; W * H];
+        let mut zb = vec![f32::INFINITY; W * H];
+        draw_dynamic_meshes(
+            scene,
+            &BTreeMap::new(),
+            [-4.0, 1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            (H as f32) * 0.85,
+            false,
+            false,
+            &mut fb,
+            &mut zb,
+        );
+        fb.iter().filter(|px| **px != 0).count()
     }
 }
