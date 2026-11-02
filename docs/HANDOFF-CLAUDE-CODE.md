@@ -217,7 +217,11 @@ cd studio && ./build.sh
 
 ## 10. Open questions (copy for tracker)
 
-- [ ] Production caller of DO tick `0x6f34c0`
+- [x] Production caller of DO tick `0x6f34c0` — `0x6e1a00` (primary vt `+0x18`) via `call [vt+0x1c]`;
+      the old "primary" vt `0x7d7ac0` was a secondary vtable (see DO note, dynamic result)
+- Dynamic RE recipe: mount the CD and link `.wine/dosdevices/d:` to the mount point, or the game stops
+  at the "minimum installation" dialog. Use `winedbg "Z:\…\MaxPayne.exe" -nodialog < script`
+  (native winedbg; the gdb proxy loses sync on thread creation). Don't `wineserver -k` while the user is playing.
 - [ ] Production caller of KF VA apply `0x57cb70`
 - [ ] Exact type in `LocalCharacterInput+0x1b5` on animating-DO frames
 - [ ] Pause/Resume/Stop/Invert message → vt wiring

@@ -56,6 +56,19 @@ Factory call into ctor `0x57a9f0` from `0x56169b` (inside `KF_VertexAnimationLOD
 LOD forwards after get: **`+0x5c` / `+0x64` / `+0x70` / … — never `+0x48`**.  
 LOD `+0x5c` (`0x561d90`) loops children and vcalls child `+0x5c` (≠ apply).
 
+## Dynamic attempt (2026-11-02) — INCONCLUSIVE
+
+- The VA vtable `0x7d11b8` is a true primary (COL `0x7eb7c0`, offset 0), so the slot `+0x48` is correct
+  (unlike the DO note, whose "primary" was a secondary vtable).
+- Not hit at all during boot, the menu or the new-game cutscene (runs 1–2).
+- Attaching `winedbg` to the running game in the house: `0x57cb70` was hit with `this = 0x68016b8`,
+  `[esp] = 0x8ece8f`. That address is outside every PE section (image ends at `0x8ca56e`) and outside
+  every DLL in the load log. The same stop then repeated with a page fault at `0xffbb11b0`, and the game
+  crashed. Treat the return address as **UNKNOWN / unreliable**. Possibly the attach broke
+  the stack, or the caller is generated code.
+- Next try: launch under `winedbg` from the start (that method was stable for the DO runs) in a virtual
+  desktop, and break on `0x57c860` (morph) as well as `0x57cb70`.
+
 ## Who vcalls VA `+0x48`?
 
 Static rung:

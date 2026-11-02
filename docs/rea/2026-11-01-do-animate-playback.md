@@ -155,7 +155,39 @@ Standalone FSM vt `0x7d75c0` has `+0xb0 = 0x658c80` (not anim). DO **overrides**
 
 Related message RTTI: `…Message_Animate`, `_InvertAnimation`, `_PauseAnimation`, `_StopAnimation`, `_ResumeAnimation`.
 
-## Who calls DO vslot `+0xb0` (`0x6f34c0`)
+## Dynamic result (2026-11-02, winedbg, retail CD boot → New Game)
+
+**VERIFIED (dynamic):** 90/90 hits on `0x6f34c0` return to `0x6e1a93`, i.e. the call is
+`0x6e1a90: call [eax+0x1c]` inside `0x6e1a00`, with `[esp+4] = 0x26faac` and many distinct
+`this` values (one per animating DO).
+
+**VERIFIED (static, RTTI COL):** the vtable assumed "primary" above is wrong.
+
+| vtable | COL | COL offset | Role |
+|--------|-----|-----------|------|
+| `0x7d7b54` | `0x7fd8a0` | **0** | **primary** DO vtable |
+| `0x7d7ac0` | `0x7fd808` | 336 | `X_ParticleSystemReceiver` subobject vtable |
+
+All "vt `+0xNN`" offsets in this note that were measured from `0x7d7ac0` are therefore off by
+`0x94`. Primary slots: `+0x10 = 0x6f3420`, `+0x18 = 0x6e1a00` (per-frame update),
+**`+0x1c = 0x6f34c0` (DO tick)**, `+0x24 = 0x6f3b70` (pause snapshot), `+0x28 = 0x6f3b90`
+(resume). The `+0xb0` caller hunt below (Stats / LocalCharacterInput) chased the wrong slot.
+It is kept only as history.
+
+Run 2 (VERIFIED dynamic, return addresses):
+
+- `0x6e1a00` is called from `0x494db2: call [eax+0x18]` inside `0x493f80`. That loop walks a
+  DO list: `esi = [esi+0x178]` (next link), with the arg `&local` at `ebp-0x84`.
+  `0x493f80` (pushes `"MaxPayne_Level"` / `"LevelDB"`) has a single direct caller,
+  `0x45008e` in `0x44fda0`. Its role as the level update is a HYPOTHESIS based on those strings.
+- `DO_Animate` apply `0x6f3d20` returns to `0x6fd043`, i.e. `0x6fd040: call [ebp+0x10]`
+  (function-pointer message dispatch). It fired 60× during the new-game cutscene.
+
+Production path: per-frame `0x6e1a00` (primary `+0x18`) → `call [vt+0x1c]` → tick
+`0x6f34c0` → sampler `0x5ff100` → pose copy into `+0x259`, which `0x6e1a93` then reads
+(`add esi,0x259`).
+
+## (Superseded) Who calls DO vslot `+0xb0` (`0x6f34c0`)
 
 Absolute vt slot only at `0x7d7b70`. **No** direct `E8`/`E9` to `0x6f34c0`.  
 `call [reg+0xb0]` — **VERIFIED exhaustive** for 8-bit and disp32 encodings in `.text` (**exactly 2 sites**):
