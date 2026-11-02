@@ -591,20 +591,23 @@ pub fn run_3d_walkthrough(
             }
         }
 
-        // 2. Render dynamic meshes (doors, breakables, furniture, vans, cameras)
-        draw_dynamic_meshes(
-            &scene,
-            &room_origins,
-            cam_pos,
-            cam_right,
-            cam_up,
-            cam_fwd,
-            fov_scale,
-            use_lightmaps,
-            wireframe,
-            &mut fb,
-            &mut zb,
-        );
+        // 2. Render dynamic meshes (doors, breakables, furniture, vans, cameras); the hardware
+        // renderer already drew them in step 1.
+        if gpu.is_none() || wireframe {
+            draw_dynamic_meshes(
+                &scene,
+                &room_origins,
+                cam_pos,
+                cam_right,
+                cam_up,
+                cam_fwd,
+                fov_scale,
+                use_lightmaps,
+                wireframe,
+                &mut fb,
+                &mut zb,
+            );
+        }
 
         // 3. Render each character with the skin the level named.
         for en in &enemies {
@@ -917,6 +920,11 @@ fn chase_eye(player: [f32; 3], cam_fwd: [f32; 3], dist: f32) -> [f32; 3] {
     ]
 }
 
+/// Visible and not a script helper (`_Tip_`, `Start_FSM.DO`).
+pub(crate) fn dynamic_mesh_drawn(dm: &crate::scene::SceneDynamicMesh) -> bool {
+    !dm.hidden && !dm.name.contains("_Tip_") && !dm.name.ends_with("Start_FSM.DO")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_dynamic_meshes(
     scene: &LdbScene,
@@ -932,10 +940,7 @@ fn draw_dynamic_meshes(
     zb: &mut [f32],
 ) {
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
-        if dm.hidden {
-            continue;
-        }
-        if dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
+        if !dynamic_mesh_drawn(dm) {
             continue;
         }
         let (mat, origin) = dynamic_world(scene, idx, room_origins);
@@ -1055,7 +1060,7 @@ fn catalog_root(path: &Path) -> PathBuf {
     }
 }
 
-fn dynamic_world(
+pub(crate) fn dynamic_world(
     scene: &LdbScene,
     idx: usize,
     rooms: &BTreeMap<i32, [f32; 3]>,
@@ -1685,6 +1690,37 @@ pub(crate) fn test_view(pos: [f32; 3], fwd: [f32; 3]) -> crate::gpu::GpuView {
     (pos, right, up, fwd)
 }
 
+#[cfg(test)]
+pub(crate) fn test_glass_quad(hidden: bool) -> crate::scene::SceneDynamicMesh {
+    tests::glass_quad(hidden)
+}
+
+/// Software render of the dynamic meshes only (the hardware renderer's reference).
+#[cfg(test)]
+pub(crate) fn test_software_dynamic(
+    scene: &LdbScene,
+    (pos, right, up, fwd): crate::gpu::GpuView,
+) -> (Vec<u32>, Vec<f32>) {
+    let mut fb = vec![0u32; W * H];
+    let mut zb = vec![f32::INFINITY; W * H];
+    let rooms: BTreeMap<i32, [f32; 3]> =
+        scene.rooms.iter().map(|r| (r.id, r.world_origin)).collect();
+    draw_dynamic_meshes(
+        scene,
+        &rooms,
+        pos,
+        right,
+        up,
+        fwd,
+        (H as f32) * 0.85,
+        true,
+        false,
+        &mut fb,
+        &mut zb,
+    );
+    (fb, zb)
+}
+
 /// Software render of the static meshes only (the hardware renderer's reference).
 #[cfg(test)]
 pub(crate) fn test_software_static(
@@ -1929,7 +1965,7 @@ mod tests {
         );
     }
 
-    fn glass_quad(hidden: bool) -> SceneDynamicMesh {
+    pub(super) fn glass_quad(hidden: bool) -> SceneDynamicMesh {
         SceneDynamicMesh {
             name: "::Bathroom::glass01.DO".into(),
             room_id: 0,

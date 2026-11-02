@@ -4,7 +4,10 @@
 //! Shading mirrors `render3d::rasterize_tri`: nearest/repeat texture, alpha test `a >= ref`,
 //! `texture × lightmap / 255` (`D3DTOP_MODULATE`), otherwise a normal-based shade.
 
-use crate::render3d::{poly_policy, poly_shade, DETAIL_OFFSET_M, FAR_Z, FRAME_H, FRAME_W, NEAR_Z};
+use crate::render3d::{
+    dynamic_mesh_drawn, dynamic_world, poly_policy, DETAIL_OFFSET_M, FAR_Z, FRAME_H, FRAME_W,
+    NEAR_Z,
+};
 use crate::scene::LdbScene;
 use std::collections::BTreeMap;
 
@@ -15,7 +18,6 @@ pub struct GpuVertex {
     pub pos: [f32; 3],
     pub uv: [f32; 2],
     pub luv: [f32; 2],
-    pub shade: f32,
     /// First vertex of the source polygon (back-face test, as in `draw_poly`).
     pub cull_ref: [f32; 3],
     pub normal: [f32; 3],
@@ -29,6 +31,8 @@ pub struct StaticBatch {
     pub alpha_reference: Option<u8>,
     pub writes_z: bool,
     pub depth_bias: f32,
+    /// Dynamic mesh index, `None` for static room geometry.
+    pub mesh: Option<usize>,
     pub verts: Vec<GpuVertex>,
 }
 
@@ -43,6 +47,8 @@ pub struct GpuRenderer {
     overlay: wgpu::RenderPipeline,
     camera_buf: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
+    /// `[0]` static geometry (identity), `[1 + i]` dynamic mesh `i`.
+    models: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     draws: Vec<GpuDraw>,
     color: wgpu::Texture,
     depth: wgpu::Texture,
@@ -51,6 +57,7 @@ pub struct GpuRenderer {
 }
 
 struct GpuDraw {
+    mesh: Option<usize>,
     writes_z: bool,
     vertices: wgpu::Buffer,
     count: u32,
@@ -72,6 +79,29 @@ struct CameraUniform {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ModelUniform {
+    c0: [f32; 4],
+    c1: [f32; 4],
+    c2: [f32; 4],
+    origin: [f32; 4],
+    flags: [f32; 4],
+}
+
+impl ModelUniform {
+    /// `mat` uses the scene's column layout (`xform_point`: column `k` is `mat[3k..3k+3]`).
+    fn new(mat: [f32; 9], origin: [f32; 3], cull: bool) -> Self {
+        Self {
+            c0: [mat[0], mat[1], mat[2], 0.0],
+            c1: [mat[3], mat[4], mat[5], 0.0],
+            c2: [mat[6], mat[7], mat[8], 0.0],
+            origin: [origin[0], origin[1], origin[2], 0.0],
+            flags: [if cull { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BatchUniform {
     /// x = alpha reference / 255 (-1 = none), y = depth bias, z = has texture, w = has lightmap.
     params: [f32; 4],
@@ -86,14 +116,16 @@ struct Batch { params: vec4f };
 @group(1) @binding(2) var lmap: texture_2d<f32>;
 @group(1) @binding(3) var tex_sampler: sampler;
 @group(1) @binding(4) var lmap_sampler: sampler;
+// Mesh-to-world transform (columns), origin; flags.x = back-face cull.
+struct Model { c0: vec4f, c1: vec4f, c2: vec4f, origin: vec4f, flags: vec4f };
+@group(2) @binding(0) var<uniform> model: Model;
 
 struct In {
     @location(0) pos: vec3f,
     @location(1) uv: vec2f,
     @location(2) luv: vec2f,
-    @location(3) shade: f32,
-    @location(4) cull_ref: vec3f,
-    @location(5) normal: vec3f,
+    @location(3) cull_ref: vec3f,
+    @location(4) normal: vec3f,
 };
 struct Out {
     @builtin(position) clip: vec4f,
@@ -106,12 +138,16 @@ struct Out {
 @vertex
 fn vs(v: In) -> Out {
     var o: Out;
+    let m = mat3x3f(model.c0.xyz, model.c1.xyz, model.c2.xyz);
+    let world = m * v.pos + model.origin.xyz;
+    let n = m * v.normal;
     // draw_poly: skip the polygon when its first vertex faces away (dot >= 0.05).
-    if dot(v.cull_ref - cam.pos.xyz, v.normal) >= 0.05 {
+    let cull_ref = m * v.cull_ref + model.origin.xyz;
+    if model.flags.x > 0.5 && dot(cull_ref - cam.pos.xyz, n) >= 0.05 {
         o.clip = vec4f(2.0, 2.0, 2.0, 1.0);
         return o;
     }
-    let d = v.pos - cam.pos.xyz;
+    let d = world - cam.pos.xyz;
     let cx = dot(d, cam.right.xyz);
     let cy = dot(d, cam.up.xyz);
     let cz = dot(d, cam.fwd.xyz);
@@ -119,7 +155,8 @@ fn vs(v: In) -> Out {
     o.clip = vec4f(cx * cam.params.x, cy * cam.params.y, cz - cam.params2.x, cz);
     o.uv = v.uv;
     o.luv = v.luv;
-    o.shade = v.shade;
+    // render3d::poly_shade on the world normal.
+    o.shade = clamp(abs(n.x * 0.35 + n.y * 0.75 + n.z * 0.55) * 0.55 + 0.45, 0.35, 1.0);
     o.vz = cz;
     return o;
 }
@@ -209,13 +246,21 @@ impl GpuRenderer {
                 sampler_entry(4),
             ],
         });
+        let model_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("model"),
+            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX)],
+        });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("static"),
-            bind_group_layouts: &[Some(&camera_layout), Some(&batch_layout)],
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&batch_layout),
+                Some(&model_layout),
+            ],
             immediate_size: 0,
         });
         let attributes = wgpu::vertex_attr_array![
-            0 => Float32x3, 1 => Float32x2, 2 => Float32x2, 3 => Float32, 4 => Float32x3, 5 => Float32x3
+            0 => Float32x3, 1 => Float32x2, 2 => Float32x2, 3 => Float32x3, 4 => Float32x3
         ];
         let buffers = [Some(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GpuVertex>() as u64,
@@ -331,8 +376,37 @@ impl GpuRenderer {
             .map(|l| (l.width > 0 && l.height > 0).then(|| upload(l.width, l.height, &l.pixels)))
             .collect();
 
+        let model = |cull: bool| {
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: std::mem::size_of::<ModelUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let identity = ModelUniform::new(
+                [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                [0.0; 3],
+                cull,
+            );
+            queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&identity));
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &model_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            });
+            (buffer, group)
+        };
+        let mut models = vec![model(true)];
+        models.extend((0..scene.dynamic_meshes.len()).map(|_| model(false)));
+
         let mut draws = Vec::new();
-        for batch in build_static_batches(scene) {
+        for batch in build_static_batches(scene)
+            .into_iter()
+            .chain(build_dynamic_batches(scene))
+        {
             let tex = batch
                 .texture
                 .and_then(|i| textures.get(i))
@@ -390,6 +464,7 @@ impl GpuRenderer {
             });
             queue.write_buffer(&vertices, 0, bytemuck::cast_slice(&batch.verts));
             draws.push(GpuDraw {
+                mesh: batch.mesh,
                 writes_z: batch.writes_z,
                 vertices,
                 count: batch.verts.len() as u32,
@@ -433,6 +508,7 @@ impl GpuRenderer {
             overlay,
             camera_buf,
             camera_group,
+            models,
             draws,
             color,
             depth,
@@ -444,7 +520,7 @@ impl GpuRenderer {
     /// Draw the static batches and write covered pixels into `fb` and their view depth into `zb`.
     pub fn render(
         &mut self,
-        _scene: &LdbScene,
+        scene: &LdbScene,
         (pos, right, up, fwd): GpuView,
         use_lightmaps: bool,
         fb: &mut [u32],
@@ -468,6 +544,21 @@ impl GpuRenderer {
         };
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&camera));
+        let rooms: BTreeMap<i32, [f32; 3]> =
+            scene.rooms.iter().map(|r| (r.id, r.world_origin)).collect();
+        let visible: Vec<bool> = scene
+            .dynamic_meshes
+            .iter()
+            .map(dynamic_mesh_drawn)
+            .collect();
+        for (idx, drawn) in visible.iter().enumerate() {
+            if let (true, Some((buffer, _))) = (*drawn, self.models.get(idx + 1)) {
+                let (mat, origin) = dynamic_world(scene, idx, &rooms);
+                let uniform = ModelUniform::new(mat, origin, false);
+                self.queue
+                    .write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
+            }
+        }
         let color_view = self.color.create_view(&Default::default());
         let depth_view = self.depth.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -504,7 +595,13 @@ impl GpuRenderer {
                     &self.overlay
                 });
                 for draw in self.draws.iter().filter(|d| d.writes_z == writes_z) {
+                    let model = match draw.mesh {
+                        Some(i) if !visible.get(i).copied().unwrap_or(false) => continue,
+                        Some(i) => i + 1,
+                        None => 0,
+                    };
                     pass.set_bind_group(1, &draw.group, &[]);
+                    pass.set_bind_group(2, &self.models[model].1, &[]);
                     pass.set_vertex_buffer(0, draw.vertices.slice(..));
                     pass.draw(0..draw.count, 0..1);
                 }
@@ -565,63 +662,105 @@ impl GpuRenderer {
     }
 }
 
-/// Texture, lightmap, alpha reference, writes depth, detail offset.
-type BatchKey = (Option<usize>, Option<usize>, Option<u8>, bool, i32);
+/// Dynamic meshes grouped into batches per mesh, in mesh-local space.
+pub fn build_dynamic_batches(scene: &LdbScene) -> Vec<StaticBatch> {
+    let mut batches = Vec::new();
+    for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
+        add_polys(scene, &dm.polys, [0.0; 3], Some(idx), &mut batches);
+    }
+    batches
+}
 
 /// Static room meshes grouped into batches (fan-triangulated, world-space positions).
 pub fn build_static_batches(scene: &LdbScene) -> Vec<StaticBatch> {
-    let mut batches: Vec<StaticBatch> = Vec::new();
-    let mut index: BTreeMap<BatchKey, usize> = BTreeMap::new();
+    let mut batches = Vec::new();
     for sm in &scene.static_meshes {
-        let o = sm.world_origin;
-        for poly in &sm.polys {
-            let policy = poly_policy(scene, poly.material_id);
-            if !policy.draw || poly.vertices.len() < 3 {
-                continue;
-            }
-            let material = scene.materials.get(&poly.material_id);
-            let texture = material.and_then(|m| m.texture_index);
-            let alpha_reference = material.and_then(|m| m.alpha_reference);
-            let lightmap = (poly.lightmap_id >= 0).then_some(poly.lightmap_id as usize);
-            let key = (
+        add_polys(scene, &sm.polys, sm.world_origin, None, &mut batches);
+    }
+    batches
+}
+
+/// Texture, lightmap, alpha reference, writes depth, detail offset, dynamic mesh.
+type BatchKey = (
+    Option<usize>,
+    Option<usize>,
+    Option<u8>,
+    bool,
+    i32,
+    Option<usize>,
+);
+
+fn add_polys(
+    scene: &LdbScene,
+    polys: &[crate::scene::ScenePoly],
+    o: [f32; 3],
+    mesh: Option<usize>,
+    batches: &mut Vec<StaticBatch>,
+) {
+    let mut index: BTreeMap<BatchKey, usize> = batches
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let detail = (b.depth_bias / DETAIL_OFFSET_M).round() as i32;
+            (
+                (
+                    b.texture,
+                    b.lightmap,
+                    b.alpha_reference,
+                    b.writes_z,
+                    detail,
+                    b.mesh,
+                ),
+                i,
+            )
+        })
+        .collect();
+    for poly in polys {
+        let policy = poly_policy(scene, poly.material_id);
+        if !policy.draw || poly.vertices.len() < 3 {
+            continue;
+        }
+        let material = scene.materials.get(&poly.material_id);
+        let texture = material.and_then(|m| m.texture_index);
+        let alpha_reference = material.and_then(|m| m.alpha_reference);
+        let lightmap = (poly.lightmap_id >= 0).then_some(poly.lightmap_id as usize);
+        let key = (
+            texture,
+            lightmap,
+            alpha_reference,
+            policy.writes_z,
+            policy.detail_offset,
+            mesh,
+        );
+        let at = *index.entry(key).or_insert_with(|| {
+            batches.push(StaticBatch {
                 texture,
                 lightmap,
                 alpha_reference,
-                policy.writes_z,
-                policy.detail_offset,
-            );
-            let at = *index.entry(key).or_insert_with(|| {
-                batches.push(StaticBatch {
-                    texture,
-                    lightmap,
-                    alpha_reference,
-                    writes_z: policy.writes_z,
-                    depth_bias: policy.detail_offset as f32 * DETAIL_OFFSET_M,
-                    verts: Vec::new(),
-                });
-                batches.len() - 1
+                writes_z: policy.writes_z,
+                depth_bias: policy.detail_offset as f32 * DETAIL_OFFSET_M,
+                mesh,
+                verts: Vec::new(),
             });
-            let world = |p: [f32; 3]| [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
-            let cull_ref = world(poly.vertices[0].pos);
-            let shade = poly_shade(poly.normal);
-            let gv = |k: usize| {
-                let v = &poly.vertices[k];
-                GpuVertex {
-                    pos: world(v.pos),
-                    uv: v.uv,
-                    luv: v.luv,
-                    shade,
-                    cull_ref,
-                    normal: poly.normal,
-                }
-            };
-            let out = &mut batches[at].verts;
-            for k in 1..poly.vertices.len() - 1 {
-                out.extend([gv(0), gv(k), gv(k + 1)]);
+            batches.len() - 1
+        });
+        let world = |p: [f32; 3]| [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
+        let cull_ref = world(poly.vertices[0].pos);
+        let gv = |k: usize| {
+            let v = &poly.vertices[k];
+            GpuVertex {
+                pos: world(v.pos),
+                uv: v.uv,
+                luv: v.luv,
+                cull_ref,
+                normal: poly.normal,
             }
+        };
+        let out = &mut batches[at].verts;
+        for k in 1..poly.vertices.len() - 1 {
+            out.extend([gv(0), gv(k), gv(k + 1)]);
         }
     }
-    batches
 }
 
 #[cfg(test)]
@@ -693,6 +832,66 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert!(batches.iter().any(|b| b.lightmap.is_none()));
         assert!(batches.iter().any(|b| b.lightmap == Some(0)));
+    }
+
+    fn yawed_door(hidden: bool) -> crate::scene::SceneDynamicMesh {
+        let mut door = crate::render3d::test_glass_quad(hidden);
+        door.name = "::startroom::door.DO".into();
+        // Yaw 30 degrees, so the shade comes from the rotated normal.
+        let (s, c) = (0.5f32, 0.866_025_4f32);
+        door.world_mat = [c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c];
+        door.local_start_mat = door.world_mat;
+        door
+    }
+
+    #[test]
+    fn dynamic_meshes_get_local_space_batches_tagged_with_their_mesh() {
+        let mut scene = crate::render3d::test_empty_scene();
+        scene.dynamic_meshes.push(yawed_door(false));
+        let batches = build_dynamic_batches(&scene);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].mesh, Some(0));
+        // Local space: the transform is applied per frame on the GPU.
+        assert_eq!(batches[0].verts[0].pos, [0.0, 0.0, -1.0]);
+        assert_eq!(batches[0].verts.len(), 6);
+    }
+
+    #[test]
+    fn gpu_dynamic_mesh_matches_the_software_frame_and_hides() {
+        let mut scene = crate::render3d::test_empty_scene();
+        scene.dynamic_meshes.push(yawed_door(false));
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!(
+                "no GPU adapter: gpu_dynamic_mesh_matches_the_software_frame_and_hides skipped"
+            );
+            return;
+        };
+        let view = crate::render3d::test_view([-4.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        let (sw_fb, sw_zb) = crate::render3d::test_software_dynamic(&scene, view);
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let mut fb = vec![0u32; w * h];
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &mut fb, &mut zb);
+        let covered = |z: &[f32], i: usize| z[i].is_finite();
+        let sw_cov = (0..w * h).filter(|&i| covered(&sw_zb, i)).count();
+        let agree = (0..w * h)
+            .filter(|&i| covered(&sw_zb, i) == covered(&zb, i))
+            .count();
+        assert!(sw_cov > 1000, "the door must cover pixels");
+        assert!(
+            agree as f32 / (w * h) as f32 > 0.99,
+            "coverage agreement {agree}"
+        );
+        let center = (h / 2) * w + w / 2;
+        assert_eq!(fb[center], sw_fb[center], "same rotated-normal shade");
+
+        scene.dynamic_meshes[0].hidden = true;
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &mut fb, &mut zb);
+        assert!(
+            zb.iter().all(|z| z.is_infinite()),
+            "a hidden mesh draws nothing"
+        );
     }
 
     #[test]
