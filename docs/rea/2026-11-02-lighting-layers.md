@@ -240,6 +240,10 @@ while `key > pivot`, so the order is **descending** (brightest first). Up to `ge
 at `0x40deb5`) are used. Which lights enter the collision list (light range vs object bounds, collision group/mask) is
 STRONGLY SUPPORTED as a bounding-sphere test, not read.
 
+**Light positions (STRONGLY SUPPORTED, data):** the `.ldb` static point-light position is **room-local**. In the house,
+all 24 lights lie within 2–13 m of characters in every room when read as world positions. With
+`room.world_origin + pos` they fall in their own rooms, and the engine's lit Max matches retail at the hallway lamp.
+
 **Vertex normals:** the KFS mesh chunk `0x10005` has no normal sub-chunk (`0x10000` header, `0x10006` vertices, `0x10007`
 faces, `0x1000b` one byte per face (smoothing group? UNKNOWN), `0x1000c` materials, `0x1000e` UV faces). So normals are
 built at load time. The method is UNKNOWN.
