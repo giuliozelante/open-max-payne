@@ -76,3 +76,34 @@ UNKNOWN (next):
    128 means ×0.5 or ×1.0. That's in e2mfc's device-dependent material code.
 3. Golden data option: trigger `P_LayerArray::verbose()` in the running game (debug dump; output via
    `0x1002e760`) to print the real layer list of level materials.
+
+## Static point lights → `P_PointLight` (VERIFIED, static)
+
+`X_LevelDBStaticPointLight` (the `.ldb` point lights the engine parses as `ScenePointLight`) becomes a
+`P_PointLight` in `0x5f9450` (constructor call at `0x5f9ee7`):
+
+- `setFalloffRange(R)` with R from the record's `[vt+0x18]`. e2mfc clamps R to ≥ 0.1 (`0x100112c0`).
+- colour `(r, g, b, a) × intensity` (`+0xa8`, default 1.0) → light `+0x118` (0..255 scale)
+- `setFalloffCurve((0.01, 0.0, 20.0))` (constants `0x3c23d70a`, `0x41a00000`), stored at light `+0x140`
+
+e2mfc `P_PointLight::getAttenuation()` (`0x10011310`) returns `(c0, c1/R, c2/R²)` (zero when R == 0).
+The D3D8 driver (`0x1000b990`…) fills `D3DLIGHT8`: Type 1 (point), Diffuse = `+0x118 × 1/255`,
+Specular = `+0x128 × 1/255`, light Ambient = 0, Position = `+0x80/+0x84/+0x88`, Range = R,
+Attenuation0/1/2 = `getAttenuation()`. So, with Direct3D's fixed-function per-vertex lighting:
+
+**diffuse(v) = Σ lights colour/255 · max(N·L, 0) / (0.01 + 20·(d/R)²), for d < R** (D3D clamps colour to 1).
+
+## Ambient (VERIFIED, driver `0x100165c1`…)
+
+Per lit object the driver sets `D3DRS_LIGHTING` (`0x89`) = 1 and `D3DRS_AMBIENT` (`0x8b`) from the
+**material's** ambient colour (`[obj+0x54]`, packed to ARGB). The level templates set black ambient
+(`0x5a6140(0,0,0,255)`); other templates use white (`255,255,255,255`, at `0x5a5f67`/`0x5a6051`). The object
+material builder (`0x554d30`) sets ambient from `0x574940()` at `0x556eac`, a per-material value not
+read yet.
+
+## Open (golden data needed)
+
+1. Object ambient: break at `0x556eac` and dump `[eax]` (G_FColor) per material while loading a save.
+2. Do static point lights also add to lightmapped level polygons (the template has `DIFFUSE_ADD`), or are
+   they excluded (light collision lists, `P_BaseObject::addLightCollision`)? Compare a wall near a
+   lamp: lightmap only vs lightmap + point light.
