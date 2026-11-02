@@ -669,7 +669,12 @@ fn toggle_nearest_dynamic_mesh(
     }
     if let Some((idx, _)) = best_dm {
         let dm = &mut scene.dynamic_meshes[idx];
-        dm.toggled = !dm.toggled;
+        // Play the opening track (retail `DO_Animate`); it holds the end pose.
+        if dm.active_track.is_none() {
+            if let Some(name) = dm.opening_anim().map(|anim| anim.name.clone()) {
+                dm.play_track(&name);
+            }
+        }
         if let Some(anim) = dm.opening_anim() {
             println!(
                 "  3D Engine: DO_Animate {} ({}) -> {:?}",
@@ -1747,6 +1752,32 @@ mod tests {
             painted_pixels(&scene),
             0,
             "::Bathroom::glass01.DO must be skipped when hidden"
+        );
+    }
+
+    #[test]
+    fn interacting_with_a_drawer_plays_its_open_track() {
+        let mut scene = empty_scene();
+        let mut drawer = glass_quad(false);
+        drawer.name = "::startroom::New mesh 62::drawer.DO".into();
+        drawer.anims.push(crate::scene::SceneDynamicAnim {
+            name: "open".into(),
+            duration: 0.7,
+            start_mat: drawer.local_start_mat,
+            start_pos: [0.0; 3],
+            end_mat: drawer.local_start_mat,
+            end_pos: [0.3, 0.0, 0.0],
+            scripts: Vec::new(),
+            curves: [Vec::new(), Vec::new()],
+        });
+        scene.dynamic_meshes.push(drawer);
+        toggle_nearest_dynamic_mesh(&mut scene, &BTreeMap::new(), [0.5, 0.0, 0.0], 36.0);
+        let drawer = &scene.dynamic_meshes[0];
+        assert_eq!(drawer.active_track.as_deref(), Some("open"));
+        assert_eq!(
+            drawer.posed_local().1,
+            [0.0; 3],
+            "starts closed, then animates"
         );
     }
 
