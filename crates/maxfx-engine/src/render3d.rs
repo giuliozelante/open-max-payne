@@ -1047,7 +1047,6 @@ fn player_mesh_yaw(look_yaw: f32) -> f32 {
     look_yaw
 }
 
-/// Pull a decal toward the camera by its `DetailOffset` distance.
 /// Lightmap layer `MUL` = `D3DTOP_MODULATE` (`e2_d3d8_driver_mfc` `0x10008082`): per channel
 /// `texture × lightmap / 255`, no overbright. Alpha bits are dropped.
 fn lightmap_modulate(texture: u32, lightmap: u32) -> u32 {
@@ -1056,6 +1055,7 @@ fn lightmap_modulate(texture: u32, lightmap: u32) -> u32 {
     channel(16) | channel(8) | channel(0)
 }
 
+/// Pull a decal toward the camera by its `DetailOffset` distance.
 fn decal_depth(z: f32, depth_bias: f32) -> f32 {
     z - depth_bias
 }

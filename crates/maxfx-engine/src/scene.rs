@@ -1350,10 +1350,16 @@ fn with_alpha_mask(colour: &DecodedTexture, mask: &DecodedTexture) -> DecodedTex
         for x in 0..colour.width {
             let mx = x * mask.width / colour.width.max(1);
             let my = y * mask.height / colour.height.max(1);
-            let m = mask.pixels[(my * mask.width + mx) as usize];
+            // A texel missing from a short decode reads as transparent instead of panicking.
+            let m = mask
+                .pixels
+                .get((my * mask.width + mx) as usize)
+                .copied()
+                .unwrap_or(0);
             let alpha = (((m >> 16) & 0xff) + ((m >> 8) & 0xff) + (m & 0xff)) / 3;
-            let p = &mut pixels[(y * colour.width + x) as usize];
-            *p = (alpha << 24) | (*p & 0x00ff_ffff);
+            if let Some(p) = pixels.get_mut((y * colour.width + x) as usize) {
+                *p = (alpha << 24) | (*p & 0x00ff_ffff);
+            }
         }
     }
     DecodedTexture {
@@ -2595,6 +2601,21 @@ mod tests {
             .map(|m| m.texture_path.as_str())
             .collect();
         assert!(untextured.is_empty(), "{untextured:?}");
+    }
+
+    #[test]
+    fn short_mask_pixels_do_not_panic() {
+        let tex = |pixels: Vec<u32>| DecodedTexture {
+            path: String::new(),
+            flag: 4,
+            width: 2,
+            height: 2,
+            pixels,
+        };
+        let out = with_alpha_mask(&tex(vec![0x00ff_ffff; 3]), &tex(vec![0x00ff_ffff]));
+        assert_eq!(out.pixels.len(), 3);
+        assert_eq!(out.pixels[0] >> 24, 0xff);
+        assert_eq!(out.pixels[1] >> 24, 0, "missing mask texel is transparent");
     }
 
     #[test]
