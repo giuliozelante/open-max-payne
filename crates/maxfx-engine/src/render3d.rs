@@ -504,6 +504,7 @@ pub fn run_3d_walkthrough(
             shot_clock += base_dt;
         }
         scene.step_dynamic_anims(base_dt);
+        scene.step_screen_fade(base_dt);
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
 
@@ -653,6 +654,10 @@ pub fn run_3d_walkthrough(
         for d in -4i32..=4 {
             fb[cy_scr * W + (cx as i32 + d) as usize] = cross_col;
             fb[(cy_scr as i32 + d) as usize * W + cx] = cross_col;
+        }
+
+        if let Some(fade) = scene.screen_fade {
+            blend_screen(&mut fb, fade.color());
         }
 
         window
@@ -1055,6 +1060,21 @@ fn attached_view(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>) -> Option<Vi
         up[0] * fwd[1] - up[1] * fwd[0],
     ];
     Some((pos, right, up, fwd))
+}
+
+/// Mix `rgba` over every `0x00RRGGBB` pixel by its alpha.
+fn blend_screen(fb: &mut [u32], rgba: [u8; 4]) {
+    let a = u32::from(rgba[3]);
+    if a == 0 {
+        return;
+    }
+    let mix = |c: u32, k: u8| (c * (255 - a) + u32::from(k) * a + 127) / 255;
+    for px in fb {
+        let r = mix((*px >> 16) & 0xff, rgba[0]);
+        let g = mix((*px >> 8) & 0xff, rgba[1]);
+        let b = mix(*px & 0xff, rgba[2]);
+        *px = (r << 16) | (g << 8) | b;
+    }
 }
 
 fn normalize(v: [f32; 3]) -> [f32; 3] {
@@ -1724,6 +1744,7 @@ mod tests {
             sound_queue: Vec::new(),
             attached_camera: None,
             player_controls: true,
+            screen_fade: None,
         }
     }
 
@@ -1812,6 +1833,15 @@ mod tests {
         assert!(close(fwd, [-1.0, 0.0, 0.0]), "{fwd:?}");
         assert!(close(up, [0.0, 1.0, 0.0]), "{up:?}");
         assert!(close(right, [0.0, 0.0, 1.0]), "{right:?}");
+    }
+
+    #[test]
+    fn screen_fade_blends_by_alpha() {
+        let mut fb = vec![0x00ff_8000u32, 0x0000_00ffu32];
+        blend_screen(&mut fb, [0, 0, 0, 128]);
+        assert_eq!(fb, vec![0x007f_4000, 0x0000_007f]);
+        blend_screen(&mut fb, [255, 255, 255, 255]);
+        assert_eq!(fb, vec![0x00ff_ffff, 0x00ff_ffff]);
     }
 
     #[test]
