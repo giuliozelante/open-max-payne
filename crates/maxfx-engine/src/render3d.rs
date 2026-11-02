@@ -217,6 +217,12 @@ pub fn run_3d_walkthrough(
     if scene.sound_catalogs.is_empty() {
         scene.sound_catalogs = crate::load_sound_catalogs(&catalog_root(level_path));
     }
+    if let Some(text) =
+        crate::read_game_bytes(&catalog_root(level_path), r"\data\database\materials.txt")
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    {
+        scene.apply_material_surfaces(&crate::scene::parse_material_surfaces(&text));
+    }
     scene.apply_startup_hitpoints();
     scene.apply_startup_hides();
     scene.apply_startup_enables();
@@ -1186,6 +1192,7 @@ fn render_kfs_character(
                     proj[k + 1],
                     tex,
                     None,
+                    None,
                     shade,
                     true,
                     0.0,
@@ -1276,11 +1283,11 @@ fn draw_poly(
         }
     }
 
-    let tex = scene
-        .materials
-        .get(&poly.material_id)
+    let material = scene.materials.get(&poly.material_id);
+    let tex = material
         .and_then(|m| m.texture_index)
         .and_then(|ti| scene.textures.get(ti));
+    let alpha_reference = material.and_then(|m| m.alpha_reference);
     let lmap = if use_lightmaps && poly.lightmap_id >= 0 {
         scene.lightmaps.get(poly.lightmap_id as usize)
     } else {
@@ -1360,6 +1367,7 @@ fn draw_poly(
                 p1,
                 p2,
                 tex,
+                alpha_reference,
                 lmap,
                 shade,
                 policy.writes_z,
@@ -1403,6 +1411,7 @@ fn rasterize_tri(
     p1: ProjVert,
     p2: ProjVert,
     tex: Option<&DecodedTexture>,
+    alpha_reference: Option<u8>,
     lmap: Option<&DecodedLightmap>,
     shade: f32,
     write_z: bool,
@@ -1442,9 +1451,6 @@ fn rasterize_tri(
             if z >= zb[idx] {
                 continue;
             }
-            if write_z {
-                zb[idx] = z;
-            }
 
             let u = (w0 * p0.u_over_z + w1 * p1.u_over_z + w2 * p2.u_over_z) * z;
             let v = (w0 * p0.v_over_z + w1 * p1.v_over_z + w2 * p2.v_over_z) * z;
@@ -1459,6 +1465,14 @@ fn rasterize_tri(
             } else {
                 0x008899aa
             };
+            // Alpha test before the depth write, so cut-out texels hide nothing.
+            // HYPOTHESIS: retail passes when alpha > AlphaReference.
+            if alpha_reference.is_some_and(|reference| (base_rgb >> 24) as u8 <= reference) {
+                continue;
+            }
+            if write_z {
+                zb[idx] = z;
+            }
 
             let mut r = ((base_rgb >> 16) & 0xff) as f32;
             let mut g = ((base_rgb >> 8) & 0xff) as f32;
@@ -1682,6 +1696,7 @@ mod tests {
                 category: "wood".into(),
                 texture_path: String::new(),
                 texture_index: None,
+                alpha_reference: None,
             },
         );
         scene.materials.insert(
@@ -1691,6 +1706,7 @@ mod tests {
                 category: "dummy".into(),
                 texture_path: String::new(),
                 texture_index: None,
+                alpha_reference: None,
             },
         );
         let quad = ScenePoly {
@@ -1753,6 +1769,32 @@ mod tests {
             0,
             "::Bathroom::glass01.DO must be skipped when hidden"
         );
+    }
+
+    #[test]
+    fn texels_at_or_below_the_alpha_reference_are_not_drawn() {
+        let mut scene = empty_scene();
+        scene.textures.push(DecodedTexture {
+            path: "mask".into(),
+            flag: 4,
+            width: 1,
+            height: 1,
+            pixels: vec![0x0f80_8080],
+        });
+        scene.materials.insert(
+            1,
+            SceneMaterial {
+                id: 1,
+                category: "leaves".into(),
+                texture_path: String::new(),
+                texture_index: Some(0),
+                alpha_reference: Some(15),
+            },
+        );
+        scene.dynamic_meshes.push(glass_quad(false));
+        assert_eq!(painted_pixels(&scene), 0, "alpha 15 fails reference 15");
+        scene.textures[0].pixels[0] = 0x1080_8080;
+        assert!(painted_pixels(&scene) > 0, "alpha 16 passes reference 15");
     }
 
     #[test]

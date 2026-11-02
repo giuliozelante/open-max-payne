@@ -33,6 +33,9 @@ pub struct SceneMaterial {
     pub category: String,
     pub texture_path: String,
     pub texture_index: Option<usize>,
+    /// `Some(AlphaReference)` when the texture carries an alpha mask (`P_Map(colour, alpha)`,
+    /// `0x5dc3d8`); its alpha is in the top byte. `None` is opaque.
+    pub alpha_reference: Option<u8>,
 }
 
 /// Draw and character-collision rules from `data/database/materials.txt`.
@@ -576,6 +579,21 @@ impl<'a> Message<'a> {
 }
 
 impl LdbScene {
+    /// Masked materials take their category's `AlphaReference` from `materials.txt`.
+    pub fn apply_material_surfaces(&mut self, surfaces: &BTreeMap<String, MaterialSurface>) {
+        for material in self.materials.values_mut() {
+            if material.alpha_reference.is_none() {
+                continue;
+            }
+            if let Some((_, surface)) = surfaces
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&material.category))
+            {
+                material.alpha_reference = Some(surface.alpha_reference.clamp(0, 255) as u8);
+            }
+        }
+    }
+
     /// World pose of dynamic mesh `index`, following its parent's motion:
     /// `posed_local · W0(parent)⁻¹ · world(parent)` (`0x6e1a00`, parent `[+0x189]`).
     /// Room origin is not added.
@@ -1325,6 +1343,28 @@ fn skip_hook_map(
     Some(out)
 }
 
+/// `colour` with `mask` intensity in the top byte (nearest sample when sizes differ).
+fn with_alpha_mask(colour: &DecodedTexture, mask: &DecodedTexture) -> DecodedTexture {
+    let mut pixels = colour.pixels.clone();
+    for y in 0..colour.height {
+        for x in 0..colour.width {
+            let mx = x * mask.width / colour.width.max(1);
+            let my = y * mask.height / colour.height.max(1);
+            let m = mask.pixels[(my * mask.width + mx) as usize];
+            let alpha = (((m >> 16) & 0xff) + ((m >> 8) & 0xff) + (m & 0xff)) / 3;
+            let p = &mut pixels[(y * colour.width + x) as usize];
+            *p = (alpha << 24) | (*p & 0x00ff_ffff);
+        }
+    }
+    DecodedTexture {
+        path: format!("{}|{}", colour.path, mask.path),
+        flag: colour.flag,
+        width: colour.width,
+        height: colour.height,
+        pixels,
+    }
+}
+
 /// Embedded texture for `path` by full path, file name, then stem.
 fn lookup_texture(tex_lookup: &BTreeMap<String, usize>, path: &str) -> Option<usize> {
     let mut clean = path.to_ascii_lowercase();
@@ -1419,6 +1459,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     category,
                     texture_path,
                     texture_index,
+                    alpha_reference: None,
                 },
             );
         }
@@ -1427,21 +1468,41 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
 
     // 3. Material categories
     let (_, categories, after_cats) = super::parse_ras_ldb_import_material_categories_at(data, i)?;
-    // 0x5dc800: a material record's texture file (+0x1c) wins over its name.
+    // 0x5dc800: a material record's texture file (+0x1c) wins over its name; a third
+    // string is its alpha image, combined into the texture (0x5dc3d8, `P_Map(colour, alpha)`).
+    let mut masked: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     for category in &categories {
-        let records = std::iter::once((&category.texture, &category.path))
-            .chain(category.members.iter().map(|m| (&m.name, &m.path)));
-        for (name, file) in records {
-            if file.is_empty() {
-                continue;
-            }
-            let Some(index) = lookup_texture(&tex_lookup, file) else {
-                continue;
-            };
+        let records = std::iter::once((&category.texture, &category.path, category.path2.as_str()))
+            .chain(
+                category
+                    .members
+                    .iter()
+                    .map(|m| (&m.name, &m.path, m.path2.as_deref().unwrap_or(""))),
+            );
+        for (name, file, alpha) in records {
+            let colour = (!file.is_empty())
+                .then(|| lookup_texture(&tex_lookup, file))
+                .flatten();
+            let mask = (!alpha.is_empty())
+                .then(|| lookup_texture(&tex_lookup, alpha))
+                .flatten();
             for material in materials.values_mut() {
-                if material.texture_path.eq_ignore_ascii_case(name) {
+                if !material.texture_path.eq_ignore_ascii_case(name) {
+                    continue;
+                }
+                if let Some(index) = colour {
                     material.texture_index = Some(index);
                 }
+                let (Some(colour), Some(mask)) = (material.texture_index, mask) else {
+                    continue;
+                };
+                let index = *masked.entry((colour, mask)).or_insert_with(|| {
+                    textures.push(with_alpha_mask(&textures[colour], &textures[mask]));
+                    textures.len() - 1
+                });
+                material.texture_index = Some(index);
+                // `ID_ALPHAREFERENCE` until `materials.txt` overrides it per category.
+                material.alpha_reference = Some(15);
             }
         }
     }
@@ -2534,6 +2595,50 @@ mod tests {
             .map(|m| m.texture_path.as_str())
             .collect();
         assert!(untextured.is_empty(), "{untextured:?}");
+    }
+
+    #[test]
+    fn masked_materials_take_their_category_alpha_reference() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        for (id, category, alpha) in [(1, "leaves", Some(15)), (2, "wood", None)] {
+            scene.materials.insert(
+                id,
+                SceneMaterial {
+                    id,
+                    category: category.into(),
+                    texture_path: String::new(),
+                    texture_index: None,
+                    alpha_reference: alpha,
+                },
+            );
+        }
+        let surfaces = parse_material_surfaces(
+            "[Leaves]\nAlphaReference = 127;\nBlendedAlphaTest = FALSE;\n\
+             [Wood]\nAlphaReference = 40;\nBlendedAlphaTest = TRUE;\n",
+        );
+        scene.apply_material_surfaces(&surfaces);
+        assert_eq!(scene.materials[&1].alpha_reference, Some(127));
+        assert_eq!(
+            scene.materials[&2].alpha_reference, None,
+            "opaque stays opaque"
+        );
+    }
+
+    #[test]
+    fn house_plant_material_carries_its_alpha_mask() {
+        // 0x5dc3d8: P_Map(colour, alpha) when the record has an alpha image.
+        let path =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !path.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(path).unwrap()).expect("house");
+        let plant = &scene.materials[&52];
+        assert_eq!(plant.alpha_reference, Some(15));
+        let tex = &scene.textures[plant.texture_index.unwrap()];
+        assert!(tex.pixels.iter().any(|p| p >> 24 == 0));
+        assert!(tex.pixels.iter().any(|p| p >> 24 > 0x80));
+        assert_eq!(scene.materials[&16].alpha_reference, None);
     }
 
     #[test]

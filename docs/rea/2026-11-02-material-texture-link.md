@@ -38,8 +38,25 @@ category's first member is stored inline (`texture`, `path`, `path2`). Example a
   - `X:\…\CARPET01A.JPG` → `Concrete01_128x128.jpg` (the name and the file differ completely)
   - `LAMP20-CENTER_B.JPG` → `Lamp20-center_b2.jpg`
 
-## `path2` = alpha mask (STRONGLY SUPPORTED)
+## Alpha masks (2026-11-02)
 
-Non-empty `path2` values are all `*_alpha.jpg` / `*_alpha.pcx` (e.g. `Curtains01_128x256_alpha.jpg`,
-`V&Needle02_128x128_alpha.pcx`). HYPOTHESIS: this is the alpha (cutout) channel for the texture. Not used
-yet; it's the next materials step (plants and curtains render as opaque cards today).
+**VERIFIED (static):** the runtime material reader `0x5dc800` looks both strings up in the texture
+container (`0x5ebc70` → map find `0x5e7ae0`). It passes the colour image and the second (alpha) image to
+`0x5dc360` → builder `0x5dc3d8`. With an alpha image, the builder fetches both `G_Image`s (`0x600980`) and
+constructs `P_Map::P_Map(const G_Image* colour, const G_Image* alpha)` (import `0x7ca48c`; e2mfc
+`0x1001f100`), and sets `P_Map+0x84 = 1`. Without one it passes `(colour, 0)` and sets `+0x84 = 0`.
+So the mask becomes the texture's alpha channel.
+
+**VERIFIED (data):** in the `.ldb` import records, `path2` is the alpha image (`*_alpha.jpg`/`*_alpha.pcx`,
+e.g. plant: `Graffiti\Plant01_128x128_alpha.pcx`). The mask images are embedded as texture blobs (PCX flag
+`0x03`, JPEG flag `0x04`). The PCX masks checked (plant, needle, blood) have greyscale palettes, so
+alpha = mask intensity.
+
+**STRONGLY SUPPORTED:** records with an alpha mask store bool `+0x31 = 1` (`0e 01`), and the wallpaper
+record stores `0e 00`.
+
+**VERIFIED (game data, `data/database/materials.txt`):** each category sets `AlphaReference`
+(default `ID_ALPHAREFERENCE` = 15; `[Leaves]` = 127) and `BlendedAlphaTest` (default TRUE; `[Leaves]` FALSE).
+
+UNKNOWN: the exact comparison (`>` vs `>=` the reference), and how `BlendedAlphaTest` blends. e2mfc
+`P_Material::enableAlphaTest` / `setAlphaReference` are the places to read next.
