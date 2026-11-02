@@ -344,12 +344,23 @@ flags. **Ruled out:** the earlier leads `0x6d8834`/`0x6d8850`/`0x6d896d`/`0x6d97
 `render3d::hits_wall` skips DOs with it off. HYPOTHESIS: `+0x4ad` (second flag) is a second contact class
 (projectiles or the camera); the engine ignores it.
 
+## `DO_EnableContinuousUpdate` (2026-11-02, static)
+
+VERIFIED: `0x6f4320` stores the bool at DO `+0x4af` and calls `0x6f4410` (colour refresh only). The initial value is
+the record's `+0xa3`, the **fourth** of the six `.ldb` flags (`0x5ef500`, stored at `0x6f2c76`). Getter `0x6f44c0`
+is `X_LevelRuntimeDynamicObject` vtable slot 12. Camera `AttachToDO` (`0x6f4360`) prints
+`Warning: DO "%s" doesn't have continuous update on while attaching camera to it` (`0x89ca6c`) when it is off,
+and attaches anyway.
+
+STRONGLY SUPPORTED: the flag lets a DO skip its per-frame transform update while idle; a camera riding it needs
+the update. **Engine:** no change. `render3d` recomputes every DO pose each frame, which equals "always on".
+
 ## Open (next climb)
 
 - ~~Prove RTTI of `LocalCharacterInput+0x1b5` receiver~~ — moot: the DO tick caller is `0x6e1a00` via vt `+0x1c` (above).
 - ~~Wire Pause/Resume/Stop/Invert messages~~ — done above.
 - ~~`DO_EnableCollisions(b)` meaning~~ — read below (section "`DO_EnableCollisions`").
-  `EnableContinuousUpdate` (`0x6f4320`) is unread.
+- ~~`EnableContinuousUpdate`~~ — read below.
 - Lag semantics: the end/start lists go through `X_LaggedMessage` with the overshoot as delay (`0x6e2c00`). Exact
   delivery frame is UNKNOWN.
 - Curve tag `0x71`; runtime channel counts.
