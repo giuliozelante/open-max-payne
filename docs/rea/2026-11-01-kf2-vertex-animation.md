@@ -212,9 +212,24 @@ STRONGLY SUPPORTED: skin matrix *i* = `bind⁻¹ᵢ × boneWorldᵢ × rootWorld
 end up in the root's object space.
 
 **Engine comparison:** `kf2::skin_vertices` uses `poseᵢ × inv(bindᵢ)` with the bind taken from `Pose.kf2` at t = 0,
-composed in model space. That matches retail when the root sits at identity. Retail reads `bind⁻¹` from a stored
-array (`+0x121`), not from `Pose.kf2`. UNKNOWN: where `+0x121` is filled. It is reset in `0x57b890`, and the init
-chain `0x57ab60` → `0x57ad20` (→ `0x57b320`, `0x57b530`) is the next read. **Capture tooling:** attaching with winedbg crashes the game here; launch under winedbg and gate
+composed in model space. That matches retail when the root sits at identity. Retail keeps `bind⁻¹` in an array (`+0x121`).
+
+**Where `+0x121` is filled (VERIFIED, static, `0x57d510`).** It resizes the vector to the bone count
+(`0x55ffc0` = size, `0x560220` / `0x560600` = insert / erase), then for each bone *i*:
+
+1. Bone node = `getChild(i)`; refresh its world matrix (`calculateObjectToWorldMatrix`, `0x57dab1`).
+2. `+0x121[i] = node+0x5c` (48 bytes, world).
+3. Multiply by the root's world-to-object (`0x57ba90` child 0, `+0x8c`, after its own refresh at `0x57db3b`).
+4. Invert in place. `0x43de20` builds a rigid inverse: transposed rotation through a temporary, then
+   `t' = −t·Rᵀ` (`0x57dc4f`…).
+
+So `bind⁻¹ᵢ = (boneWorldᵢ × rootWorld⁻¹)⁻¹`, taken from whatever pose the skeleton nodes hold when `0x57d510` runs.
+Callers: `0x57b00a` and `0x57b0fe`, both in VA setup (`0x57ad20` is the copy constructor, which copies the array
+from another VA). `0x57b890` clears it.
+
+**Engine comparison:** the engine also inverts a bind pose, but from `Pose.kf2` at t = 0, in model space.
+UNKNOWN: whether the skeleton's pose at setup is the `Pose.kf2` frame or the nodes' load-time transforms from the
+character `.kf2`. The two agree only if the model was exported in its pose clip. **Capture tooling:** attaching with winedbg crashes the game here; launch under winedbg and gate
 the breakpoints on a later event instead.
 
 ## Open
