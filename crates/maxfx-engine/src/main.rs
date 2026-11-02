@@ -24,12 +24,16 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let mut args = env::args().skip(1).peekable();
     let mut want_window = env::var("OPENMAXFX_ENGINE_WINDOW").unwrap_or_default() == "1";
+    let mut frame_out: Option<String> = None;
+    let mut frame_camera: Option<String> = None;
     while args.peek().is_some_and(|a| a.starts_with('-')) {
         match args.next().as_deref() {
             Some("--window") => want_window = true,
+            Some("--frame") => frame_out = args.next(),
+            Some("--camera") => frame_camera = args.next(),
             Some("-h" | "--help") => {
                 eprintln!(
-                    "usage: maxfx-engine [--window] <game-dir|archive.ras|archive.mpm|level.ldb|.ai>"
+                    "usage: maxfx-engine [--window] [--frame out.ppm [--camera NAME.DO]] <game-dir|archive.ras|archive.mpm|level.ldb|.ai>"
                 );
                 return ExitCode::SUCCESS;
             }
@@ -428,6 +432,26 @@ fn main() -> ExitCode {
                                 scene.bytes_consumed,
                                 data.len()
                             );
+                            if let Some(out) = frame_out.as_deref() {
+                                let frame = maxfx_engine::render3d::render_frame(
+                                    &scene,
+                                    frame_camera.as_deref(),
+                                )
+                                .and_then(|(w, h, fb)| {
+                                    maxfx_engine::render3d::write_ppm(Path::new(out), w, h, &fb)
+                                        .map_err(|e| e.to_string())
+                                });
+                                return match frame {
+                                    Ok(()) => {
+                                        println!("  frame written to {out}");
+                                        ExitCode::SUCCESS
+                                    }
+                                    Err(e) => {
+                                        eprintln!("frame error: {e}");
+                                        ExitCode::FAILURE
+                                    }
+                                };
+                            }
                             if want_window {
                                 if let Err(e) = maxfx_engine::render3d::run_3d_walkthrough(
                                     scene,
