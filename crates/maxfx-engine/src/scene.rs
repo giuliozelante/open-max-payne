@@ -518,6 +518,8 @@ pub struct LdbScene {
     pub sound_catalogs: BTreeMap<String, String>,
     /// Sounds a verb asked to play. Dispatch only enqueues them.
     pub sound_queue: Vec<QueuedSound>,
+    /// Dynamic mesh the view is attached to by `CAM_AttachToDO`, if any.
+    pub attached_camera: Option<usize>,
 }
 
 /// One `A_Play3DSound` accepted by a mesh or trigger that this scene actually stores.
@@ -616,20 +618,24 @@ impl LdbScene {
         context_name: &str,
         receiver: &str,
     ) -> Option<&'a mut SceneDynamicMesh> {
-        if let Some(index) = self
-            .dynamic_meshes
-            .iter()
-            .position(|mesh| mesh.name.eq_ignore_ascii_case(receiver))
-        {
-            return Some(&mut self.dynamic_meshes[index]);
+        let index = self.resolve_mesh_index(context_name, receiver)?;
+        Some(&mut self.dynamic_meshes[index])
+    }
+
+    fn resolve_mesh_index(&self, context_name: &str, receiver: &str) -> Option<usize> {
+        let find = |name: &str| {
+            self.dynamic_meshes
+                .iter()
+                .position(|mesh| mesh.name.eq_ignore_ascii_case(name))
+        };
+        if let Some(index) = find(receiver) {
+            return Some(index);
         }
         let target = mesh_target_name(context_name, receiver)?;
         if target.eq_ignore_ascii_case(receiver) {
             return None;
         }
-        self.dynamic_meshes
-            .iter_mut()
-            .find(|mesh| mesh.name.eq_ignore_ascii_case(&target))
+        find(&target)
     }
 
     /// Run one stored message. Unknown verbs do nothing.
@@ -658,6 +664,19 @@ impl LdbScene {
                     })
             }
             "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
+            "cam_attachtodo" => {
+                // Arg 0 (camera `+0x14f`, 0x672d12) is the camera's weight in percent: 100
+                // attaches, 0 hands the view back to the player.
+                let Some(weight) = msg.args.first().and_then(|a| a.trim().parse::<f32>().ok())
+                else {
+                    return false;
+                };
+                let Some(index) = self.resolve_mesh_index(context_name, msg.receiver) else {
+                    return false;
+                };
+                self.attached_camera = (weight > 0.0).then_some(index);
+                true
+            }
             "do_hide" => {
                 let hidden = match msg.args.first().copied().unwrap_or("") {
                     "true" | "1" => true,
@@ -2099,6 +2118,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         bytes_consumed: i,
         sound_catalogs: BTreeMap::new(),
         sound_queue: Vec::new(),
+        attached_camera: None,
     })
 }
 
@@ -2344,6 +2364,7 @@ mod tests {
             bytes_consumed: 0,
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
+            attached_camera: None,
         }
     }
 
@@ -3012,6 +3033,18 @@ mod tests {
         let far = [at[0] + 100.0, at[1], at[2]];
         assert!(!scene.activate_nearest_trigger(&origins, far, 36.0));
         assert!(scene.sound_queue.is_empty());
+    }
+
+    #[test]
+    fn cam_attach_to_do_sets_and_clears_the_attached_camera() {
+        // `::finito::camera2` starts with `CAM_AttachToDO(100, false)` and its last track ends
+        // with `CAM_AttachToDO(0, false)` plus `GM_SetPlayerControls(true)`.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.dynamic_meshes.push(door_mesh(Vec::new()));
+        assert!(scene.dispatch_message("", "::startroom::door.DO->CAM_AttachToDO(100, false);"));
+        assert_eq!(scene.attached_camera, Some(0));
+        assert!(scene.dispatch_message("", "::startroom::door.DO->CAM_AttachToDO(0, false);"));
+        assert_eq!(scene.attached_camera, None);
     }
 
     #[test]
