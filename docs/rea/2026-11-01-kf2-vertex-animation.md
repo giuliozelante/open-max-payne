@@ -165,9 +165,35 @@ entry was not hit in this sample, so it may be reached another way.
 STRONGLY SUPPORTED: KF2 bones are e2mfc scene nodes (`P_BaseObject` children of the object animation) whose local
 transform sits at `+0x2c`. The exe does not sample keyframes itself. It snapshots node matrices into a per-bone
 48-byte array (for skinning or blending). The keyframe interpolation that moves the nodes lives in e2mfc's
-code that writes the node matrices. **Correction:** e2mfc exports no keyframe or controller symbols (1200
+code that writes the node matrices. (Answered below: slot 34.) **Correction:** e2mfc exports no keyframe or controller symbols (1200
 exports checked), and the exe imports no rotation or matrix setter for `P_BaseObject`. So the keyframe sampler is
 in the exe and writes `+0x2c` directly. Next: a watchpoint on one bone's `+0x2c` under a launch-time capture.
+
+## Bone keyframe sampler found (2026-11-02, winedbg write watchpoint)
+
+**Capture.** The game was launched under winedbg through a FIFO controller. A breakpoint at `0x57c91b` (VA apply,
+after `getChild`) read one bone node (`eax` = `0x893e118`; its `+0x2c` held a rotation matrix). A write
+watchpoint `watch *(int*)0x893e144` then caught 151 writes. **All** came from `0x54e71e`, in
+`KF_ObjectAnimation` slot 34. (winedbg needs the `*(int*)` cast; `watch *ADDR` fails with "No type or type
+mismatch".)
+
+**Slot 34 (`0x54e450` → `0x54e470`), VERIFIED static:** `sample(anim, time, weight = 1.0, additive, filter)`.
+It looks the animation up in the `+0x169` map (`0x54feb0`): tracks at `+0x10`, a per-bone key-index cache at
+`+0x24`. For each bone *i* that has a track and passes the filter (`0x570e90`):
+
+1. `m = identity`; `0x55e300(&m, time, track_i, cachedKey_i)` samples the track and returns the key index,
+   which is stored back in the cache.
+2. If `weight ≠ 1.0` (`0x7cbdd0`), the three rotation columns and the translation are scaled by `weight`.
+3. If `additive`, `m += node.local` (rotation and translation, component-wise).
+4. `node+0x2c = m` (`0x54e70b`…, the watched write).
+
+**Track sampler `0x55e300`, VERIFIED static:** keys are full 48-byte 3×4 matrices at `track+0x27`. The key index
+comes from `floor` (MSVCRT, IAT `0x7ca364`) of the time, with the cached index as a hint.
+`m = key[k] + (key[k+1] − key[k]) × frac` via `0x560c30` (subtract), `0x560b30` (scale) and `0x560bb0` (add).
+**Interpolation is a component-wise matrix lerp, not a quaternion slerp**, and blends are weighted matrix sums.
+
+**Engine consequence:** `kf2::sample_locals` slerps rotations (`slerp_mat`). Retail lerps all nine rotation
+components (and the translation) linearly.
 
 ## Skin matrices in the VA apply (VERIFIED, static, `0x57c860`)
 
@@ -196,5 +222,5 @@ the breakpoints on a later event instead.
 - ~~Dynamic: who enters `0x57cb70`.~~ Answered above (e2mfc `executeHierarchy`).
 - Exact type behind `+0x111` list (cast source is `P_BaseObject`).
 - What `+0x119` gate means when non-null (LOD side vs flag).
-- `KF_ObjectKeyframeAnimationCallback` bone sample path: bones are e2mfc nodes (`+0x2c` matrix); the sampler is in e2mfc. Next: a watchpoint on one bone's `+0x2c`.
+- ~~Bone sample path~~: `KF_ObjectAnimation` slot 34 + `0x55e300` (matrix lerp), above.
 - Character / `SKD` load → this VA tree.
