@@ -49,7 +49,8 @@ lowercases it (`tolower`, IAT `0x7ca328`) and continues exactly like `FSM_Switch
 `0x89b294`). 23 retail uses.
 
 The engine uses the MSVCRT generator (`seed·214013 + 2531011`, bits 16..30) from the unseeded start value 1.
-HYPOTHESIS: retail never calls `srand`; not checked.
+UNKNOWN: the retail seed. `MaxPayne.exe` does not import `srand`, but `rlmfc.dll` does, and both share the
+MSVCRT generator state. The engine's sequence is deterministic, retail's may not be.
 
 ## Engine
 
