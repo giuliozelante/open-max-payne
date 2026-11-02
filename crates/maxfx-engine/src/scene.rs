@@ -237,6 +237,8 @@ pub struct SceneDynamicMesh {
     pub toggled: bool,
     /// Set by `DO_Hide`. Parsed meshes start visible.
     pub hidden: bool,
+    /// Set by `DO_EnableCollisions` (DO `+0x4ae`). When false the player walks through the mesh.
+    pub collisions: bool,
     /// Set by `DO_SetHitpoints`. `None` means the mesh is not damaged by shots.
     pub hitpoints: Option<i32>,
     pub polys: Vec<ScenePoly>,
@@ -785,6 +787,18 @@ impl LdbScene {
                 self.resolve_mesh_mut(context_name, msg.receiver)
                     .is_some_and(|mesh| {
                         mesh.hidden = hidden;
+                        true
+                    })
+            }
+            "do_enablecollisions" => {
+                let collisions = match msg.args.first().copied().unwrap_or("") {
+                    "true" | "1" => true,
+                    "false" | "0" => false,
+                    _ => return false,
+                };
+                self.resolve_mesh_mut(context_name, msg.receiver)
+                    .is_some_and(|mesh| {
+                        mesh.collisions = collisions;
                         true
                     })
             }
@@ -2018,7 +2032,10 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                         end_scripts,
                     });
                 }
-                i += 12; // 6 bools (`0e u8`)
+                // Six bools to `X_LevelDBDynamicMesh` +0xa0..+0xa5 (0x5ef340); +0xa0 seeds
+                // the DO's collisions flag +0x4ae (0x6f2c7c).
+                let collisions = *data.get(i + 1)? != 0;
+                i += 12; // `0e u8` each
                 let _f_start = read_i32(data, &mut i)?;
                 let _f_cnt = read_i32(data, &mut i)?;
                 let _s_start = read_i32(data, &mut i)?;
@@ -2034,6 +2051,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     local_start_pos,
                     toggled: false,
                     hidden: false,
+                    collisions,
                     hitpoints: None,
                     polys,
                     anims,
@@ -2658,6 +2676,7 @@ mod tests {
             local_start_pos: [0.0, 0.0, 0.0],
             toggled: false,
             hidden: false,
+            collisions: true,
             hitpoints: None,
             polys: Vec::new(),
             anims,
@@ -3220,6 +3239,18 @@ mod tests {
         let far = [at[0] + 100.0, at[1], at[2]];
         assert!(!scene.activate_nearest_trigger(&origins, far, 36.0));
         assert!(scene.sound_queue.is_empty());
+    }
+
+    #[test]
+    fn do_enable_collisions_sets_the_mesh_flag() {
+        // 0x6f43f0 stores the argument in +0x4ae, which characters and the player camera
+        // test before reacting to a DO contact.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.dynamic_meshes.push(door_mesh(Vec::new()));
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_EnableCollisions(false);"));
+        assert!(!scene.dynamic_meshes[0].collisions);
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_EnableCollisions(true);"));
+        assert!(scene.dynamic_meshes[0].collisions);
     }
 
     #[test]
