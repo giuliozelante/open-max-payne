@@ -125,8 +125,8 @@ thunks (`addTo`, `setPosition`, `isInsideViewVolume`, `executeVisible`, …).
 **VERIFIED, static:** its `executeAlways` (slot 18, `0x551020`) does no sampling. If `+0x17e` or `+0x17d` is set,
 it calls `isInsideViewVolume` (slot `+0x30`) and sets or clears bit `0x10` of `+0xe0`, then returns false.
 
-**Capture.** House save, breakpoints on slot 16 and slots 23–39 (18 methods), 4000 stops logging `$eip` and the
-return address:
+**Capture 1 (load and opening cutscene only; the player had no control yet).** House save, breakpoints on slot
+16 and slots 23–39 (18 methods), 4000 stops logging `$eip` and the return address:
 
 | Method | Slot | Hits | What it is (static) | Callers |
 |--------|-----:|-----:|---------------------|---------|
@@ -140,15 +140,30 @@ The `0x550cxx`–`0x550exx` caller is a load routine (RTTI cast from `0x884680`,
 `0x7caa9c`/`0x7ca9a4`), entered 211 times, once per animation object. The rest are lookups driven by
 `KF_ObjectAnimationLODs` (`0x57f4xx`).
 
-**Ruled out:** slots 16 and 23–39 as the per-frame bone sampler; none of them interpolates.
-Next candidates: the non-thunk slots 0–1 and 9–11 (`0x54c2e0`, `0x54bb80`, `0x551070`, `0x551090`, `0x5510b0`;
-`0x551070` returns the float `+0x17f` when `+0x17d` is set), and e2mfc's keyframe controller behind the
-`+0x169` map entries.
+**Capture 2 (player walking; 484 stops).** winedbg attached to the running game (`attach 0x138`) with
+breakpoints on every non-thunk slot (0, 1, 9–11, 16, 23–39). The attach thread faulted in Wine's wow64 layer
+(`EIP ffbb11b0`) and the game crashed after 484 stops, so this is a short sample:
+
+| Method | Slot | Hits | What it is (static) | Callers |
+|--------|-----:|-----:|---------------------|---------|
+| `0x54dc20` | 25 | 198 | `getChild(i)`: `[+0x119][i]` | VA apply `0x57c91b`, `0x57ca3a`; `0x57245f` in `0x5723d0` |
+| `0x54bb80` | 1 | ~180 | returns `+0xe8` | e2mfc (`0x9ec6cb`, `0x9ec6ee`, `0x9ec783`, `0x9ecea3`, `0x9ddfd9`), D3D driver (`0x1d75f3c`, `0x1d83620`) |
+| `0x54fdf0` | 28 | 31 | `hasAnimation(id)` | getters |
+| `0x551070` | 9 | 8 | `+0x17f` float when `+0x17d` is set | e2mfc `0x9ec29f` |
+
+STRONGLY SUPPORTED: while Max walks, the object animation's own methods are only accessors. The per-frame work
+reaches its children through the vertex-animation apply (`0x57cb70` → `0x57c860`, which calls `getChild`) and
+through `0x5723d0`. The only static caller of `0x5723d0` is `0x54e7ca`, inside slot 35 (`0x54e790`). Slot 35's
+entry was not hit in this sample, so it may be reached another way.
+
+Next: read `0x5723d0` (bit-mask edits on a `+0x2c`-strided array; candidate per-bone update) and the VA apply's
+child loop. **Capture tooling:** attaching with winedbg crashes the game here; launch under winedbg and gate
+the breakpoints on a later event instead.
 
 ## Open
 
 - ~~Dynamic: who enters `0x57cb70`.~~ Answered above (e2mfc `executeHierarchy`).
 - Exact type behind `+0x111` list (cast source is `P_BaseObject`).
 - What `+0x119` gate means when non-null (LOD side vs flag).
-- `KF_ObjectKeyframeAnimationCallback` bone sample path: slots 16/23–39 ruled out (capture above).
+- `KF_ObjectKeyframeAnimationCallback` bone sample path: see captures above; next `0x5723d0`.
 - Character / `SKD` load → this VA tree.
