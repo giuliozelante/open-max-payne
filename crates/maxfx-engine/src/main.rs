@@ -27,9 +27,17 @@ fn main() -> ExitCode {
     while args.peek().is_some_and(|a| a.starts_with('-')) {
         match args.next().as_deref() {
             Some("--window") => want_window = true,
+            Some("--renderer") => match args.next().as_deref() {
+                Some("sw") => maxfx_engine::render3d::use_software_renderer(true),
+                Some("hw") => maxfx_engine::render3d::use_software_renderer(false),
+                other => {
+                    eprintln!("--renderer takes hw or sw, got {other:?}");
+                    return ExitCode::FAILURE;
+                }
+            },
             Some("-h" | "--help") => {
                 eprintln!(
-                    "usage: maxfx-engine [--window] <game-dir|archive.ras|archive.mpm|level.ldb|.ai>"
+                    "usage: maxfx-engine [--window] [--renderer hw|sw] <game-dir|archive.ras|archive.mpm|level.ldb|.ai>"
                 );
                 return ExitCode::SUCCESS;
             }

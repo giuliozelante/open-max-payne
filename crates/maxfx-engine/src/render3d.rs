@@ -20,11 +20,27 @@ use std::process::Child;
 
 const W: usize = 960;
 const H: usize = 600;
-const NEAR_Z: f32 = 0.15;
-const FAR_Z: f32 = 220.0;
+/// `--renderer sw` or `OPENMAXFX_RENDERER=sw` selects the software rasterizer; anything else
+/// asks for the hardware renderer and falls back to software when no GPU is available.
+static SOFTWARE_RENDERER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn use_software_renderer(software: bool) {
+    SOFTWARE_RENDERER.store(software, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn hardware_renderer() -> bool {
+    let env_sw = std::env::var("OPENMAXFX_RENDERER").is_ok_and(|v| v.eq_ignore_ascii_case("sw"));
+    !(env_sw || SOFTWARE_RENDERER.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Frame size shared with the hardware renderer.
+pub(crate) const FRAME_W: usize = W;
+pub(crate) const FRAME_H: usize = H;
+pub(crate) const NEAR_Z: f32 = 0.15;
+pub(crate) const FAR_Z: f32 = 220.0;
 const EYE_HEIGHT: f32 = 1.65;
 /// One `DetailOffset` step from `materials.txt`, in metres toward the camera.
-const DETAIL_OFFSET_M: f32 = 0.02;
+pub(crate) const DETAIL_OFFSET_M: f32 = 0.02;
 /// `data/database/shooting.h` `#define BERETTA_BULLETDAMAGE 5`.
 const BERETTA_BULLET_DAMAGE: i32 = 5;
 
@@ -226,6 +242,19 @@ pub fn run_3d_walkthrough(
     scene.apply_startup_hitpoints();
     scene.apply_startup_hides();
     scene.apply_startup_enables();
+    let mut gpu = if hardware_renderer() {
+        crate::gpu::GpuRenderer::new(&scene)
+    } else {
+        None
+    };
+    println!(
+        "  3D Engine: renderer = {}",
+        if gpu.is_some() {
+            "hardware (wgpu)"
+        } else {
+            "software"
+        }
+    );
     let mut break_voice: Option<Child> = None;
 
     let mut fb = vec![0u32; W * H];
@@ -533,23 +562,33 @@ pub fn run_3d_walkthrough(
         const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
         // 1. Render static room meshes (with inward-normal backface culling)
-        for sm in &scene.static_meshes {
-            render_poly_batch(
-                &sm.polys,
-                IDENT_MAT,
-                sm.world_origin,
+        if let (Some(gpu), false) = (gpu.as_mut(), wireframe) {
+            gpu.render(
                 &scene,
-                cam_pos,
-                cam_right,
-                cam_up,
-                cam_fwd,
-                fov_scale,
+                (cam_pos, cam_right, cam_up, cam_fwd),
                 use_lightmaps,
-                wireframe,
-                true,
                 &mut fb,
                 &mut zb,
             );
+        } else {
+            for sm in &scene.static_meshes {
+                render_poly_batch(
+                    &sm.polys,
+                    IDENT_MAT,
+                    sm.world_origin,
+                    &scene,
+                    cam_pos,
+                    cam_right,
+                    cam_up,
+                    cam_fwd,
+                    fov_scale,
+                    use_lightmaps,
+                    wireframe,
+                    true,
+                    &mut fb,
+                    &mut zb,
+                );
+            }
         }
 
         // 2. Render dynamic meshes (doors, breakables, furniture, vans, cameras)
@@ -849,7 +888,7 @@ fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32
     false
 }
 
-fn poly_policy(scene: &LdbScene, material_id: i32) -> MaterialPolicy {
+pub(crate) fn poly_policy(scene: &LdbScene, material_id: i32) -> MaterialPolicy {
     scene
         .materials
         .get(&material_id)
@@ -1357,7 +1396,7 @@ fn draw_poly(
         });
     }
 
-    let shade = ((wn[0] * 0.35 + wn[1] * 0.75 + wn[2] * 0.55).abs() * 0.55 + 0.45).clamp(0.35, 1.0);
+    let shade = poly_shade(wn);
 
     for k in 1..proj.len() - 1 {
         let p0 = proj[0];
@@ -1383,6 +1422,11 @@ fn draw_poly(
             );
         }
     }
+}
+
+/// Flat shade for polygons without a lightmap, from the world normal.
+pub(crate) fn poly_shade(wn: [f32; 3]) -> f32 {
+    ((wn[0] * 0.35 + wn[1] * 0.75 + wn[2] * 0.55).abs() * 0.55 + 0.45).clamp(0.35, 1.0)
 }
 
 fn clip_near_plane(verts: &[CamVert]) -> Vec<CamVert> {
@@ -1625,6 +1669,53 @@ fn draw_line(fb: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, col: u32) {
 }
 
 #[cfg(test)]
+pub(crate) fn test_empty_scene() -> LdbScene {
+    tests::empty_scene()
+}
+
+/// View looking along `fwd` with world up, right = up × forward (the player camera's basis).
+#[cfg(test)]
+pub(crate) fn test_view(pos: [f32; 3], fwd: [f32; 3]) -> crate::gpu::GpuView {
+    let up = [0.0, 1.0, 0.0];
+    let right = [
+        up[1] * fwd[2] - up[2] * fwd[1],
+        up[2] * fwd[0] - up[0] * fwd[2],
+        up[0] * fwd[1] - up[1] * fwd[0],
+    ];
+    (pos, right, up, fwd)
+}
+
+/// Software render of the static meshes only (the hardware renderer's reference).
+#[cfg(test)]
+pub(crate) fn test_software_static(
+    scene: &LdbScene,
+    (pos, right, up, fwd): crate::gpu::GpuView,
+) -> (Vec<u32>, Vec<f32>) {
+    let mut fb = vec![0u32; W * H];
+    let mut zb = vec![f32::INFINITY; W * H];
+    const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    for sm in &scene.static_meshes {
+        render_poly_batch(
+            &sm.polys,
+            IDENT_MAT,
+            sm.world_origin,
+            scene,
+            pos,
+            right,
+            up,
+            fwd,
+            (H as f32) * 0.85,
+            true,
+            false,
+            true,
+            &mut fb,
+            &mut zb,
+        );
+    }
+    (fb, zb)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::scene::{SceneDynamicMesh, SceneMaterial, ScenePoly, SceneVertex};
@@ -1671,7 +1762,7 @@ mod tests {
         assert_eq!(tex.height, 256);
     }
 
-    fn empty_scene() -> LdbScene {
+    pub(super) fn empty_scene() -> LdbScene {
         LdbScene {
             textures: Vec::new(),
             materials: BTreeMap::new(),
