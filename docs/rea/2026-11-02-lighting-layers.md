@@ -101,9 +101,24 @@ Per lit object the driver sets `D3DRS_LIGHTING` (`0x89`) = 1 and `D3DRS_AMBIENT`
 material builder (`0x554d30`) sets ambient from `0x574940()` at `0x556eac`, a per-material value not
 read yet.
 
+## Object ambient and colour sources (2026-11-02)
+
+**VERIFIED (dynamic, winedbg at `0x556eac`, save loaded):** all 60 object materials captured set ambient
+`(255, 255, 255, 255)`, which is white.
+
+**VERIFIED (static, driver `0x10017752`…`0x10017849`):** the driver toggles `D3DRS_AMBIENTMATERIALSOURCE`
+(`0x93`), `D3DRS_DIFFUSEMATERIALSOURCE` (`0x91`), `D3DRS_SPECULARMATERIALSOURCE` (`0x92`) between 0
+(`D3DMCS_MATERIAL`) and 1 (`D3DMCS_COLOR1`, the vertex colour), and `D3DRS_EMISSIVEMATERIALSOURCE`
+(`0x94`) between 0/1/2, per material. One `SetMaterial` call site.
+
+HYPOTHESIS: object materials use `COLOR1` for ambient, so with white `D3DRS_AMBIENT` an object is lit by its
+**baked vertex colours** plus point lights. The engine does not parse vertex colours for dynamic meshes or
+characters yet. That's the next step: find the colour-source flags per material (`setLightingColorSource`,
+IAT `0x7ca598`) and the vertex-colour data in the `.ldb` dynamic-mesh / KFS records.
+
 ## Open (golden data needed)
 
-1. Object ambient: break at `0x556eac` and dump `[eax]` (G_FColor) per material while loading a save.
+1. ~~Object ambient~~ (done above: white).
 2. Do static point lights also add to lightmapped level polygons (the template has `DIFFUSE_ADD`), or are
    they excluded (light collision lists, `P_BaseObject::addLightCollision`)? Compare a wall near a
    lamp: lightmap only vs lightmap + point light.
