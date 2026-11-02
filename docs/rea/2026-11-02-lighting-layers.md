@@ -225,9 +225,27 @@ the house, Max on screen; 4000 requests, 72 lit materials. (`D3DTA`: 0 diffuse, 
 - All 72 lit materials had diffuse `(255, 255, 255)`. `setDiffuseColor` from the KFS colour `c` only runs in the
   `0x556000`/`0x556120` helpers. When those run is not mapped, so the default diffuse 255 is what reached D3D here.
 
+## Light selection per object (VERIFIED, static, driver + e2mfc)
+
+The driver walks the object's light-collision list (`P_BaseObject::getFirstLightCollision` /
+`getNextLightCollision`, loop at `0x100239ea`). For each light it calls light `vt+0x60` (e2mfc `P_PointLight`
+`0x10011550`), which dispatches to the object's device object `[obj+0x114]` `vt+0x10`. For a point light that is driver
+`0x10023ec0` (spot: `vt+0x14` → `0x10024270`, not read). It appends an 8-byte entry `(key, light index [light+0x110])`:
+
+    d   = |light position (+0x80) − object position (+0x80)| × object scale [obj+0xbc]
+    key = |light colour (+0x118..+0x120)| × 1 / (a0 + a1·d + a2·d²) / 255     (a = getAttenuation())
+
+The entries are sorted with `std::sort` (16-element insertion threshold `0x80` bytes). The partition `0x100253c0` advances
+while `key > pivot`, so the order is **descending** (brightest first). Up to `getMaximumLightsPerObject()` (8, set by the exe
+at `0x40deb5`) are used. Which lights enter the collision list (light range vs object bounds, collision group/mask) is
+STRONGLY SUPPORTED as a bounding-sphere test, not read.
+
+**Vertex normals:** the KFS mesh chunk `0x10005` has no normal sub-chunk (`0x10000` header, `0x10006` vertices, `0x10007`
+faces, `0x1000b` one byte per face (smoothing group? UNKNOWN), `0x1000c` materials, `0x1000e` UV faces). So normals are
+built at load time. The method is UNKNOWN.
+
 **Engine consequence (STRONGLY SUPPORTED):** a lit object pixel is `texture × clamp(Σ point/spot lights ·
-max(N·L,0) · atten)`, per vertex then Gouraud, with black ambient and zero emissive. Still UNKNOWN: which ≤ 8 lights
-`P_VirtualLight` picks per object, and whether static lights are enabled for lightmapped level geometry. Next
+max(N·L,0) · atten)`, per vertex then Gouraud, with black ambient and zero emissive. Light selection: see above. Still UNKNOWN: whether static lights are enabled for lightmapped level geometry. Next
 capture: log `LightEnable` / `SetLight` (device vt `+0xb8` / `+0xb0`) per draw.
 
 ## Open (golden data needed)
