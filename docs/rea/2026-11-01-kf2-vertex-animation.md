@@ -156,8 +156,17 @@ reaches its children through the vertex-animation apply (`0x57cb70` → `0x57c86
 through `0x5723d0`. The only static caller of `0x5723d0` is `0x54e7ca`, inside slot 35 (`0x54e790`). Slot 35's
 entry was not hit in this sample, so it may be reached another way.
 
-Next: read `0x5723d0` (bit-mask edits on a `+0x2c`-strided array; candidate per-bone update) and the VA apply's
-child loop. **Capture tooling:** attaching with winedbg crashes the game here; launch under winedbg and gate
+**`0x5723d0` is a pose snapshot (VERIFIED, static).** Arguments: an object animation and an optional filter.
+`this+0x5`/`+0x9` is a vector of 48-byte entries (count = byte size / 48, `0x2aaaaaab` multiply). For each index
+*i* it fetches child *i* of the object animation (vslot `+0x64` = slot 25, `getChild`). If the filter
+(`0x570e90`) rejects that child, it clears bit *i* of the bitmask at `this+0x19`. Otherwise it copies the child's
+48 bytes at `+0x2c` (a 3×4 `M_Matrix4x3Template`, 12 floats) into entry *i* and sets bit *i*.
+
+STRONGLY SUPPORTED: KF2 bones are e2mfc scene nodes (`P_BaseObject` children of the object animation) whose local
+transform sits at `+0x2c`. The exe does not sample keyframes itself. It snapshots node matrices into a per-bone
+48-byte array (for skinning or blending). The keyframe interpolation that moves the nodes lives in e2mfc's
+controller code. Next: find which e2mfc export writes `P_BaseObject+0x2c` each frame (watchpoint on one bone's
+`+0x2c` under a launch-time capture). **Capture tooling:** attaching with winedbg crashes the game here; launch under winedbg and gate
 the breakpoints on a later event instead.
 
 ## Open
@@ -165,5 +174,5 @@ the breakpoints on a later event instead.
 - ~~Dynamic: who enters `0x57cb70`.~~ Answered above (e2mfc `executeHierarchy`).
 - Exact type behind `+0x111` list (cast source is `P_BaseObject`).
 - What `+0x119` gate means when non-null (LOD side vs flag).
-- `KF_ObjectKeyframeAnimationCallback` bone sample path: see captures above; next `0x5723d0`.
+- `KF_ObjectKeyframeAnimationCallback` bone sample path: bones are e2mfc nodes (`+0x2c` matrix); the sampler is in e2mfc. Next: a watchpoint on one bone's `+0x2c`.
 - Character / `SKD` load → this VA tree.
