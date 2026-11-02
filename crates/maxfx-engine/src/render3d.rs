@@ -8,10 +8,10 @@
 //! - Visible 3D enemies (`doe_johnny_l0.kfs`) spawned via level `C_Teleport` FSM scripts + AI pursuit
 //! - Shooting (`F` / `Ctrl` / Right-Ctrl), Bullet-Time slow-motion (`B` / Right-Click), and `E` door/barrel interaction
 
-use crate::kf2::{load_character_rigs, load_skin_body, pose_mesh, CharacterRig};
+use crate::kf2::{load_character_rigs, load_skin_body, pose_mesh, CharacterRig, KfsFace};
 use crate::scene::{
     decode_texture_blob, material_policy, CameraFlyover, DecodedLightmap, DecodedTexture, LdbScene,
-    MaterialPolicy, ScenePoly, SceneVertex,
+    MaterialPolicy, ScenePointLight, ScenePoly, SceneVertex,
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use std::collections::BTreeMap;
@@ -37,6 +37,8 @@ struct ProjVert {
     v_over_z: f32,
     lu_over_z: f32,
     lv_over_z: f32,
+    /// Vertex diffuse (0..1 per channel), perspective-correct like the UVs.
+    light_over_z: [f32; 3],
 }
 
 #[derive(Clone, Copy)]
@@ -48,6 +50,7 @@ struct CamVert {
     v: f32,
     lu: f32,
     lv: f32,
+    light: [f32; 3],
 }
 
 #[derive(Clone)]
@@ -96,6 +99,18 @@ pub fn run_3d_walkthrough(
     for r in &scene.rooms {
         room_origins.insert(r.id, r.world_origin);
     }
+    // `.ldb` point light positions are room-local (every light sits within a few metres of every room).
+    let world_lights: Vec<ScenePointLight> = scene
+        .point_lights
+        .iter()
+        .map(|l| {
+            let ro = room_origins.get(&l.room_id).copied().unwrap_or([0.0; 3]);
+            ScenePointLight {
+                pos: [0, 1, 2].map(|k| ro[k] + l.pos[k]),
+                ..l.clone()
+            }
+        })
+        .collect();
 
     let mut bodies: Vec<CharacterRig> = Vec::new();
     if let Some(johnny) = johnny_rig {
@@ -582,6 +597,7 @@ pub fn run_3d_walkthrough(
                     en.walk_phase > 0.0,
                     en.health <= 0,
                     en.hit_flash > 0.0,
+                    &world_lights,
                     cam_pos,
                     cam_right,
                     cam_up,
@@ -609,6 +625,7 @@ pub fn run_3d_walkthrough(
                     player_moving,
                     false,
                     false,
+                    &world_lights,
                     cam_pos,
                     cam_right,
                     cam_up,
@@ -1055,6 +1072,110 @@ fn lightmap_modulate(texture: u32, lightmap: u32) -> u32 {
     channel(16) | channel(8) | channel(0)
 }
 
+/// Retail static point light: `setFalloffCurve(0.01, 0, 20)` and `getAttenuation()` = `(c0, c1/R, c2/R²)`
+/// (e2mfc `0x10011310`), so D3D gives `1 / (0.01 + 20·(d/R)²)`. Zero past the range, as D3D does.
+fn point_light_attenuation(d: f32, radius: f32) -> f32 {
+    let r = radius.max(0.1); // e2mfc clamps the range to ≥ 0.1 (`0x100112c0`)
+    if d > r {
+        return 0.0;
+    }
+    1.0 / (0.01 + 20.0 * (d / r) * (d / r))
+}
+
+fn light_rgb(l: &ScenePointLight) -> [f32; 3] {
+    [0, 1, 2].map(|c| l.color[c] * l.intensity)
+}
+
+/// D3D fixed-function diffuse for an object material (colour source 0, diffuse 255, black scene
+/// ambient, zero emissive): `Σ colour/255 · max(N·L, 0) · attenuation`, clamped to 1.
+fn vertex_diffuse(pos: [f32; 3], normal: [f32; 3], lights: &[&ScenePointLight]) -> [f32; 3] {
+    let mut out = [0.0f32; 3];
+    for l in lights {
+        let to = [l.pos[0] - pos[0], l.pos[1] - pos[1], l.pos[2] - pos[2]];
+        let d = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+        let atten = point_light_attenuation(d, l.radius);
+        if atten == 0.0 || d < 1e-6 {
+            continue;
+        }
+        let n_dot_l = (normal[0] * to[0] + normal[1] * to[1] + normal[2] * to[2]) / d;
+        if n_dot_l <= 0.0 {
+            continue;
+        }
+        let rgb = light_rgb(l);
+        for c in 0..3 {
+            out[c] += rgb[c] / 255.0 * n_dot_l * atten;
+        }
+    }
+    out.map(|c| c.min(1.0))
+}
+
+/// Driver `0x10023ec0`: key = |colour| / 255 × attenuation at the object origin. Sorted descending
+/// (partition `0x100253c0`) and capped at `setMaximumLightsPerObject(8)` (exe `0x40deb5`).
+/// The collision test (light range reaches the object's bounding sphere) is STRONGLY SUPPORTED, not read.
+fn select_object_lights(
+    lights: &[ScenePointLight],
+    origin: [f32; 3],
+    radius: f32,
+) -> Vec<&ScenePointLight> {
+    let mut keyed: Vec<(f32, &ScenePointLight)> = lights
+        .iter()
+        .filter_map(|l| {
+            let d = ((l.pos[0] - origin[0]).powi(2)
+                + (l.pos[1] - origin[1]).powi(2)
+                + (l.pos[2] - origin[2]).powi(2))
+            .sqrt();
+            if d > l.radius + radius {
+                return None;
+            }
+            let r = l.radius.max(0.1);
+            let rgb = light_rgb(l);
+            let mag = (rgb[0] * rgb[0] + rgb[1] * rgb[1] + rgb[2] * rgb[2]).sqrt();
+            Some((mag / (0.01 + 20.0 * (d / r) * (d / r)) / 255.0, l))
+        })
+        .collect();
+    keyed.sort_by(|a, b| b.0.total_cmp(&a.0));
+    keyed.into_iter().take(8).map(|(_, l)| l).collect()
+}
+
+/// Area-weighted smooth vertex normals. KFS stores no normals (retail builds them at load, method
+/// UNKNOWN) and its winding is not documented, so the mesh-wide sign is chosen to face outward.
+fn smooth_normals(pts: &[[f32; 3]], faces: &[KfsFace]) -> Vec<[f32; 3]> {
+    let mut n = vec![[0.0f32; 3]; pts.len()];
+    for f in faces {
+        let [a, b, c] = f.indices.map(|i| pts[i]);
+        let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let fnorm = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        for &i in &f.indices {
+            for k in 0..3 {
+                n[i][k] += fnorm[k];
+            }
+        }
+    }
+    let count = pts.len().max(1) as f32;
+    let centroid = [0, 1, 2].map(|k| pts.iter().map(|p| p[k]).sum::<f32>() / count);
+    let outward: f32 = pts
+        .iter()
+        .zip(&n)
+        .map(|(p, v)| (0..3).map(|k| (p[k] - centroid[k]) * v[k]).sum::<f32>())
+        .sum();
+    let sign = if outward < 0.0 { -1.0 } else { 1.0 };
+    n.into_iter()
+        .map(|v| {
+            let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            if len < 1e-12 {
+                [0.0; 3]
+            } else {
+                v.map(|c| c * sign / len)
+            }
+        })
+        .collect()
+}
+
 /// Pull a decal toward the camera by its `DetailOffset` distance.
 fn decal_depth(z: f32, depth_bias: f32) -> f32 {
     z - depth_bias
@@ -1079,6 +1200,7 @@ fn render_kfs_character(
     moving: bool,
     dead: bool,
     hit_flash: bool,
+    lights: &[ScenePointLight],
     cam_pos: [f32; 3],
     cam_right: [f32; 3],
     cam_up: [f32; 3],
@@ -1105,6 +1227,7 @@ fn render_kfs_character(
 
     // Pre-transform character vertices into camera space
     let mut cam_pts = Vec::with_capacity(posed.len());
+    let mut world_pts = Vec::with_capacity(posed.len());
     for &[lx, ly, lz] in &posed {
         let (px, py, pz) = if dead {
             // Lie flat on the floor when dead
@@ -1115,6 +1238,7 @@ fn render_kfs_character(
         let wx = world_pos[0] + px * cy + pz * sy;
         let wy = world_pos[1] + py;
         let wz = world_pos[2] - px * sy + pz * cy;
+        world_pts.push([wx, wy, wz]);
         let dx = wx - cam_pos[0];
         let dy = wy - cam_pos[1];
         let dz = wz - cam_pos[2];
@@ -1124,7 +1248,26 @@ fn render_kfs_character(
         cam_pts.push([cx, cy_c, cz]);
     }
 
-    let shade = if hit_flash { 1.35 } else { 0.92 };
+    let vertex_light: Vec<[f32; 3]> = if hit_flash {
+        vec![[1.35; 3]; world_pts.len()]
+    } else {
+        let normals = smooth_normals(&world_pts, &mesh.faces);
+        let radius = world_pts
+            .iter()
+            .map(|p| {
+                ((p[0] - world_pos[0]).powi(2)
+                    + (p[1] - world_pos[1]).powi(2)
+                    + (p[2] - world_pos[2]).powi(2))
+                .sqrt()
+            })
+            .fold(0.0f32, f32::max);
+        let picked = select_object_lights(lights, world_pos, radius);
+        world_pts
+            .iter()
+            .zip(&normals)
+            .map(|(p, n)| vertex_diffuse(*p, *n, &picked))
+            .collect()
+    };
     for face in &mesh.faces {
         let [i0, i1, i2] = face.indices;
         let c0 = cam_pts[i0];
@@ -1145,6 +1288,7 @@ fn render_kfs_character(
                 v: face.uvs[0][1],
                 lu: 0.5,
                 lv: 0.5,
+                light: vertex_light[i0],
             },
             CamVert {
                 cx: c1[0],
@@ -1154,6 +1298,7 @@ fn render_kfs_character(
                 v: face.uvs[1][1],
                 lu: 0.5,
                 lv: 0.5,
+                light: vertex_light[i1],
             },
             CamVert {
                 cx: c2[0],
@@ -1163,6 +1308,7 @@ fn render_kfs_character(
                 v: face.uvs[2][1],
                 lu: 0.5,
                 lv: 0.5,
+                light: vertex_light[i2],
             },
         ];
         let clipped = clip_near_plane(&cam_verts);
@@ -1180,6 +1326,7 @@ fn render_kfs_character(
                 v_over_z: cv.v * inv_z,
                 lu_over_z: 0.0,
                 lv_over_z: 0.0,
+                light_over_z: cv.light.map(|c| c * inv_z),
             });
         }
         let tex = mesh
@@ -1201,7 +1348,6 @@ fn render_kfs_character(
                     tex,
                     None,
                     None,
-                    shade,
                     true,
                     0.0,
                 );
@@ -1302,6 +1448,7 @@ fn draw_poly(
         None
     };
 
+    let shade = ((wn[0] * 0.35 + wn[1] * 0.75 + wn[2] * 0.55).abs() * 0.55 + 0.45).clamp(0.35, 1.0);
     let mut cam_verts = Vec::with_capacity(poly.vertices.len());
     let mut all_behind = true;
     let mut all_far = true;
@@ -1330,6 +1477,7 @@ fn draw_poly(
             v: v.uv[1],
             lu: v.luv[0],
             lv: v.luv[1],
+            light: [shade; 3],
         });
     }
     if all_behind || all_far {
@@ -1354,10 +1502,9 @@ fn draw_poly(
             v_over_z: cv.v * inv_z,
             lu_over_z: cv.lu * inv_z,
             lv_over_z: cv.lv * inv_z,
+            light_over_z: cv.light.map(|c| c * inv_z),
         });
     }
-
-    let shade = ((wn[0] * 0.35 + wn[1] * 0.75 + wn[2] * 0.55).abs() * 0.55 + 0.45).clamp(0.35, 1.0);
 
     for k in 1..proj.len() - 1 {
         let p0 = proj[0];
@@ -1377,7 +1524,6 @@ fn draw_poly(
                 tex,
                 alpha_reference,
                 lmap,
-                shade,
                 policy.writes_z,
                 policy.detail_offset as f32 * DETAIL_OFFSET_M,
             );
@@ -1405,6 +1551,7 @@ fn clip_near_plane(verts: &[CamVert]) -> Vec<CamVert> {
                 v: a.v + (b.v - a.v) * t,
                 lu: a.lu + (b.lu - a.lu) * t,
                 lv: a.lv + (b.lv - a.lv) * t,
+                light: [0, 1, 2].map(|c| a.light[c] + (b.light[c] - a.light[c]) * t),
             });
         }
     }
@@ -1421,7 +1568,6 @@ fn rasterize_tri(
     tex: Option<&DecodedTexture>,
     alpha_reference: Option<u8>,
     lmap: Option<&DecodedLightmap>,
-    shade: f32,
     write_z: bool,
     depth_bias: f32,
 ) {
@@ -1498,9 +1644,13 @@ fn rasterize_tri(
                     b = (lit & 0xff) as f32;
                 }
             } else {
-                r *= shade;
-                g *= shade;
-                b *= shade;
+                let light = [0, 1, 2].map(|c| {
+                    (w0 * p0.light_over_z[c] + w1 * p1.light_over_z[c] + w2 * p2.light_over_z[c])
+                        * z
+                });
+                r *= light[0];
+                g *= light[1];
+                b *= light[2];
             }
 
             let ri = (r.min(255.0) as u32) << 16;
@@ -1628,6 +1778,94 @@ fn draw_line(fb: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, col: u32) {
 mod tests {
     use super::*;
     use crate::scene::{SceneDynamicMesh, SceneMaterial, ScenePoly, SceneVertex};
+
+    fn light(pos: [f32; 3], rgb: f32, radius: f32, intensity: f32) -> ScenePointLight {
+        ScenePointLight {
+            id: 0,
+            room_id: 0,
+            pos,
+            color: [rgb, rgb, rgb, 255.0],
+            radius,
+            intensity,
+        }
+    }
+
+    #[test]
+    fn point_light_attenuation_uses_retail_falloff_curve() {
+        // 1 / (0.01 + 20·(d/R)²), zero past the range.
+        assert_eq!(point_light_attenuation(0.0, 10.0), 100.0);
+        assert!((point_light_attenuation(5.0, 10.0) - 1.0 / 5.01).abs() < 1e-6);
+        assert_eq!(point_light_attenuation(12.0, 10.0), 0.0);
+    }
+
+    #[test]
+    fn vertex_diffuse_is_lambert_times_attenuation_clamped() {
+        let l = [light([0.0, 5.0, 0.0], 255.0, 10.0, 1.0)];
+        let lit = vertex_diffuse(
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            &l.iter().collect::<Vec<_>>(),
+        );
+        assert!((lit[0] - 1.0 / 5.01).abs() < 1e-5);
+        let back = vertex_diffuse(
+            [0.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            &l.iter().collect::<Vec<_>>(),
+        );
+        assert_eq!(back, [0.0, 0.0, 0.0]);
+        let near = [light([0.0, 0.1, 0.0], 255.0, 10.0, 1.0)];
+        let sat = vertex_diffuse(
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            &near.iter().collect::<Vec<_>>(),
+        );
+        assert_eq!(sat, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn smooth_normals_point_outward_for_either_winding() {
+        // Tetrahedron with its apex up; the apex normal must point +Y whatever the face winding.
+        let pts = [
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, -1.0],
+            [1.0, 0.0, -1.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let face = |indices| KfsFace {
+            indices,
+            uvs: [[0.0; 2]; 3],
+            mat_index: 0,
+        };
+        let ccw = [
+            face([0, 1, 2]),
+            face([0, 2, 3]),
+            face([0, 3, 1]),
+            face([1, 3, 2]),
+        ];
+        let cw = [
+            face([0, 2, 1]),
+            face([0, 3, 2]),
+            face([0, 1, 3]),
+            face([1, 2, 3]),
+        ];
+        for faces in [&ccw[..], &cw[..]] {
+            let n = smooth_normals(&pts, faces);
+            assert!(n[0][1] > 0.99, "apex normal {:?}", n[0]);
+        }
+    }
+
+    #[test]
+    fn object_lights_sort_brightest_first_and_cap_at_eight() {
+        let mut lights: Vec<ScenePointLight> = (0..10)
+            .map(|i| light([i as f32 * 0.5, 0.0, 0.0], 255.0, 20.0, 1.0))
+            .collect();
+        lights.push(light([0.2, 0.0, 0.0], 1.0, 20.0, 1.0)); // close but dim
+        lights.push(light([30.0, 0.0, 0.0], 255.0, 5.0, 1.0)); // out of reach
+        let picked = select_object_lights(&lights, [0.0, 0.0, 0.0], 1.0);
+        assert_eq!(picked.len(), 8);
+        let xs: Vec<f32> = picked.iter().map(|l| l.pos[0]).collect();
+        assert_eq!(xs, vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]);
+    }
 
     #[test]
     fn lightmap_modulates_the_texture_like_d3dtop_modulate() {
