@@ -187,6 +187,30 @@ Production path: per-frame `0x6e1a00` (primary `+0x18`) → `call [vt+0x1c]` →
 `0x6f34c0` → sampler `0x5ff100` → pose copy into `+0x259`, which `0x6e1a93` then reads
 (`add esi,0x259`).
 
+## Pose → world composition in `0x6e1a00` (2026-11-02)
+
+Row-vector convention (`v' = v·R + t`; "A·B" applies A first). **VERIFIED (static):**
+
+1. `L` = sampled pose `+0x259` (the tick output). `+0x289 = L`. `+0x325 = L·(+0x319)` (a point carried with the object).
+2. If parent `P = [+0x189]` (set by `0x6e23b0`, found by name in the map at `0x8b5ba0`):
+   `+0x386 = P.+0x289 · (+0x191)`, `+0x289 = L · +0x386`, `M = L · +0x386`.
+   `+0x191` comes from `0x63bfb0(this.[+0x1c1], P.[+0x1c1])`; it is identity when there is no parent.
+3. `M = M · (+0x2b9)`, then `0x6e46d0(M)` and the `+0x1e` sphere subobject updates (`0x64aee0`, `0x642c00`).
+
+So `X(node) = L · X(parent) · R191`, with `world = X · B` (`B = +0x2b9`). Parents must update before children.
+
+Load: `0x6e1267`… reads two `M_Matrix4x3Template` via `operator>>(R_MemoryFile&, M_Matrix4x3Template&)`
+(import `0x7caaf0`) into `+0x259` and `+0x2b9` (offsets as seen from the `+0x1e` subobject: `+0x23b`/`+0x29b`).
+The constructor sets `+0x259`/`+0x289`/`+0x2b9`/`+0x2e9` to identity. FSM pause/resume (`0x6e2520`/`0x6e2680`)
+snapshot `+0x2b9` ↔ `+0x1f5`.
+
+**VERIFIED (retail data, house `Part0_Level1.ldb`):** in the `.ldb` dynamic-mesh record, after the
+parent name, xform1 = composed world `W0`, and xform2 = local `L0` relative to the parent. xform2
+equals the first track's start pose and the engine's `local_start`. For roots, xform1 == xform2. Child check:
+`painting_rotate_parent` `L0.p=[0,-0.25,0.03125]` · parent `painting_parent06` W0 = `[3.21875,-0.25,-1]`
+= its xform1. So for these records `R191 = B = I`, and **`W(t) = L(t) · W_parent(t)`**.
+HYPOTHESIS: `R191`/`B` are identity for all retail DOs (not yet checked level-wide).
+
 ## (Superseded) Who calls DO vslot `+0xb0` (`0x6f34c0`)
 
 Absolute vt slot only at `0x7d7b70`. **No** direct `E8`/`E9` to `0x6f34c0`.  

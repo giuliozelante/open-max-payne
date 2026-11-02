@@ -33,6 +33,9 @@ pub struct SceneMaterial {
     pub category: String,
     pub texture_path: String,
     pub texture_index: Option<usize>,
+    /// `Some(AlphaReference)` when the texture carries an alpha mask (`P_Map(colour, alpha)`,
+    /// `0x5dc3d8`); its alpha is in the top byte. `None` is opaque.
+    pub alpha_reference: Option<u8>,
 }
 
 /// Draw and character-collision rules from `data/database/materials.txt`.
@@ -268,40 +271,34 @@ impl SceneDynamicMesh {
             .map(|anim| anim.scripts.clone())
     }
 
-    /// Rest pose, the active `DO_Animate` track, or the toggled opening pose.
+    /// World pose ignoring the parent's motion: the track-local pose `L`
+    /// carried into the rest frame, `L · L0⁻¹ · W0` (`0x6e1a00`). At rest this is `W0`.
     pub fn posed_local(&self) -> ([f32; 9], [f32; 3]) {
+        let rest = (self.local_start_mat, self.local_start_pos);
+        let world = (self.world_mat, self.world_pos);
+        compose_pose(compose_pose(self.track_local(), invert_pose(rest)), world)
+    }
+
+    /// `L`: the active `DO_Animate` track, the toggled opening pose, or the rest pose.
+    fn track_local(&self) -> ([f32; 9], [f32; 3]) {
         if let Some(name) = &self.active_track {
             if let Some(anim) = self
                 .anims
                 .iter()
                 .find(|anim| anim.name.eq_ignore_ascii_case(name))
             {
-                return pose_on_track(self, anim);
+                return pose_on_track(self.track_time, anim);
             }
         }
-        if !self.toggled {
-            return (self.world_mat, self.world_pos);
-        }
-        let Some(anim) = self.opening_anim() else {
-            return (self.world_mat, self.world_pos);
-        };
-        if self.world_pos == self.local_start_pos {
-            (anim.end_mat, anim.end_pos)
-        } else {
-            (
-                self.world_mat,
-                [
-                    self.world_pos[0] + (anim.end_pos[0] - anim.start_pos[0]),
-                    self.world_pos[1] + (anim.end_pos[1] - anim.start_pos[1]),
-                    self.world_pos[2] + (anim.end_pos[2] - anim.start_pos[2]),
-                ],
-            )
+        match self.opening_anim() {
+            Some(anim) if self.toggled => (anim.end_mat, anim.end_pos),
+            _ => (self.local_start_mat, self.local_start_pos),
         }
     }
 }
 
-fn pose_on_track(mesh: &SceneDynamicMesh, anim: &SceneDynamicAnim) -> ([f32; 9], [f32; 3]) {
-    let time = mesh.track_time.min(anim.duration.max(0.0));
+fn pose_on_track(track_time: f32, anim: &SceneDynamicAnim) -> ([f32; 9], [f32; 3]) {
+    let time = track_time.min(anim.duration.max(0.0));
     let (w, t) = track_weights(
         &anim.curves,
         anim.start_pos,
@@ -309,34 +306,61 @@ fn pose_on_track(mesh: &SceneDynamicMesh, anim: &SceneDynamicAnim) -> ([f32; 9],
         anim.duration,
         time,
     );
-    let local = [
+    let pos = [
         anim.start_pos[0] + (anim.end_pos[0] - anim.start_pos[0]) * w,
         anim.start_pos[1] + (anim.end_pos[1] - anim.start_pos[1]) * w,
         anim.start_pos[2] + (anim.end_pos[2] - anim.start_pos[2]) * w,
     ];
-    if mesh.world_pos == mesh.local_start_pos {
-        let mat = if time <= 0.0 {
-            anim.start_mat
-        } else if time >= anim.duration {
-            anim.end_mat
-        } else {
-            crate::kf2::quat_to_mat(crate::kf2::quat_slerp(
-                crate::kf2::mat_to_quat(anim.start_mat),
-                crate::kf2::mat_to_quat(anim.end_mat),
-                t,
-            ))
-        };
-        (mat, local)
+    let mat = if time <= 0.0 {
+        anim.start_mat
+    } else if time >= anim.duration {
+        anim.end_mat
     } else {
-        (
-            mesh.world_mat,
-            [
-                mesh.world_pos[0] + (local[0] - anim.start_pos[0]),
-                mesh.world_pos[1] + (local[1] - anim.start_pos[1]),
-                mesh.world_pos[2] + (local[2] - anim.start_pos[2]),
-            ],
-        )
+        crate::kf2::quat_to_mat(crate::kf2::quat_slerp(
+            crate::kf2::mat_to_quat(anim.start_mat),
+            crate::kf2::mat_to_quat(anim.end_mat),
+            t,
+        ))
+    };
+    (mat, pos)
+}
+
+/// Apply `first`, then `then` (retail row-vector `first · then`).
+fn compose_pose(first: ([f32; 9], [f32; 3]), then: ([f32; 9], [f32; 3])) -> ([f32; 9], [f32; 3]) {
+    let mut mat = [0.0f32; 9];
+    for c in 0..3 {
+        let col = xform_point(
+            then.0,
+            [0.0; 3],
+            [first.0[c * 3], first.0[c * 3 + 1], first.0[c * 3 + 2]],
+        );
+        mat[c * 3..c * 3 + 3].copy_from_slice(&col);
     }
+    (mat, xform_point(then.0, then.1, first.1))
+}
+
+fn invert_pose((m, p): ([f32; 9], [f32; 3])) -> ([f32; 9], [f32; 3]) {
+    let det = m[0] * (m[4] * m[8] - m[7] * m[5]) - m[3] * (m[1] * m[8] - m[7] * m[2])
+        + m[6] * (m[1] * m[5] - m[4] * m[2]);
+    if det.abs() < 1.0e-12 {
+        return (
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [-p[0], -p[1], -p[2]],
+        );
+    }
+    let inv = [
+        (m[4] * m[8] - m[7] * m[5]) / det,
+        (m[7] * m[2] - m[1] * m[8]) / det,
+        (m[1] * m[5] - m[4] * m[2]) / det,
+        (m[6] * m[5] - m[3] * m[8]) / det,
+        (m[0] * m[8] - m[6] * m[2]) / det,
+        (m[3] * m[2] - m[0] * m[5]) / det,
+        (m[3] * m[7] - m[6] * m[4]) / det,
+        (m[6] * m[1] - m[0] * m[7]) / det,
+        (m[0] * m[4] - m[3] * m[1]) / det,
+    ];
+    let t = xform_point(inv, [0.0; 3], p);
+    (inv, [-t[0], -t[1], -t[2]])
 }
 
 /// Retail sampler `0x5ff100`: translation lerp weight is the distance curve
@@ -555,6 +579,37 @@ impl<'a> Message<'a> {
 }
 
 impl LdbScene {
+    /// Masked materials take their category's `AlphaReference` from `materials.txt`.
+    pub fn apply_material_surfaces(&mut self, surfaces: &BTreeMap<String, MaterialSurface>) {
+        for material in self.materials.values_mut() {
+            if material.alpha_reference.is_none() {
+                continue;
+            }
+            if let Some((_, surface)) = surfaces
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&material.category))
+            {
+                material.alpha_reference = Some(surface.alpha_reference.clamp(0, 255) as u8);
+            }
+        }
+    }
+
+    /// World pose of dynamic mesh `index`, following its parent's motion:
+    /// `posed_local · W0(parent)⁻¹ · world(parent)` (`0x6e1a00`, parent `[+0x189]`).
+    /// Room origin is not added.
+    pub fn dynamic_world_pose(&self, index: usize) -> ([f32; 9], [f32; 3]) {
+        let mesh = &self.dynamic_meshes[index];
+        let own = mesh.posed_local();
+        let Some(pi) = parent_name(&mesh.name)
+            .and_then(|p| self.dynamic_meshes.iter().position(|m| m.name == p))
+        else {
+            return own;
+        };
+        let parent = &self.dynamic_meshes[pi];
+        let rest = invert_pose((parent.world_mat, parent.world_pos));
+        compose_pose(compose_pose(own, rest), self.dynamic_world_pose(pi))
+    }
+
     /// Match the receiver as stored, then the same path with `.DO` appended.
     pub fn resolve_mesh_mut<'a>(
         &'a mut self,
@@ -1288,6 +1343,49 @@ fn skip_hook_map(
     Some(out)
 }
 
+/// `colour` with `mask` intensity in the top byte (nearest sample when sizes differ).
+fn with_alpha_mask(colour: &DecodedTexture, mask: &DecodedTexture) -> DecodedTexture {
+    let mut pixels = colour.pixels.clone();
+    for y in 0..colour.height {
+        for x in 0..colour.width {
+            let mx = x * mask.width / colour.width.max(1);
+            let my = y * mask.height / colour.height.max(1);
+            // A texel missing from a short decode reads as transparent instead of panicking.
+            let m = mask
+                .pixels
+                .get((my * mask.width + mx) as usize)
+                .copied()
+                .unwrap_or(0);
+            let alpha = (((m >> 16) & 0xff) + ((m >> 8) & 0xff) + (m & 0xff)) / 3;
+            if let Some(p) = pixels.get_mut((y * colour.width + x) as usize) {
+                *p = (alpha << 24) | (*p & 0x00ff_ffff);
+            }
+        }
+    }
+    DecodedTexture {
+        path: format!("{}|{}", colour.path, mask.path),
+        flag: colour.flag,
+        width: colour.width,
+        height: colour.height,
+        pixels,
+    }
+}
+
+/// Embedded texture for `path` by full path, file name, then stem.
+fn lookup_texture(tex_lookup: &BTreeMap<String, usize>, path: &str) -> Option<usize> {
+    let mut clean = path.to_ascii_lowercase();
+    if let Some(stripped) = clean.strip_suffix(" new") {
+        clean = stripped.trim().to_string();
+    }
+    let base = clean.rsplit(['\\', '/']).next().unwrap_or(&clean);
+    let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
+    tex_lookup
+        .get(&clean)
+        .or_else(|| tex_lookup.get(base))
+        .or_else(|| tex_lookup.get(stem))
+        .copied()
+}
+
 /// Parse an entire `.ldb` byte buffer into a walkable [`LdbScene`].
 pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
     let import_off = super::ras_ldb_after_geometry(data)?;
@@ -1359,17 +1457,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
             } else {
                 -1
             };
-            let mut clean = texture_path.to_ascii_lowercase();
-            if let Some(stripped) = clean.strip_suffix(" new") {
-                clean = stripped.trim().to_string();
-            }
-            let base = clean.rsplit(['\\', '/']).next().unwrap_or(&clean);
-            let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
-            let texture_index = tex_lookup
-                .get(&clean)
-                .or_else(|| tex_lookup.get(base))
-                .or_else(|| tex_lookup.get(stem))
-                .copied();
+            let texture_index = lookup_texture(&tex_lookup, &texture_path);
             materials.insert(
                 id,
                 SceneMaterial {
@@ -1377,6 +1465,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     category,
                     texture_path,
                     texture_index,
+                    alpha_reference: None,
                 },
             );
         }
@@ -1384,7 +1473,45 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
     }
 
     // 3. Material categories
-    let (_, _, after_cats) = super::parse_ras_ldb_import_material_categories_at(data, i)?;
+    let (_, categories, after_cats) = super::parse_ras_ldb_import_material_categories_at(data, i)?;
+    // 0x5dc800: a material record's texture file (+0x1c) wins over its name; a third
+    // string is its alpha image, combined into the texture (0x5dc3d8, `P_Map(colour, alpha)`).
+    let mut masked: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    for category in &categories {
+        let records = std::iter::once((&category.texture, &category.path, category.path2.as_str()))
+            .chain(
+                category
+                    .members
+                    .iter()
+                    .map(|m| (&m.name, &m.path, m.path2.as_deref().unwrap_or(""))),
+            );
+        for (name, file, alpha) in records {
+            let colour = (!file.is_empty())
+                .then(|| lookup_texture(&tex_lookup, file))
+                .flatten();
+            let mask = (!alpha.is_empty())
+                .then(|| lookup_texture(&tex_lookup, alpha))
+                .flatten();
+            for material in materials.values_mut() {
+                if !material.texture_path.eq_ignore_ascii_case(name) {
+                    continue;
+                }
+                if let Some(index) = colour {
+                    material.texture_index = Some(index);
+                }
+                let (Some(colour), Some(mask)) = (material.texture_index, mask) else {
+                    continue;
+                };
+                let index = *masked.entry((colour, mask)).or_insert_with(|| {
+                    textures.push(with_alpha_mask(&textures[colour], &textures[mask]));
+                    textures.len() - 1
+                });
+                material.texture_index = Some(index);
+                // `ID_ALPHAREFERENCE` until `materials.txt` overrides it per category.
+                material.alpha_reference = Some(15);
+            }
+        }
+    }
     i = after_cats;
 
     // 4. Lightmaps (`256×256` RGB planes)
@@ -2450,6 +2577,139 @@ mod tests {
         assert_eq!(door.posed_local().1, [1.0, 0.0, 2.0]);
         door.toggled = true;
         assert_eq!(door.posed_local().1, [1.2, 0.0, 2.0]);
+    }
+
+    #[test]
+    fn house_materials_use_their_record_texture_path() {
+        // 0x5dc800: a material record is (name +0xc, texture file +0x1c, bool, bool).
+        let path =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !path.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(path).unwrap()).expect("house");
+        let tex = |id: i32| {
+            let index = scene.materials[&id].texture_index.expect("textured");
+            scene.textures[index].path.clone()
+        };
+        assert!(tex(16).ends_with("MaxHouseWall01_512x512.jpg"));
+        assert!(tex(2).ends_with("Concrete01_128x128.jpg"));
+        let untextured: Vec<_> = scene
+            .materials
+            .values()
+            .filter(|m| m.texture_index.is_none())
+            .map(|m| m.texture_path.as_str())
+            .collect();
+        assert!(untextured.is_empty(), "{untextured:?}");
+    }
+
+    #[test]
+    fn short_mask_pixels_do_not_panic() {
+        let tex = |pixels: Vec<u32>| DecodedTexture {
+            path: String::new(),
+            flag: 4,
+            width: 2,
+            height: 2,
+            pixels,
+        };
+        let out = with_alpha_mask(&tex(vec![0x00ff_ffff; 3]), &tex(vec![0x00ff_ffff]));
+        assert_eq!(out.pixels.len(), 3);
+        assert_eq!(out.pixels[0] >> 24, 0xff);
+        assert_eq!(out.pixels[1] >> 24, 0, "missing mask texel is transparent");
+    }
+
+    #[test]
+    fn masked_materials_take_their_category_alpha_reference() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        for (id, category, alpha) in [(1, "leaves", Some(15)), (2, "wood", None)] {
+            scene.materials.insert(
+                id,
+                SceneMaterial {
+                    id,
+                    category: category.into(),
+                    texture_path: String::new(),
+                    texture_index: None,
+                    alpha_reference: alpha,
+                },
+            );
+        }
+        let surfaces = parse_material_surfaces(
+            "[Leaves]\nAlphaReference = 127;\nBlendedAlphaTest = FALSE;\n\
+             [Wood]\nAlphaReference = 40;\nBlendedAlphaTest = TRUE;\n",
+        );
+        scene.apply_material_surfaces(&surfaces);
+        assert_eq!(scene.materials[&1].alpha_reference, Some(127));
+        assert_eq!(
+            scene.materials[&2].alpha_reference, None,
+            "opaque stays opaque"
+        );
+    }
+
+    #[test]
+    fn house_plant_material_carries_its_alpha_mask() {
+        // 0x5dc3d8: P_Map(colour, alpha) when the record has an alpha image.
+        let path =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !path.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(path).unwrap()).expect("house");
+        let plant = &scene.materials[&52];
+        assert_eq!(plant.alpha_reference, Some(15));
+        let tex = &scene.textures[plant.texture_index.unwrap()];
+        assert!(tex.pixels.iter().any(|p| p >> 24 == 0));
+        assert!(tex.pixels.iter().any(|p| p >> 24 > 0x80));
+        assert_eq!(scene.materials[&16].alpha_reference, None);
+    }
+
+    #[test]
+    fn child_mesh_turns_with_its_animating_parent() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let mut parent = door_mesh(vec![track("open", [0.0; 3])]);
+        parent.name = "::room::hinge.DO".into();
+        parent.world_pos = [0.0; 3];
+        let mut child = door_mesh(Vec::new());
+        child.name = "::room::hinge::panel.DO".into();
+        child.local_start_pos = [1.0, 0.0, 0.0];
+        child.world_pos = [1.0, 0.0, 0.0];
+        scene.dynamic_meshes.push(parent);
+        scene.dynamic_meshes.push(child);
+        scene.dynamic_meshes[0].play_track("open");
+        scene.dynamic_meshes[0].track_time = 1.3;
+        let (mat, pos) = scene.dynamic_world_pose(1);
+        // Parent end pose maps x to -z, so the panel swings from +x to -z.
+        assert_eq!(pos, [0.0, 0.0, -1.0]);
+        assert_eq!(&mat[0..3], &[0.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn house_child_rest_world_is_local_then_parent_world() {
+        // 0x6e1a00: X = L · X(parent); with R191 = B = I the rest world is L0 · W0(parent).
+        let path =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !path.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(path).unwrap()).expect("house");
+        let mut children = 0;
+        for mesh in &scene.dynamic_meshes {
+            let Some(parent) = parent_name(&mesh.name)
+                .and_then(|p| scene.dynamic_meshes.iter().find(|m| m.name == p))
+            else {
+                continue;
+            };
+            children += 1;
+            let pos = xform_point(parent.world_mat, parent.world_pos, mesh.local_start_pos);
+            for k in 0..3 {
+                assert!(
+                    (pos[k] - mesh.world_pos[k]).abs() < 1.0e-3,
+                    "{}: {pos:?} vs {:?}",
+                    mesh.name,
+                    mesh.world_pos
+                );
+            }
+        }
+        assert!(children > 0);
     }
 
     #[test]

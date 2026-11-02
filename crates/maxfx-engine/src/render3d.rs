@@ -11,7 +11,7 @@
 use crate::kf2::{load_character_rigs, load_skin_body, pose_mesh, CharacterRig};
 use crate::scene::{
     decode_texture_blob, material_policy, CameraFlyover, DecodedLightmap, DecodedTexture, LdbScene,
-    MaterialPolicy, SceneDynamicMesh, ScenePoly, SceneVertex,
+    MaterialPolicy, ScenePoly, SceneVertex,
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use std::collections::BTreeMap;
@@ -216,6 +216,12 @@ pub fn run_3d_walkthrough(
 
     if scene.sound_catalogs.is_empty() {
         scene.sound_catalogs = crate::load_sound_catalogs(&catalog_root(level_path));
+    }
+    if let Some(text) =
+        crate::read_game_bytes(&catalog_root(level_path), r"\data\database\materials.txt")
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    {
+        scene.apply_material_surfaces(&crate::scene::parse_material_surfaces(&text));
     }
     scene.apply_startup_hitpoints();
     scene.apply_startup_hides();
@@ -669,7 +675,12 @@ fn toggle_nearest_dynamic_mesh(
     }
     if let Some((idx, _)) = best_dm {
         let dm = &mut scene.dynamic_meshes[idx];
-        dm.toggled = !dm.toggled;
+        // Play the opening track (retail `DO_Animate`); it holds the end pose.
+        if dm.active_track.is_none() {
+            if let Some(name) = dm.opening_anim().map(|anim| anim.name.clone()) {
+                dm.play_track(&name);
+            }
+        }
         if let Some(anim) = dm.opening_anim() {
             println!(
                 "  3D Engine: DO_Animate {} ({}) -> {:?}",
@@ -789,11 +800,11 @@ fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32
             }
         }
     }
-    for dm in &scene.dynamic_meshes {
+    for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
         if dm.hidden || dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
             continue;
         }
-        let (xform, origin) = dynamic_world(dm, rooms);
+        let (xform, origin) = dynamic_world(scene, idx, rooms);
         for poly in &dm.polys {
             if poly.vertices.len() < 3 || !blocks_character(scene, poly.material_id) {
                 continue;
@@ -881,14 +892,14 @@ fn draw_dynamic_meshes(
     fb: &mut [u32],
     zb: &mut [f32],
 ) {
-    for dm in &scene.dynamic_meshes {
+    for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
         if dm.hidden {
             continue;
         }
         if dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
             continue;
         }
-        let (mat, origin) = dynamic_world(dm, room_origins);
+        let (mat, origin) = dynamic_world(scene, idx, room_origins);
         render_poly_batch(
             &dm.polys,
             mat,
@@ -920,7 +931,7 @@ fn aim_hit_dynamic(
         if dm.hidden || dm.hitpoints.is_none() || dm.polys.is_empty() {
             continue;
         }
-        let (mat, pos) = dynamic_world(dm, rooms);
+        let (mat, pos) = dynamic_world(scene, idx, rooms);
         let mut min = [f32::INFINITY; 3];
         let mut max = [f32::NEG_INFINITY; 3];
         for poly in &dm.polys {
@@ -1005,9 +1016,16 @@ fn catalog_root(path: &Path) -> PathBuf {
     }
 }
 
-fn dynamic_world(dm: &SceneDynamicMesh, rooms: &BTreeMap<i32, [f32; 3]>) -> ([f32; 9], [f32; 3]) {
-    let ro = rooms.get(&dm.room_id).copied().unwrap_or([0.0; 3]);
-    let (mat, pos) = dm.posed_local();
+fn dynamic_world(
+    scene: &LdbScene,
+    idx: usize,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+) -> ([f32; 9], [f32; 3]) {
+    let ro = rooms
+        .get(&scene.dynamic_meshes[idx].room_id)
+        .copied()
+        .unwrap_or([0.0; 3]);
+    let (mat, pos) = scene.dynamic_world_pose(idx);
     (mat, [ro[0] + pos[0], ro[1] + pos[1], ro[2] + pos[2]])
 }
 
@@ -1027,6 +1045,14 @@ fn xform_point(mat: [f32; 9], origin: [f32; 3], v: [f32; 3]) -> [f32; 3] {
 /// Mesh yaw matches the look yaw, so the camera behind that look sits over the shoulder.
 fn player_mesh_yaw(look_yaw: f32) -> f32 {
     look_yaw
+}
+
+/// Lightmap layer `MUL` = `D3DTOP_MODULATE` (`e2_d3d8_driver_mfc` `0x10008082`): per channel
+/// `texture × lightmap / 255`, no overbright. Alpha bits are dropped.
+fn lightmap_modulate(texture: u32, lightmap: u32) -> u32 {
+    let channel =
+        |shift: u32| (((texture >> shift) & 0xff) * ((lightmap >> shift) & 0xff) / 255) << shift;
+    channel(16) | channel(8) | channel(0)
 }
 
 /// Pull a decal toward the camera by its `DetailOffset` distance.
@@ -1174,6 +1200,7 @@ fn render_kfs_character(
                     proj[k + 1],
                     tex,
                     None,
+                    None,
                     shade,
                     true,
                     0.0,
@@ -1264,11 +1291,11 @@ fn draw_poly(
         }
     }
 
-    let tex = scene
-        .materials
-        .get(&poly.material_id)
+    let material = scene.materials.get(&poly.material_id);
+    let tex = material
         .and_then(|m| m.texture_index)
         .and_then(|ti| scene.textures.get(ti));
+    let alpha_reference = material.and_then(|m| m.alpha_reference);
     let lmap = if use_lightmaps && poly.lightmap_id >= 0 {
         scene.lightmaps.get(poly.lightmap_id as usize)
     } else {
@@ -1348,6 +1375,7 @@ fn draw_poly(
                 p1,
                 p2,
                 tex,
+                alpha_reference,
                 lmap,
                 shade,
                 policy.writes_z,
@@ -1391,6 +1419,7 @@ fn rasterize_tri(
     p1: ProjVert,
     p2: ProjVert,
     tex: Option<&DecodedTexture>,
+    alpha_reference: Option<u8>,
     lmap: Option<&DecodedLightmap>,
     shade: f32,
     write_z: bool,
@@ -1430,9 +1459,6 @@ fn rasterize_tri(
             if z >= zb[idx] {
                 continue;
             }
-            if write_z {
-                zb[idx] = z;
-            }
 
             let u = (w0 * p0.u_over_z + w1 * p1.u_over_z + w2 * p2.u_over_z) * z;
             let v = (w0 * p0.v_over_z + w1 * p1.v_over_z + w2 * p2.v_over_z) * z;
@@ -1447,6 +1473,14 @@ fn rasterize_tri(
             } else {
                 0x008899aa
             };
+            // Alpha test before the depth write, so cut-out texels hide nothing.
+            // Retail passes when alpha >= AlphaReference (D3DCMP_GREATEREQUAL).
+            if alpha_reference.is_some_and(|reference| ((base_rgb >> 24) as u8) < reference) {
+                continue;
+            }
+            if write_z {
+                zb[idx] = z;
+            }
 
             let mut r = ((base_rgb >> 16) & 0xff) as f32;
             let mut g = ((base_rgb >> 8) & 0xff) as f32;
@@ -1458,12 +1492,10 @@ fn rasterize_tri(
                 let lx = (lu.clamp(0.0, 1.0) * (lm.width - 1) as f32) as u32;
                 let ly = (lv.clamp(0.0, 1.0) * (lm.height - 1) as f32) as u32;
                 if let Some(&lcol) = lm.pixels.get((ly * lm.width + lx) as usize) {
-                    let lr = (((lcol >> 16) & 0xff) as f32 / 255.0 * 1.65).clamp(0.22, 1.4);
-                    let lg = (((lcol >> 8) & 0xff) as f32 / 255.0 * 1.65).clamp(0.22, 1.4);
-                    let lb = ((lcol & 0xff) as f32 / 255.0 * 1.65).clamp(0.22, 1.4);
-                    r *= lr;
-                    g *= lg;
-                    b *= lb;
+                    let lit = lightmap_modulate(base_rgb, lcol);
+                    r = ((lit >> 16) & 0xff) as f32;
+                    g = ((lit >> 8) & 0xff) as f32;
+                    b = (lit & 0xff) as f32;
                 }
             } else {
                 r *= shade;
@@ -1598,6 +1630,14 @@ mod tests {
     use crate::scene::{SceneDynamicMesh, SceneMaterial, ScenePoly, SceneVertex};
 
     #[test]
+    fn lightmap_modulates_the_texture_like_d3dtop_modulate() {
+        // e2_d3d8_driver_mfc 0x10008082: layer MUL -> colour op 4 (D3DTOP_MODULATE).
+        assert_eq!(lightmap_modulate(0x0080_8080, 0x0080_8080), 0x0040_4040);
+        assert_eq!(lightmap_modulate(0x0020_4060, 0x00ff_ffff), 0x0020_4060);
+        assert_eq!(lightmap_modulate(0x00ff_ffff, 0x0000_0000), 0x0000_0000);
+    }
+
+    #[test]
     fn chase_eye_sits_behind_and_above_the_player() {
         let eye = chase_eye([0.0, 1.6, 0.0], [0.0, 0.0, 1.0], CHASE_BACK);
         assert!(eye[0].abs() < 1e-4);
@@ -1670,6 +1710,7 @@ mod tests {
                 category: "wood".into(),
                 texture_path: String::new(),
                 texture_index: None,
+                alpha_reference: None,
             },
         );
         scene.materials.insert(
@@ -1679,6 +1720,7 @@ mod tests {
                 category: "dummy".into(),
                 texture_path: String::new(),
                 texture_index: None,
+                alpha_reference: None,
             },
         );
         let quad = ScenePoly {
@@ -1740,6 +1782,59 @@ mod tests {
             painted_pixels(&scene),
             0,
             "::Bathroom::glass01.DO must be skipped when hidden"
+        );
+    }
+
+    #[test]
+    fn texels_below_the_alpha_reference_are_not_drawn() {
+        // e2_d3d8_driver_mfc 0x100353f8: D3DRS_ALPHAFUNC = 7 (D3DCMP_GREATEREQUAL).
+        let mut scene = empty_scene();
+        scene.textures.push(DecodedTexture {
+            path: "mask".into(),
+            flag: 4,
+            width: 1,
+            height: 1,
+            pixels: vec![0x0e80_8080],
+        });
+        scene.materials.insert(
+            1,
+            SceneMaterial {
+                id: 1,
+                category: "leaves".into(),
+                texture_path: String::new(),
+                texture_index: Some(0),
+                alpha_reference: Some(15),
+            },
+        );
+        scene.dynamic_meshes.push(glass_quad(false));
+        assert_eq!(painted_pixels(&scene), 0, "alpha 14 fails reference 15");
+        scene.textures[0].pixels[0] = 0x0f80_8080;
+        assert!(painted_pixels(&scene) > 0, "alpha 15 passes reference 15");
+    }
+
+    #[test]
+    fn interacting_with_a_drawer_plays_its_open_track() {
+        let mut scene = empty_scene();
+        let mut drawer = glass_quad(false);
+        drawer.name = "::startroom::New mesh 62::drawer.DO".into();
+        drawer.anims.push(crate::scene::SceneDynamicAnim {
+            name: "open".into(),
+            duration: 0.7,
+            start_mat: drawer.local_start_mat,
+            start_pos: [0.0; 3],
+            end_mat: drawer.local_start_mat,
+            end_pos: [0.3, 0.0, 0.0],
+            scripts: Vec::new(),
+            curves: [Vec::new(), Vec::new()],
+        });
+        scene.dynamic_meshes.push(drawer);
+        toggle_nearest_dynamic_mesh(&mut scene, &BTreeMap::new(), [0.5, 0.0, 0.0], 36.0);
+        let drawer = &scene.dynamic_meshes[0];
+        assert_eq!(drawer.active_track.as_deref(), Some("open"));
+        assert_eq!(
+            drawer.posed_local().1,
+            [0.0; 3],
+            "starts closed, then animates"
         );
     }
 
