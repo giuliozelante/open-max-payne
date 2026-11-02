@@ -559,17 +559,6 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 }
 
 /// Spherical blend of two column-major rotation matrices.
-fn slerp_mat(a: [f32; 9], b: [f32; 9], t: f32) -> [f32; 9] {
-    let t = t.clamp(0.0, 1.0);
-    if t <= 0.0 {
-        return a;
-    }
-    if t >= 1.0 {
-        return b;
-    }
-    quat_to_mat(quat_slerp(mat_to_quat(a), mat_to_quat(b), t))
-}
-
 pub(crate) fn mat_to_quat(m: [f32; 9]) -> [f32; 4] {
     let (m00, m10, m20) = (m[0], m[1], m[2]);
     let (m01, m11, m21) = (m[3], m[4], m[5]);
@@ -706,7 +695,9 @@ pub fn sample_locals(anim: &Kf2Anim, time_s: f32) -> BTreeMap<String, ([f32; 9],
             } else {
                 ((frame - a.frame as f32) / span).clamp(0.0, 1.0)
             };
-            (slerp_mat(a.mat, b.mat, t), lerp3(a.pos, b.pos, t))
+            // Retail `0x55e300`: component-wise lerp of the 3x4 key matrices, no slerp.
+            let mat = std::array::from_fn(|k| a.mat[k] + (b.mat[k] - a.mat[k]) * t);
+            (mat, lerp3(a.pos, b.pos, t))
         };
         out.insert(bone.name.to_ascii_lowercase(), (mat, pos));
     }
@@ -1359,17 +1350,35 @@ mod tests {
     }
 
     #[test]
-    fn halfway_between_identity_and_yaw_90_is_yaw_45() {
+    fn halfway_between_keys_is_the_component_wise_matrix_average() {
+        // Retail 0x55e300: key[k] + (key[k+1] - key[k]) * frac on all 3x4 components, no slerp
+        // (docs/rea/2026-11-01-kf2-vertex-animation.md, "Bone keyframe sampler found").
         let yaw90 = [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0];
-        let mid = slerp_mat(identity_mat(), yaw90, 0.5);
-        let c = (std::f32::consts::FRAC_PI_4).cos();
-        assert!((mid[0] - c).abs() < 1e-4);
-        assert!(mid[1].abs() < 1e-4);
-        assert!((mid[2] + c).abs() < 1e-4);
-        assert!((mid[6] - c).abs() < 1e-4);
-        assert!((mid[8] - c).abs() < 1e-4);
-        let len = (mid[0] * mid[0] + mid[1] * mid[1] + mid[2] * mid[2]).sqrt();
-        assert!((len - 1.0).abs() < 1e-4);
+        let anim = Kf2Anim {
+            bones: vec![AnimBone {
+                name: "Pelvis".into(),
+                parent: None,
+                duration: 10,
+                keys: vec![
+                    AnimKeyframe {
+                        frame: 0,
+                        mat: identity_mat(),
+                        pos: [0.0; 3],
+                    },
+                    AnimKeyframe {
+                        frame: 2,
+                        mat: yaw90,
+                        pos: [2.0, 0.0, 0.0],
+                    },
+                ],
+            }],
+        };
+        let (mat, pos) = sample_locals(&anim, 1.0 / 30.0)["pelvis"];
+        let want = [0.5, 0.0, -0.5, 0.0, 1.0, 0.0, 0.5, 0.0, 0.5];
+        for (got, want) in mat.iter().zip(want) {
+            assert!((got - want).abs() < 1e-5, "{mat:?}");
+        }
+        assert!((pos[0] - 1.0).abs() < 1e-5);
     }
 
     #[test]
