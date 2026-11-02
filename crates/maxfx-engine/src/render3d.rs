@@ -563,10 +563,49 @@ pub fn run_3d_walkthrough(
 
         // 1. Render static room meshes (with inward-normal backface culling)
         if let (Some(gpu), false) = (gpu.as_mut(), wireframe) {
+            let mut characters = Vec::new();
+            for en in &enemies {
+                if let Some(erig) = bodies.get(en.rig_index) {
+                    let moving = en.walk_phase > 0.0;
+                    let time = if moving { en.walk_phase } else { anim_clock };
+                    characters.push(crate::gpu::GpuCharacter {
+                        mesh: &erig.mesh,
+                        verts: character_world_verts(
+                            erig,
+                            en.world_pos,
+                            en.yaw,
+                            time,
+                            moving,
+                            en.health <= 0,
+                        ),
+                        shade: character_shade(en.hit_flash > 0.0),
+                    });
+                }
+            }
+            if let (true, false, Some(prig)) = (third_person, fly_mode, player_rig.as_ref()) {
+                let time = if player_moving {
+                    walk_phase
+                } else {
+                    anim_clock
+                };
+                characters.push(crate::gpu::GpuCharacter {
+                    mesh: &prig.mesh,
+                    verts: character_world_verts(
+                        prig,
+                        player_feet,
+                        player_mesh_yaw(yaw),
+                        time,
+                        player_moving,
+                        false,
+                    ),
+                    shade: character_shade(false),
+                });
+            }
             gpu.render(
                 &scene,
                 (cam_pos, cam_right, cam_up, cam_fwd),
                 use_lightmaps,
+                &characters,
                 &mut fb,
                 &mut zb,
             );
@@ -609,8 +648,10 @@ pub fn run_3d_walkthrough(
             );
         }
 
-        // 3. Render each character with the skin the level named.
-        for en in &enemies {
+        // 3. Render each character with the skin the level named (the hardware renderer drew
+        // them in step 1).
+        let cpu_characters = gpu.is_none() || wireframe;
+        for en in enemies.iter().filter(|_| cpu_characters) {
             if let Some(erig) = bodies.get(en.rig_index) {
                 render_kfs_character(
                     erig,
@@ -637,7 +678,7 @@ pub fn run_3d_walkthrough(
         }
 
         // 4. Render Player (`Payne_Max_L0.KFS`) in 3rd-person view
-        if third_person && !fly_mode {
+        if third_person && !fly_mode && cpu_characters {
             if let Some(ref prig) = player_rig {
                 render_kfs_character(
                     prig,
@@ -1114,6 +1155,54 @@ fn point_in_xz_tri(px: f32, pz: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> b
     !(has_neg && has_pos)
 }
 
+/// Character vertices posed (or laid flat when dead) and placed in the world.
+pub(crate) fn character_world_verts(
+    rig: &CharacterRig,
+    world_pos: [f32; 3],
+    yaw: f32,
+    anim_time: f32,
+    moving: bool,
+    dead: bool,
+) -> Vec<[f32; 3]> {
+    let (sy, cy) = yaw.sin_cos();
+    let mesh = &rig.mesh;
+    let anim = if moving {
+        rig.walk.as_ref().or(rig.idle.as_ref())
+    } else {
+        rig.idle.as_ref().or(rig.walk.as_ref())
+    };
+    let posed = if dead {
+        mesh.vertices.clone()
+    } else {
+        pose_mesh(mesh, rig.skin.as_ref(), rig.bind.as_ref(), anim, anim_time)
+    };
+    posed
+        .iter()
+        .map(|&[lx, ly, lz]| {
+            let (px, py, pz) = if dead {
+                // Lie flat on the floor when dead
+                (lx, 0.18 + lz.abs() * 0.5, ly - 0.85)
+            } else {
+                (lx, ly, lz)
+            };
+            [
+                world_pos[0] + px * cy + pz * sy,
+                world_pos[1] + py,
+                world_pos[2] - px * sy + pz * cy,
+            ]
+        })
+        .collect()
+}
+
+/// Flat character shade; brighter while a hit flash lasts.
+pub(crate) fn character_shade(hit_flash: bool) -> f32 {
+    if hit_flash {
+        1.35
+    } else {
+        0.92
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_kfs_character(
     rig: &CharacterRig,
@@ -1134,31 +1223,12 @@ fn render_kfs_character(
 ) {
     let half_w = W as f32 * 0.5;
     let half_h = H as f32 * 0.5;
-    let (sy, cy) = yaw.sin_cos();
     let mesh = &rig.mesh;
-    let anim = if moving {
-        rig.walk.as_ref().or(rig.idle.as_ref())
-    } else {
-        rig.idle.as_ref().or(rig.walk.as_ref())
-    };
-    let posed = if dead {
-        mesh.vertices.clone()
-    } else {
-        pose_mesh(mesh, rig.skin.as_ref(), rig.bind.as_ref(), anim, anim_time)
-    };
+    let world = character_world_verts(rig, world_pos, yaw, anim_time, moving, dead);
 
     // Pre-transform character vertices into camera space
-    let mut cam_pts = Vec::with_capacity(posed.len());
-    for &[lx, ly, lz] in &posed {
-        let (px, py, pz) = if dead {
-            // Lie flat on the floor when dead
-            (lx, 0.18 + lz.abs() * 0.5, ly - 0.85)
-        } else {
-            (lx, ly, lz)
-        };
-        let wx = world_pos[0] + px * cy + pz * sy;
-        let wy = world_pos[1] + py;
-        let wz = world_pos[2] - px * sy + pz * cy;
+    let mut cam_pts = Vec::with_capacity(world.len());
+    for &[wx, wy, wz] in &world {
         let dx = wx - cam_pos[0];
         let dy = wy - cam_pos[1];
         let dz = wz - cam_pos[2];
@@ -1168,7 +1238,7 @@ fn render_kfs_character(
         cam_pts.push([cx, cy_c, cz]);
     }
 
-    let shade = if hit_flash { 1.35 } else { 0.92 };
+    let shade = character_shade(hit_flash);
     for face in &mesh.faces {
         let [i0, i1, i2] = face.indices;
         let c0 = cam_pts[i0];
@@ -1714,6 +1784,36 @@ pub(crate) fn test_software_dynamic(
         fwd,
         (H as f32) * 0.85,
         true,
+        false,
+        &mut fb,
+        &mut zb,
+    );
+    (fb, zb)
+}
+
+/// Software render of one character facing +z at `pos` (the hardware renderer's reference).
+#[cfg(test)]
+pub(crate) fn test_software_character(
+    rig: &CharacterRig,
+    pos: [f32; 3],
+    hit_flash: bool,
+    (cam, right, up, fwd): crate::gpu::GpuView,
+) -> (Vec<u32>, Vec<f32>) {
+    let mut fb = vec![0u32; W * H];
+    let mut zb = vec![f32::INFINITY; W * H];
+    render_kfs_character(
+        rig,
+        pos,
+        0.0,
+        0.0,
+        false,
+        false,
+        hit_flash,
+        cam,
+        right,
+        up,
+        fwd,
+        (H as f32) * 0.85,
         false,
         &mut fb,
         &mut zb,

@@ -4,6 +4,7 @@
 //! Shading mirrors `render3d::rasterize_tri`: nearest/repeat texture, alpha test `a >= ref`,
 //! `texture × lightmap / 255` (`D3DTOP_MODULATE`), otherwise a normal-based shade.
 
+use crate::kf2::KfsMesh;
 use crate::render3d::{
     dynamic_mesh_drawn, dynamic_world, poly_policy, DETAIL_OFFSET_M, FAR_Z, FRAME_H, FRAME_W,
     NEAR_Z,
@@ -50,10 +51,145 @@ pub struct GpuRenderer {
     /// `[0]` static geometry (identity), `[1 + i]` dynamic mesh `i`.
     models: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     draws: Vec<GpuDraw>,
+    binder: Binder,
+    characters: CharacterCache,
     color: wgpu::Texture,
     depth: wgpu::Texture,
     color_out: wgpu::Buffer,
     depth_out: wgpu::Buffer,
+}
+
+/// Layouts, samplers and the 1x1 white fallback texture, kept to create bind groups later.
+struct Binder {
+    batch_layout: wgpu::BindGroupLayout,
+    model_layout: wgpu::BindGroupLayout,
+    tex_sampler: wgpu::Sampler,
+    lmap_sampler: wgpu::Sampler,
+    blank: wgpu::TextureView,
+}
+
+impl Binder {
+    fn batch_group(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        uniform: BatchUniform,
+        tex: Option<&wgpu::TextureView>,
+        lmap: Option<&wgpu::TextureView>,
+    ) -> wgpu::BindGroup {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: std::mem::size_of::<BatchUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniform));
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.batch_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(tex.unwrap_or(&self.blank)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(lmap.unwrap_or(&self.blank)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.tex_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.lmap_sampler),
+                },
+            ],
+        })
+    }
+
+    fn model(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        uniform: ModelUniform,
+    ) -> (wgpu::Buffer, wgpu::BindGroup) {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: std::mem::size_of::<ModelUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniform));
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.model_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        (buffer, group)
+    }
+}
+
+/// Character textures per mesh (by address, stable for a walkthrough), the per-frame vertex
+/// buffer and one model per character shade.
+#[derive(Default)]
+struct CharacterCache {
+    materials: BTreeMap<usize, Vec<wgpu::BindGroup>>,
+    shades: Vec<(u32, (wgpu::Buffer, wgpu::BindGroup))>,
+    vertices: Option<(wgpu::Buffer, u64)>,
+}
+
+/// One posed character for this frame: world-space vertices from `character_world_verts`.
+pub struct GpuCharacter<'a> {
+    pub mesh: &'a KfsMesh,
+    pub verts: Vec<[f32; 3]>,
+    pub shade: f32,
+}
+
+fn upload(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    pixels: &[u32],
+) -> wgpu::TextureView {
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let bytes: Vec<u8> = pixels
+        .iter()
+        .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8])
+        .collect();
+    queue.write_texture(
+        texture.as_image_copy(),
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * width),
+            rows_per_image: Some(height),
+        },
+        size,
+    );
+    texture.create_view(&Default::default())
 }
 
 struct GpuDraw {
@@ -97,6 +233,17 @@ impl ModelUniform {
             origin: [origin[0], origin[1], origin[2], 0.0],
             flags: [if cull { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         }
+    }
+
+    /// Identity placement, no culling, fixed shade (characters).
+    fn shaded(shade: f32) -> Self {
+        let mut m = Self::new(
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0; 3],
+            false,
+        );
+        m.flags[1] = shade;
+        m
     }
 }
 
@@ -155,8 +302,11 @@ fn vs(v: In) -> Out {
     o.clip = vec4f(cx * cam.params.x, cy * cam.params.y, cz - cam.params2.x, cz);
     o.uv = v.uv;
     o.luv = v.luv;
-    // render3d::poly_shade on the world normal.
+    // render3d::poly_shade on the world normal, or the fixed character shade (flags.y).
     o.shade = clamp(abs(n.x * 0.35 + n.y * 0.75 + n.z * 0.55) * 0.55 + 0.45, 0.35, 1.0);
+    if model.flags.y > 0.0 {
+        o.shade = model.flags.y;
+    }
     o.vz = cz;
     return o;
 }
@@ -329,78 +479,40 @@ impl GpuRenderer {
         };
         let tex_sampler = sampler(wgpu::AddressMode::Repeat);
         let lmap_sampler = sampler(wgpu::AddressMode::ClampToEdge);
-        let upload = |width: u32, height: u32, pixels: &[u32]| {
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: None,
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            let bytes: Vec<u8> = pixels
-                .iter()
-                .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8])
-                .collect();
-            queue.write_texture(
-                texture.as_image_copy(),
-                &bytes,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * width),
-                    rows_per_image: Some(height),
-                },
-                wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-            );
-            texture.create_view(&Default::default())
+        let binder = Binder {
+            batch_layout,
+            model_layout,
+            tex_sampler,
+            lmap_sampler,
+            blank: upload(&device, &queue, 1, 1, &[0xffff_ffff]),
         };
-        let blank = upload(1, 1, &[0xffff_ffff]);
         let textures: Vec<_> = scene
             .textures
             .iter()
-            .map(|t| (t.width > 0 && t.height > 0).then(|| upload(t.width, t.height, &t.pixels)))
+            .map(|t| {
+                (t.width > 0 && t.height > 0)
+                    .then(|| upload(&device, &queue, t.width, t.height, &t.pixels))
+            })
             .collect();
         let lightmaps: Vec<_> = scene
             .lightmaps
             .iter()
-            .map(|l| (l.width > 0 && l.height > 0).then(|| upload(l.width, l.height, &l.pixels)))
+            .map(|l| {
+                (l.width > 0 && l.height > 0)
+                    .then(|| upload(&device, &queue, l.width, l.height, &l.pixels))
+            })
             .collect();
 
-        let model = |cull: bool| {
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: std::mem::size_of::<ModelUniform>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let identity = ModelUniform::new(
-                [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-                [0.0; 3],
-                cull,
-            );
-            queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&identity));
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &model_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
-            });
-            (buffer, group)
-        };
-        let mut models = vec![model(true)];
-        models.extend((0..scene.dynamic_meshes.len()).map(|_| model(false)));
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let mut models =
+            vec![binder.model(&device, &queue, ModelUniform::new(identity, [0.0; 3], true))];
+        models.extend((0..scene.dynamic_meshes.len()).map(|_| {
+            binder.model(
+                &device,
+                &queue,
+                ModelUniform::new(identity, [0.0; 3], false),
+            )
+        }));
 
         let mut draws = Vec::new();
         for batch in build_static_batches(scene)
@@ -423,39 +535,7 @@ impl GpuRenderer {
                     if lmap.is_some() { 1.0 } else { 0.0 },
                 ],
             };
-            let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: std::mem::size_of::<BatchUniform>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&uniform_buf, 0, bytemuck::bytes_of(&uniform));
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &batch_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: uniform_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(tex.unwrap_or(&blank)),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(lmap.unwrap_or(&blank)),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&tex_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&lmap_sampler),
-                    },
-                ],
-            });
+            let group = binder.batch_group(&device, &queue, uniform, tex, lmap);
             let vertices = device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
                 size: std::mem::size_of_val(batch.verts.as_slice()) as u64,
@@ -510,6 +590,8 @@ impl GpuRenderer {
             camera_group,
             models,
             draws,
+            binder,
+            characters: CharacterCache::default(),
             color,
             depth,
             color_out,
@@ -523,9 +605,11 @@ impl GpuRenderer {
         scene: &LdbScene,
         (pos, right, up, fwd): GpuView,
         use_lightmaps: bool,
+        characters: &[GpuCharacter],
         fb: &mut [u32],
         zb: &mut [f32],
     ) {
+        let character_draws = self.prepare_characters(characters);
         let (w, h) = (FRAME_W as u32, FRAME_H as u32);
         let fov_scale = (FRAME_H as f32) * 0.85;
         let v4 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
@@ -605,6 +689,19 @@ impl GpuRenderer {
                     pass.set_vertex_buffer(0, draw.vertices.slice(..));
                     pass.draw(0..draw.count, 0..1);
                 }
+                // Characters write depth like the software path (rasterize_tri with write_z).
+                if let (true, Some((buffer, _))) = (writes_z, self.characters.vertices.as_ref()) {
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    for d in &character_draws {
+                        pass.set_bind_group(
+                            1,
+                            &self.characters.materials[&d.mesh][d.material],
+                            &[],
+                        );
+                        pass.set_bind_group(2, &self.characters.shades[d.shade].1 .1, &[]);
+                        pass.draw(d.start..d.start + d.count, 0..1);
+                    }
+                }
             }
         }
         let layout = wgpu::TexelCopyBufferLayout {
@@ -669,6 +766,111 @@ pub fn build_dynamic_batches(scene: &LdbScene) -> Vec<StaticBatch> {
         add_polys(scene, &dm.polys, [0.0; 3], Some(idx), &mut batches);
     }
     batches
+}
+
+struct CharacterDraw {
+    mesh: usize,
+    material: usize,
+    shade: usize,
+    start: u32,
+    count: u32,
+}
+
+impl GpuRenderer {
+    /// Upload this frame's character triangles, creating texture groups and shade models on
+    /// first use. Returns the draws in buffer order.
+    fn prepare_characters(&mut self, characters: &[GpuCharacter]) -> Vec<CharacterDraw> {
+        let mut verts: Vec<GpuVertex> = Vec::new();
+        let mut draws = Vec::new();
+        for ch in characters {
+            let key = ch.mesh as *const KfsMesh as usize;
+            if !self.characters.materials.contains_key(&key) {
+                let groups = (0..ch.mesh.material_textures.len().max(1))
+                    .map(|m| {
+                        let tex = ch.mesh.material_textures.get(m).and_then(Option::as_ref);
+                        let view = tex.filter(|t| t.width > 0 && t.height > 0).map(|t| {
+                            upload(&self.device, &self.queue, t.width, t.height, &t.pixels)
+                        });
+                        let uniform = BatchUniform {
+                            params: [-1.0, 0.0, if view.is_some() { 1.0 } else { 0.0 }, 0.0],
+                        };
+                        self.binder.batch_group(
+                            &self.device,
+                            &self.queue,
+                            uniform,
+                            view.as_ref(),
+                            None,
+                        )
+                    })
+                    .collect();
+                self.characters.materials.insert(key, groups);
+            }
+            let bits = ch.shade.to_bits();
+            let shade = match self.characters.shades.iter().position(|(b, _)| *b == bits) {
+                Some(i) => i,
+                None => {
+                    let model = self.binder.model(
+                        &self.device,
+                        &self.queue,
+                        ModelUniform::shaded(ch.shade),
+                    );
+                    self.characters.shades.push((bits, model));
+                    self.characters.shades.len() - 1
+                }
+            };
+            let materials = self.characters.materials[&key].len();
+            let mut by_material: BTreeMap<usize, Vec<GpuVertex>> = BTreeMap::new();
+            for face in &ch.mesh.faces {
+                let material = face.mat_index.min(materials - 1);
+                let out = by_material.entry(material).or_default();
+                for (k, &i) in face.indices.iter().enumerate() {
+                    let Some(&pos) = ch.verts.get(i) else {
+                        continue;
+                    };
+                    out.push(GpuVertex {
+                        pos,
+                        uv: face.uvs[k],
+                        luv: [0.5, 0.5],
+                        cull_ref: pos,
+                        normal: [0.0; 3],
+                    });
+                }
+            }
+            for (material, tri) in by_material {
+                draws.push(CharacterDraw {
+                    mesh: key,
+                    material,
+                    shade,
+                    start: verts.len() as u32,
+                    count: tri.len() as u32,
+                });
+                verts.extend(tri);
+            }
+        }
+        if verts.is_empty() {
+            return Vec::new();
+        }
+        let bytes = std::mem::size_of_val(verts.as_slice()) as u64;
+        if self
+            .characters
+            .vertices
+            .as_ref()
+            .is_none_or(|(_, cap)| *cap < bytes)
+        {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("characters"),
+                size: bytes.next_power_of_two(),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.characters.vertices = Some((buffer, bytes.next_power_of_two()));
+        }
+        if let Some((buffer, _)) = &self.characters.vertices {
+            self.queue
+                .write_buffer(buffer, 0, bytemuck::cast_slice(&verts));
+        }
+        draws
+    }
 }
 
 /// Static room meshes grouped into batches (fan-triangulated, world-space positions).
@@ -871,7 +1073,7 @@ mod tests {
         let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
         let mut fb = vec![0u32; w * h];
         let mut zb = vec![f32::INFINITY; w * h];
-        gpu.render(&scene, view, true, &mut fb, &mut zb);
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
         let covered = |z: &[f32], i: usize| z[i].is_finite();
         let sw_cov = (0..w * h).filter(|&i| covered(&sw_zb, i)).count();
         let agree = (0..w * h)
@@ -887,11 +1089,87 @@ mod tests {
 
         scene.dynamic_meshes[0].hidden = true;
         let mut zb = vec![f32::INFINITY; w * h];
-        gpu.render(&scene, view, true, &mut fb, &mut zb);
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
         assert!(
             zb.iter().all(|z| z.is_infinite()),
             "a hidden mesh draws nothing"
         );
+    }
+
+    fn quad_rig() -> crate::kf2::CharacterRig {
+        use crate::kf2::{KfsFace, KfsMesh};
+        let face = |indices| KfsFace {
+            indices,
+            uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
+            mat_index: 0,
+        };
+        crate::kf2::CharacterRig {
+            mesh: KfsMesh {
+                name: "test".into(),
+                // A 1 x 1.8 m board facing -z, feet at y = 0.
+                vertices: vec![
+                    [-0.5, 0.0, 0.0],
+                    [0.5, 0.0, 0.0],
+                    [0.5, 1.8, 0.0],
+                    [-0.5, 1.8, 0.0],
+                ],
+                faces: vec![face([0, 1, 2]), face([0, 2, 3])],
+                material_textures: vec![None],
+            },
+            skin: None,
+            idle: None,
+            walk: None,
+            bind: None,
+        }
+    }
+
+    #[test]
+    fn gpu_character_matches_the_software_character() {
+        let scene = crate::render3d::test_empty_scene();
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: gpu_character_matches_the_software_character skipped");
+            return;
+        };
+        let rig = quad_rig();
+        let view = crate::render3d::test_view([0.0, 1.0, -3.0], [0.0, 0.0, 1.0]);
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        for hit_flash in [false, true] {
+            let (sw_fb, sw_zb) =
+                crate::render3d::test_software_character(&rig, [0.0; 3], hit_flash, view);
+            let character = GpuCharacter {
+                mesh: &rig.mesh,
+                verts: crate::render3d::character_world_verts(
+                    &rig, [0.0; 3], 0.0, 0.0, false, false,
+                ),
+                shade: crate::render3d::character_shade(hit_flash),
+            };
+            let mut fb = vec![0u32; w * h];
+            let mut zb = vec![f32::INFINITY; w * h];
+            gpu.render(&scene, view, true, &[character], &mut fb, &mut zb);
+            let covered = |z: &[f32], i: usize| z[i].is_finite();
+            let sw_cov = (0..w * h).filter(|&i| covered(&sw_zb, i)).count();
+            let agree = (0..w * h)
+                .filter(|&i| covered(&sw_zb, i) == covered(&zb, i))
+                .count();
+            assert!(sw_cov > 1000, "the board must cover pixels");
+            assert!(
+                agree as f32 / (w * h) as f32 > 0.99,
+                "coverage agreement {agree}"
+            );
+            let center = (h / 2) * w + w / 2;
+            let channel_gap = (0..3)
+                .map(|k| {
+                    ((fb[center] >> (8 * k)) & 0xff).abs_diff((sw_fb[center] >> (8 * k)) & 0xff)
+                })
+                .max()
+                .unwrap_or(0);
+            assert!(
+                channel_gap <= 1,
+                "shade {hit_flash}: {:06x} vs {:06x}",
+                fb[center],
+                sw_fb[center]
+            );
+        }
     }
 
     #[test]
@@ -907,7 +1185,7 @@ mod tests {
         let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
         let mut fb = vec![0u32; w * h];
         let mut zb = vec![f32::INFINITY; w * h];
-        gpu.render(&scene, view, true, &mut fb, &mut zb);
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
         let covered = |z: &[f32], i: usize| z[i].is_finite();
         let sw_cov = (0..w * h).filter(|&i| covered(&sw_zb, i)).count();
         let agree = (0..w * h)
