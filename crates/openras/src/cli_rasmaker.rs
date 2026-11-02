@@ -45,11 +45,20 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 /// True when argv looks like RASMaker-style flags rather than clap subcommands.
+///
+/// Only primary mode flags (`-x/-v/-a/-m`) and RASMaker help trigger this path.
+/// `-c`/`-p` alone must not — otherwise `openras pack -c …` is stolen from clap.
 pub fn looks_like_rasmaker(args: &[String]) -> bool {
+    if args
+        .first()
+        .is_some_and(|a| !a.starts_with('-') && a != "help")
+    {
+        return false;
+    }
     args.iter().any(|a| {
         matches!(
             a.as_str(),
-            "-x" | "-v" | "-a" | "-m" | "-c" | "-p" | "-h" | "-?" | "/?" | "--rasmaker-help"
+            "-x" | "-v" | "-a" | "-m" | "-h" | "-?" | "/?" | "--rasmaker-help"
         )
     })
 }
@@ -240,6 +249,12 @@ mod tests {
     #[test]
     fn looks_like_detects_flags() {
         assert!(looks_like_rasmaker(&args(&["-v", "a.ras"])));
+        assert!(looks_like_rasmaker(&args(&[
+            "-a", "-c", "-p", "src", "out.ras"
+        ])));
         assert!(!looks_like_rasmaker(&args(&["list", "a.ras"])));
+        assert!(!looks_like_rasmaker(&args(&[
+            "pack", "-c", "-p", "src", "out.ras"
+        ])));
     }
 }

@@ -9,11 +9,17 @@ edition = "2021"
 name = "studio_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 openras = { path = "../../crates/openras" }
+openpfx = { path = "../../crates/openpfx" }
+maxfx-engine = { path = "../../crates/maxfx-engine" }
 maxfx-patcher = { path = "../../crates/maxfx-patcher" }
 maxfx-play = { path = "../../crates/maxfx-play" }
 tauri = { version = "2", features = [] }

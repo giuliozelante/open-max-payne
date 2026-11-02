@@ -268,6 +268,58 @@ pub fn parse_rps(data: &[u8]) -> Result<RpsHeader, PfxError> {
     })
 }
 
+/// Game load gates from `PS_ParticleSystem` REA (`FUN_00422050`):
+/// first ints must be type `0x60` and version `5`, then full MemoryFile walk
+/// with no unknown tags (else Invalid File Structure / Version).
+pub fn validate_rps_game_gates(data: &[u8]) -> Result<(), PfxError> {
+    let h = parse_rps(data)?;
+    let ty = match h.values.first() {
+        Some(RpsValue::U8 { value, .. }) => *value as i32,
+        Some(RpsValue::Int { value }) => *value,
+        _ => {
+            return Err(PfxError::Msg(
+                "PS_ParticleSystem: Invalid File Structure (missing type int)".into(),
+            ));
+        }
+    };
+    if ty != 0x60 {
+        return Err(PfxError::Msg(format!(
+            "PS_ParticleSystem: Invalid File Structure in <rps>\nCurrent: {ty:08x}  Expected: 00000060"
+        )));
+    }
+    let ver = match h.values.get(1) {
+        Some(RpsValue::U8 { value, .. }) => *value as i32,
+        Some(RpsValue::Int { value }) => *value,
+        _ => {
+            return Err(PfxError::Msg(
+                "PS_ParticleSystem: Invalid File Version (missing version int)".into(),
+            ));
+        }
+    };
+    if ver != 5 {
+        return Err(PfxError::Msg(format!(
+            "PS_ParticleSystem: Invalid File Version in <rps>\nCurrent: {ver:08x}  Expected: 00000005"
+        )));
+    }
+    if let Some(RpsValue::Unknown { tag, at }) = h
+        .values
+        .iter()
+        .find(|v| matches!(v, RpsValue::Unknown { .. }))
+    {
+        return Err(PfxError::Msg(format!(
+            "PS_ParticleSystem: Invalid File Structure in <rps> (unknown tag 0x{tag:02x} at {at})"
+        )));
+    }
+    if h.bytes_consumed != data.len() {
+        return Err(PfxError::Msg(format!(
+            "PS_ParticleSystem: Invalid File Structure in <rps> (walker {}/{} bytes)",
+            h.bytes_consumed,
+            data.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Parse then re-encode; errors if the walker hit an unknown tag before EOF.
 pub fn roundtrip_rps(data: &[u8]) -> Result<Vec<u8>, PfxError> {
     let h = parse_rps(data)?;

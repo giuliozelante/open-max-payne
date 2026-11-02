@@ -1,0 +1,3512 @@
+//! Full Max Payne 1 `.ldb` level scene decoder (`X_LevelDBImportLevel` version `0x20`).
+//!
+//! Decodes textures (JPEG, uncompressed TGA, ZSoft PCX), `256×256` RGB lightmaps,
+//! materials, portal exits, static room meshes, dynamic meshes (doors/triggers/movers),
+//! jumppoints, FSMs, characters, triggers, items, point lights, and the room table
+//! with cycle-consistent BFS world origins.
+
+#![allow(clippy::type_complexity)]
+
+use std::collections::{BTreeMap, VecDeque};
+
+#[derive(Debug, Clone)]
+pub struct DecodedTexture {
+    pub path: String,
+    pub flag: u8,
+    pub width: u32,
+    pub height: u32,
+    /// Packed `0x00RRGGBB` pixels (`width * height`).
+    pub pixels: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecodedLightmap {
+    pub width: u32,
+    pub height: u32,
+    /// Packed `0x00RRGGBB` pixels (`256 * 256`).
+    pub pixels: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneMaterial {
+    pub id: i32,
+    pub category: String,
+    pub texture_path: String,
+    pub texture_index: Option<usize>,
+    /// `Some(AlphaReference)` when the texture carries an alpha mask (`P_Map(colour, alpha)`,
+    /// `0x5dc3d8`); its alpha is in the top byte. `None` is opaque.
+    pub alpha_reference: Option<u8>,
+}
+
+/// Draw and character-collision rules from `data/database/materials.txt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterialPolicy {
+    pub draw: bool,
+    pub character_collides: bool,
+    pub writes_z: bool,
+    /// `DetailOffset` in `materials.txt`. Larger values sit closer to the camera.
+    pub detail_offset: i32,
+    pub skybox: bool,
+}
+
+/// Category behavior. Unknown names stay solid and visible.
+pub fn material_policy(category: &str) -> MaterialPolicy {
+    let mut policy = MaterialPolicy {
+        draw: true,
+        character_collides: true,
+        writes_z: true,
+        detail_offset: 0,
+        skybox: false,
+    };
+    match category.to_ascii_lowercase().as_str() {
+        "ai_node_collision_nodraw" => {
+            policy.draw = false;
+            policy.character_collides = false;
+        }
+        "cameracollision" => policy.draw = false,
+        "character" => {
+            policy.draw = false;
+            policy.character_collides = false;
+        }
+        "charactercollision_nodraw" => policy.draw = false,
+        "dummy" => {
+            policy.draw = false;
+            policy.character_collides = false;
+        }
+        "graffiti" => {
+            policy.character_collides = false;
+            policy.writes_z = false;
+            policy.detail_offset = 1;
+        }
+        "leaves" | "water" | "nocollision" => policy.character_collides = false,
+        "skybox" => {
+            policy.draw = false;
+            policy.skybox = true;
+        }
+        _ => {}
+    }
+    policy
+}
+
+/// Alpha fields from one `[Category]` in `materials.txt`.
+///
+/// `ID_ALPHAREFERENCE` is 15. `Leaves` is the category that overrides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterialSurface {
+    pub alpha_reference: i32,
+    pub blended_alpha_test: bool,
+}
+
+pub fn parse_material_surfaces(text: &str) -> BTreeMap<String, MaterialSurface> {
+    let mut defines = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.split("//").next().unwrap_or("").trim();
+        let Some(rest) = line.strip_prefix("#define") else {
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        if let (Some(name), Some(val)) = (parts.next(), parts.next()) {
+            if let Ok(n) = val.parse::<i32>() {
+                defines.insert(name.to_string(), n);
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    let mut name: Option<String> = None;
+    let mut alpha = 0i32;
+    let mut blended = true;
+    let mut saw = false;
+    for line in text.lines() {
+        let line = line.split("//").next().unwrap_or("").trim();
+        if let Some(inner) = line.strip_prefix('[') {
+            if let Some(end) = inner.find(']') {
+                if let Some(prev) = name.take() {
+                    if saw {
+                        out.insert(
+                            prev,
+                            MaterialSurface {
+                                alpha_reference: alpha,
+                                blended_alpha_test: blended,
+                            },
+                        );
+                    }
+                }
+                name = Some(inner[..end].trim().to_string());
+                alpha = 0;
+                blended = true;
+                saw = false;
+            }
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim().trim_end_matches(';').trim();
+        if key.eq_ignore_ascii_case("AlphaReference") {
+            alpha = value
+                .parse::<i32>()
+                .ok()
+                .or_else(|| defines.get(value).copied())
+                .unwrap_or(0);
+            saw = true;
+        } else if key.eq_ignore_ascii_case("BlendedAlphaTest") {
+            blended = value.eq_ignore_ascii_case("TRUE");
+            saw = true;
+        }
+    }
+    if let Some(prev) = name {
+        if saw {
+            out.insert(
+                prev,
+                MaterialSurface {
+                    alpha_reference: alpha,
+                    blended_alpha_test: blended,
+                },
+            );
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SceneVertex {
+    pub pos: [f32; 3],
+    pub uv: [f32; 2],
+    pub luv: [f32; 2],
+}
+
+#[derive(Debug, Clone)]
+pub struct ScenePoly {
+    pub vertices: Vec<SceneVertex>,
+    pub normal: [f32; 3],
+    pub material_id: i32,
+    pub lightmap_id: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneStaticMesh {
+    pub mesh_id: i32,
+    pub room_id: Option<i32>,
+    pub world_origin: [f32; 3],
+    pub polys: Vec<ScenePoly>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneDynamicAnim {
+    pub name: String,
+    pub duration: f32,
+    pub start_mat: [f32; 9],
+    pub start_pos: [f32; 3],
+    pub end_mat: [f32; 9],
+    pub end_pos: [f32; 3],
+    pub scripts: Vec<String>,
+    /// Two sample channels. Each sample is a tagged `f32` (`0x09`). One channel
+    /// runs along the start→end distance; the other is a 0..1 clock.
+    pub curves: [Vec<f32>; 2],
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneDynamicMesh {
+    pub name: String,
+    pub room_id: i32,
+    pub world_mat: [f32; 9],
+    pub world_pos: [f32; 3],
+    pub local_start_mat: [f32; 9],
+    pub local_start_pos: [f32; 3],
+    pub toggled: bool,
+    /// Set by `DO_Hide`. Parsed meshes start visible.
+    pub hidden: bool,
+    /// Set by `DO_SetHitpoints`. `None` means the mesh is not damaged by shots.
+    pub hitpoints: Option<i32>,
+    pub polys: Vec<ScenePoly>,
+    pub anims: Vec<SceneDynamicAnim>,
+    /// Track started by `DO_Animate`. Held at the end pose after it finishes.
+    pub active_track: Option<String>,
+    pub track_time: f32,
+    pub track_duration: f32,
+}
+
+impl SceneDynamicMesh {
+    /// The track whose name is `open`, or the first `open*` track.
+    pub fn opening_anim(&self) -> Option<&SceneDynamicAnim> {
+        self.anims
+            .iter()
+            .find(|anim| anim.name.eq_ignore_ascii_case("open"))
+            .or_else(|| {
+                self.anims
+                    .iter()
+                    .find(|anim| anim.name.to_ascii_lowercase().starts_with("open"))
+            })
+    }
+
+    /// Start `track_name`. Unknown names do nothing.
+    pub fn play_track(&mut self, track_name: &str) -> bool {
+        let Some(track) = self
+            .anims
+            .iter()
+            .find(|anim| anim.name.eq_ignore_ascii_case(track_name))
+        else {
+            return false;
+        };
+        self.track_duration = track.duration;
+        self.track_time = 0.0;
+        self.active_track = Some(track.name.clone());
+        true
+    }
+
+    /// Advance the active track. Returns its scripts once, on the frame it ends.
+    pub fn step_animation(&mut self, dt: f32) -> Option<Vec<String>> {
+        let name = self.active_track.as_ref()?.clone();
+        if self.track_duration <= 0.0 || self.track_time >= self.track_duration {
+            return None;
+        }
+        self.track_time = (self.track_time + dt).min(self.track_duration);
+        if self.track_time < self.track_duration {
+            return None;
+        }
+        self.anims
+            .iter()
+            .find(|anim| anim.name.eq_ignore_ascii_case(&name))
+            .map(|anim| anim.scripts.clone())
+    }
+
+    /// World pose ignoring the parent's motion: the track-local pose `L`
+    /// carried into the rest frame, `L · L0⁻¹ · W0` (`0x6e1a00`). At rest this is `W0`.
+    pub fn posed_local(&self) -> ([f32; 9], [f32; 3]) {
+        let rest = (self.local_start_mat, self.local_start_pos);
+        let world = (self.world_mat, self.world_pos);
+        compose_pose(compose_pose(self.track_local(), invert_pose(rest)), world)
+    }
+
+    /// `L`: the active `DO_Animate` track, the toggled opening pose, or the rest pose.
+    fn track_local(&self) -> ([f32; 9], [f32; 3]) {
+        if let Some(name) = &self.active_track {
+            if let Some(anim) = self
+                .anims
+                .iter()
+                .find(|anim| anim.name.eq_ignore_ascii_case(name))
+            {
+                return pose_on_track(self.track_time, anim);
+            }
+        }
+        match self.opening_anim() {
+            Some(anim) if self.toggled => (anim.end_mat, anim.end_pos),
+            _ => (self.local_start_mat, self.local_start_pos),
+        }
+    }
+}
+
+fn pose_on_track(track_time: f32, anim: &SceneDynamicAnim) -> ([f32; 9], [f32; 3]) {
+    let time = track_time.min(anim.duration.max(0.0));
+    let (w, t) = track_weights(
+        &anim.curves,
+        anim.start_pos,
+        anim.end_pos,
+        anim.duration,
+        time,
+    );
+    let pos = [
+        anim.start_pos[0] + (anim.end_pos[0] - anim.start_pos[0]) * w,
+        anim.start_pos[1] + (anim.end_pos[1] - anim.start_pos[1]) * w,
+        anim.start_pos[2] + (anim.end_pos[2] - anim.start_pos[2]) * w,
+    ];
+    let mat = if time <= 0.0 {
+        anim.start_mat
+    } else if time >= anim.duration {
+        anim.end_mat
+    } else {
+        crate::kf2::quat_to_mat(crate::kf2::quat_slerp(
+            crate::kf2::mat_to_quat(anim.start_mat),
+            crate::kf2::mat_to_quat(anim.end_mat),
+            t,
+        ))
+    };
+    (mat, pos)
+}
+
+/// Apply `first`, then `then` (retail row-vector `first · then`).
+fn compose_pose(first: ([f32; 9], [f32; 3]), then: ([f32; 9], [f32; 3])) -> ([f32; 9], [f32; 3]) {
+    let mut mat = [0.0f32; 9];
+    for c in 0..3 {
+        let col = xform_point(
+            then.0,
+            [0.0; 3],
+            [first.0[c * 3], first.0[c * 3 + 1], first.0[c * 3 + 2]],
+        );
+        mat[c * 3..c * 3 + 3].copy_from_slice(&col);
+    }
+    (mat, xform_point(then.0, then.1, first.1))
+}
+
+fn invert_pose((m, p): ([f32; 9], [f32; 3])) -> ([f32; 9], [f32; 3]) {
+    let det = m[0] * (m[4] * m[8] - m[7] * m[5]) - m[3] * (m[1] * m[8] - m[7] * m[2])
+        + m[6] * (m[1] * m[5] - m[4] * m[2]);
+    if det.abs() < 1.0e-12 {
+        return (
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [-p[0], -p[1], -p[2]],
+        );
+    }
+    let inv = [
+        (m[4] * m[8] - m[7] * m[5]) / det,
+        (m[7] * m[2] - m[1] * m[8]) / det,
+        (m[1] * m[5] - m[4] * m[2]) / det,
+        (m[6] * m[5] - m[3] * m[8]) / det,
+        (m[0] * m[8] - m[6] * m[2]) / det,
+        (m[3] * m[2] - m[0] * m[5]) / det,
+        (m[3] * m[7] - m[6] * m[4]) / det,
+        (m[6] * m[1] - m[0] * m[7]) / det,
+        (m[0] * m[4] - m[3] * m[1]) / det,
+    ];
+    let t = xform_point(inv, [0.0; 3], p);
+    (inv, [-t[0], -t[1], -t[2]])
+}
+
+/// Retail sampler `0x5ff100`: translation lerp weight is the distance curve
+/// (`+0xbc`) times `1/|end - start|` (`+0x88`); slerp `t` is the second curve
+/// (`+0xd8`) raw. Neither is clamped. An empty curve falls back to linear
+/// time (HYPOTHESIS: retail leaves the output unwritten).
+fn track_weights(
+    curves: &[Vec<f32>; 2],
+    start: [f32; 3],
+    end: [f32; 3],
+    duration: f32,
+    time: f32,
+) -> (f32, f32) {
+    if time <= 0.0 {
+        return (0.0, 0.0);
+    }
+    if time >= duration {
+        return (1.0, 1.0);
+    }
+    let u = time / duration;
+    let dist = dist3(end, start);
+    let w = match sample_curve(&curves[0], u) {
+        Some(d) if dist > 0.0 => d / dist,
+        Some(_) => 0.0,
+        None => u,
+    };
+    (w, sample_curve(&curves[1], u).unwrap_or(u))
+}
+
+/// Uniform piecewise-linear curve sample at `u` in `0..1` (`0x783450`).
+fn sample_curve(curve: &[f32], u: f32) -> Option<f32> {
+    match curve.len() {
+        0 => None,
+        1 => Some(curve[0]),
+        n => {
+            let f = u * (n - 1) as f32;
+            let k = (f.floor() as usize).min(n - 2);
+            let frac = f - k as f32;
+            Some(curve[k] * (1.0 - frac) + curve[k + 1] * frac)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScenePortalExit {
+    pub name: String,
+    pub corners: Vec<[f32; 3]>,
+    pub normal: [f32; 3],
+    pub relative_offset: [f32; 3],
+    pub target_room_id: i32,
+    pub target_exit_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneJumppoint {
+    pub name: String,
+    pub room_id: i32,
+    pub pos: [f32; 3],
+    pub jp_type: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneFsm {
+    pub name: String,
+    pub room_id: i32,
+    pub pos: [f32; 3],
+    pub states: Vec<String>,
+    pub default_state: String,
+    pub startup_actions: Vec<String>,
+    /// `(hook name, calls with no state, per-state calls in file order)`.
+    pub hooks: Vec<(String, Vec<String>, Vec<(String, Vec<String>)>)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneCharacter {
+    pub name: String,
+    pub skin: String,
+    pub room_id: i32,
+    pub pos: [f32; 3],
+    pub startup_scripts: Vec<String>,
+}
+
+impl SceneCharacter {
+    /// Startup `C_Kill` (Michelle is already dead when the house prologue begins).
+    pub fn starts_dead(&self) -> bool {
+        self.startup_scripts
+            .iter()
+            .any(|s| s.to_ascii_lowercase().contains("c_kill"))
+    }
+
+    /// Chase only when a startup script enters combat. Placed actors stay on their mark.
+    pub fn pursues(&self) -> bool {
+        self.startup_scripts.iter().any(|s| {
+            let s = s.to_ascii_lowercase();
+            s.contains("mobstercombat") || s.contains("c_goto(")
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneTrigger {
+    pub name: String,
+    pub room_id: i32,
+    pub pos: [f32; 3],
+    pub radius: f32,
+    pub trigger_type: i32,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneItem {
+    pub name: String,
+    pub item_type: String,
+    pub room_id: i32,
+    pub pos: [f32; 3],
+}
+
+#[derive(Debug, Clone)]
+pub struct ScenePointLight {
+    pub id: i32,
+    pub room_id: i32,
+    pub pos: [f32; 3],
+    pub color: [f32; 4],
+    pub radius: f32,
+    pub intensity: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneRoom {
+    pub id: i32,
+    pub name: String,
+    pub static_meshes: Vec<i32>,
+    pub exits: Vec<String>,
+    pub dynamic_meshes: Vec<String>,
+    pub world_origin: [f32; 3],
+}
+
+#[derive(Debug, Clone)]
+pub struct LdbScene {
+    pub textures: Vec<DecodedTexture>,
+    pub materials: BTreeMap<i32, SceneMaterial>,
+    pub lightmaps: Vec<DecodedLightmap>,
+    pub exits: Vec<ScenePortalExit>,
+    pub static_meshes: Vec<SceneStaticMesh>,
+    pub jumppoints: Vec<SceneJumppoint>,
+    pub fsms: Vec<SceneFsm>,
+    pub characters: Vec<SceneCharacter>,
+    pub triggers: Vec<SceneTrigger>,
+    pub dynamic_meshes: Vec<SceneDynamicMesh>,
+    pub items: Vec<SceneItem>,
+    pub point_lights: Vec<ScenePointLight>,
+    pub rooms: Vec<SceneRoom>,
+    pub bytes_consumed: usize,
+    /// Category name → SharedDB text (`dynamic.txt` and the same block shape).
+    pub sound_catalogs: BTreeMap<String, String>,
+    /// Sounds a verb asked to play. Dispatch only enqueues them.
+    pub sound_queue: Vec<QueuedSound>,
+}
+
+/// One `A_Play3DSound` accepted by a mesh or trigger that this scene actually stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedSound {
+    pub category: String,
+    pub cue: String,
+    pub filename: Option<String>,
+}
+
+/// One `Receiver->Verb(args);` call stored on an anim, FSM, or trigger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message<'a> {
+    pub receiver: &'a str,
+    pub verb: &'a str,
+    pub args: Vec<&'a str>,
+}
+
+impl<'a> Message<'a> {
+    pub fn parse(raw: &'a str) -> Option<Self> {
+        let trimmed = raw.trim().trim_end_matches(';').trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let (receiver, call_part) = if let Some((receiver, call)) = trimmed.split_once("->") {
+            (receiver.trim(), call.trim())
+        } else if let Some((receiver, call)) = trimmed.split_once(' ') {
+            (receiver.trim(), call.trim())
+        } else {
+            ("this", trimmed)
+        };
+        if receiver.is_empty() || call_part.is_empty() {
+            return None;
+        }
+        let (verb, args) = if let Some((verb, args)) = call_part.split_once('(') {
+            let body = args.trim_end_matches(')').trim();
+            let parsed = if body.is_empty() {
+                Vec::new()
+            } else {
+                body.split(',')
+                    .map(|part| part.trim().trim_matches('"'))
+                    .filter(|part| !part.is_empty())
+                    .collect()
+            };
+            (verb.trim(), parsed)
+        } else {
+            (call_part.trim(), Vec::new())
+        };
+        if verb.is_empty() {
+            None
+        } else {
+            Some(Self {
+                receiver,
+                verb,
+                args,
+            })
+        }
+    }
+}
+
+impl LdbScene {
+    /// Masked materials take their category's `AlphaReference` from `materials.txt`.
+    pub fn apply_material_surfaces(&mut self, surfaces: &BTreeMap<String, MaterialSurface>) {
+        for material in self.materials.values_mut() {
+            if material.alpha_reference.is_none() {
+                continue;
+            }
+            if let Some((_, surface)) = surfaces
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&material.category))
+            {
+                material.alpha_reference = Some(surface.alpha_reference.clamp(0, 255) as u8);
+            }
+        }
+    }
+
+    /// World pose of dynamic mesh `index`, following its parent's motion:
+    /// `posed_local · W0(parent)⁻¹ · world(parent)` (`0x6e1a00`, parent `[+0x189]`).
+    /// Room origin is not added.
+    pub fn dynamic_world_pose(&self, index: usize) -> ([f32; 9], [f32; 3]) {
+        let mesh = &self.dynamic_meshes[index];
+        let own = mesh.posed_local();
+        let Some(pi) = parent_name(&mesh.name)
+            .and_then(|p| self.dynamic_meshes.iter().position(|m| m.name == p))
+        else {
+            return own;
+        };
+        let parent = &self.dynamic_meshes[pi];
+        let rest = invert_pose((parent.world_mat, parent.world_pos));
+        compose_pose(compose_pose(own, rest), self.dynamic_world_pose(pi))
+    }
+
+    /// Match the receiver as stored, then the same path with `.DO` appended.
+    pub fn resolve_mesh_mut<'a>(
+        &'a mut self,
+        context_name: &str,
+        receiver: &str,
+    ) -> Option<&'a mut SceneDynamicMesh> {
+        if let Some(index) = self
+            .dynamic_meshes
+            .iter()
+            .position(|mesh| mesh.name.eq_ignore_ascii_case(receiver))
+        {
+            return Some(&mut self.dynamic_meshes[index]);
+        }
+        let target = mesh_target_name(context_name, receiver)?;
+        if target.eq_ignore_ascii_case(receiver) {
+            return None;
+        }
+        self.dynamic_meshes
+            .iter_mut()
+            .find(|mesh| mesh.name.eq_ignore_ascii_case(&target))
+    }
+
+    /// Run one stored message. Unknown verbs do nothing.
+    pub fn dispatch_message(&mut self, context_name: &str, raw_msg: &str) -> bool {
+        let Some(msg) = Message::parse(raw_msg) else {
+            return false;
+        };
+        match msg.verb.to_ascii_lowercase().as_str() {
+            "do_animate" => {
+                let Some(track_name) = msg.args.first().copied() else {
+                    return false;
+                };
+                self.resolve_mesh_mut(context_name, msg.receiver)
+                    .is_some_and(|mesh| mesh.play_track(track_name))
+            }
+            "t_enable" => {
+                let enabled = match msg.args.first().copied().unwrap_or("") {
+                    "false" | "0" => false,
+                    "true" | "1" => true,
+                    _ => return false,
+                };
+                self.resolve_trigger_mut(context_name, msg.receiver)
+                    .is_some_and(|trigger| {
+                        trigger.enabled = enabled;
+                        true
+                    })
+            }
+            "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
+            "do_hide" => {
+                let hidden = match msg.args.first().copied().unwrap_or("") {
+                    "true" | "1" => true,
+                    "false" | "0" => false,
+                    _ => return false,
+                };
+                self.resolve_mesh_mut(context_name, msg.receiver)
+                    .is_some_and(|mesh| {
+                        mesh.hidden = hidden;
+                        true
+                    })
+            }
+            "do_sethitpoints" => {
+                let Some(points) = msg.args.first().and_then(|arg| arg.parse::<i32>().ok()) else {
+                    return false;
+                };
+                self.resolve_mesh_mut(context_name, msg.receiver)
+                    .is_some_and(|mesh| {
+                        mesh.hitpoints = Some(points);
+                        true
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// Match the receiver as stored, then the same path with `.TRIGGER` appended.
+    pub fn resolve_trigger_mut<'a>(
+        &'a mut self,
+        context_name: &str,
+        receiver: &str,
+    ) -> Option<&'a mut SceneTrigger> {
+        if let Some(index) = self
+            .triggers
+            .iter()
+            .position(|trigger| trigger.name.eq_ignore_ascii_case(receiver))
+        {
+            return Some(&mut self.triggers[index]);
+        }
+        let target = trigger_target_name(context_name, receiver)?;
+        if target.eq_ignore_ascii_case(receiver) {
+            return None;
+        }
+        self.triggers
+            .iter_mut()
+            .find(|trigger| trigger.name.eq_ignore_ascii_case(&target))
+    }
+
+    fn queue_3d_sound(&mut self, context_name: &str, receiver: &str, args: &[&str]) -> bool {
+        let category = args.first().copied().unwrap_or("");
+        let cue = args.get(1).copied().unwrap_or("");
+        if category.is_empty() || cue.is_empty() {
+            return false;
+        }
+        let resolved = self.resolve_trigger_mut(context_name, receiver).is_some()
+            || self.resolve_mesh_mut(context_name, receiver).is_some();
+        if !resolved {
+            return false;
+        }
+        let catalog_loaded = self
+            .sound_catalogs
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case(category));
+        let filename = self
+            .sound_catalogs
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(category))
+            .and_then(|(_, text)| crate::story_sound_filename(text, cue));
+        if catalog_loaded && filename.is_none() {
+            return false;
+        }
+        self.sound_queue.push(QueuedSound {
+            category: category.to_string(),
+            cue: cue.to_string(),
+            filename,
+        });
+        true
+    }
+
+    /// Run startup `DO_SetHitpoints` calls. Other startup verbs stay untouched.
+    pub fn apply_startup_hitpoints(&mut self) {
+        let scripts: Vec<(String, String)> = self
+            .fsms
+            .iter()
+            .flat_map(|fsm| {
+                fsm.startup_actions.iter().filter_map(|act| {
+                    let verb = Message::parse(act)?.verb.to_ascii_lowercase();
+                    (verb == "do_sethitpoints").then(|| (fsm.name.clone(), act.clone()))
+                })
+            })
+            .collect();
+        for (name, act) in scripts {
+            self.dispatch_message(&name, &act);
+        }
+    }
+
+    /// Startup `DO_Hide` only. Other startup verbs stay untouched.
+    pub fn apply_startup_hides(&mut self) {
+        let scripts: Vec<(String, String)> = self
+            .fsms
+            .iter()
+            .flat_map(|fsm| {
+                fsm.startup_actions.iter().filter_map(|act| {
+                    let verb = Message::parse(act)?.verb.to_ascii_lowercase();
+                    (verb == "do_hide").then(|| (fsm.name.clone(), act.clone()))
+                })
+            })
+            .collect();
+        for (name, act) in scripts {
+            self.dispatch_message(&name, &act);
+        }
+    }
+
+    /// Startup `T_Enable` only. Other startup verbs stay untouched.
+    pub fn apply_startup_enables(&mut self) {
+        let scripts: Vec<(String, String)> = self
+            .fsms
+            .iter()
+            .flat_map(|fsm| {
+                fsm.startup_actions.iter().filter_map(|act| {
+                    let verb = Message::parse(act)?.verb.to_ascii_lowercase();
+                    (verb == "t_enable").then(|| (fsm.name.clone(), act.clone()))
+                })
+            })
+            .collect();
+        for (name, act) in scripts {
+            self.dispatch_message(&name, &act);
+        }
+    }
+
+    /// Subtract `amount` from a mesh that has hit points. At zero, run its `DO_OnDeath` hook.
+    pub fn damage_mesh(&mut self, index: usize, amount: i32) -> bool {
+        let Some(mesh) = self.dynamic_meshes.get_mut(index) else {
+            return false;
+        };
+        let Some(points) = mesh.hitpoints else {
+            return false;
+        };
+        if points <= 0 {
+            return false;
+        }
+        let next = points.saturating_sub(amount.max(0));
+        mesh.hitpoints = Some(next);
+        if next > 0 {
+            return false;
+        }
+        let fsm_name = strip_mesh_suffix(&mesh.name).to_string();
+        self.dispatch_hook(&fsm_name, "DO_OnDeath")
+    }
+
+    fn dispatch_hook(&mut self, fsm_name: &str, hook_name: &str) -> bool {
+        let scripts = self
+            .fsms
+            .iter()
+            .find(|fsm| fsm.name.eq_ignore_ascii_case(fsm_name))
+            .and_then(|fsm| {
+                fsm.hooks
+                    .iter()
+                    .find(|(name, _, _)| name.eq_ignore_ascii_case(hook_name))
+                    .map(|(_, acts, _)| acts.clone())
+            });
+        let Some(scripts) = scripts else {
+            return false;
+        };
+        let mut ran = false;
+        for act in &scripts {
+            ran |= self.dispatch_message(fsm_name, act);
+        }
+        ran
+    }
+
+    /// `E` near an enabled trigger runs that FSM's unconditional `T_Activate` calls.
+    pub fn activate_nearest_trigger(
+        &mut self,
+        room_origins: &BTreeMap<i32, [f32; 3]>,
+        pos: [f32; 3],
+        max_d2: f32,
+    ) -> bool {
+        let mut best: Option<(usize, f32)> = None;
+        for (idx, trigger) in self.triggers.iter().enumerate() {
+            if !trigger.enabled {
+                continue;
+            }
+            let ro = room_origins
+                .get(&trigger.room_id)
+                .copied()
+                .unwrap_or([0.0; 3]);
+            let wx = ro[0] + trigger.pos[0];
+            let wy = ro[1] + trigger.pos[1];
+            let wz = ro[2] + trigger.pos[2];
+            let d2 = (wx - pos[0]).powi(2) + (wy - pos[1]).powi(2) + (wz - pos[2]).powi(2);
+            if d2 < max_d2 && best.is_none_or(|(_, best_d2)| d2 < best_d2) {
+                best = Some((idx, d2));
+            }
+        }
+        let Some((idx, _)) = best else {
+            return false;
+        };
+        let fsm_name = strip_trigger_suffix(&self.triggers[idx].name).to_string();
+        self.dispatch_hook(&fsm_name, "T_Activate")
+    }
+
+    pub fn step_dynamic_anims(&mut self, dt: f32) {
+        let mut pending = Vec::new();
+        for mesh in &mut self.dynamic_meshes {
+            if let Some(scripts) = mesh.step_animation(dt) {
+                pending.push((mesh.name.clone(), scripts));
+            }
+        }
+        for (name, scripts) in pending {
+            for script in &scripts {
+                self.dispatch_message(&name, script);
+            }
+        }
+    }
+}
+
+fn mesh_target_name(context_name: &str, receiver: &str) -> Option<String> {
+    let target = match receiver {
+        "this" => context_name.to_string(),
+        "parent" => format!("{}.DO", parent_path(context_name)?),
+        path if path.starts_with("::") => {
+            if path.to_ascii_lowercase().ends_with(".do") {
+                path.to_string()
+            } else {
+                format!("{path}.DO")
+            }
+        }
+        rel => format!("{}::{rel}.DO", parent_path(context_name)?),
+    };
+    Some(target)
+}
+
+fn trigger_target_name(context_name: &str, receiver: &str) -> Option<String> {
+    let target = match receiver {
+        "this" => context_name.to_string(),
+        "parent" => format!("{}.TRIGGER", parent_path(context_name)?),
+        path if path.starts_with("::") => {
+            if path.to_ascii_lowercase().ends_with(".trigger") {
+                path.to_string()
+            } else {
+                format!("{path}.TRIGGER")
+            }
+        }
+        rel if rel.to_ascii_lowercase().ends_with(".trigger") => {
+            format!("{}::{rel}", parent_path(context_name)?)
+        }
+        rel => format!("{}::{rel}.TRIGGER", parent_path(context_name)?),
+    };
+    Some(target)
+}
+
+fn strip_trigger_suffix(name: &str) -> &str {
+    if name.to_ascii_lowercase().ends_with(".trigger") {
+        &name[..name.len() - ".trigger".len()]
+    } else {
+        name
+    }
+}
+
+fn strip_mesh_suffix(name: &str) -> &str {
+    if name.to_ascii_lowercase().ends_with(".do") {
+        &name[..name.len() - 3]
+    } else {
+        name
+    }
+}
+
+fn parent_path(context_name: &str) -> Option<&str> {
+    let stripped = context_name
+        .strip_suffix(".DO")
+        .or_else(|| context_name.strip_suffix(".TRIGGER"))
+        .unwrap_or(context_name);
+    stripped.rsplit_once("::").map(|(parent, _)| parent)
+}
+
+fn read_i32(data: &[u8], i: &mut usize) -> Option<i32> {
+    match *data.get(*i)? {
+        0x14 => {
+            let v = *data.get(*i + 1)? as i32;
+            *i += 2;
+            Some(v)
+        }
+        0x13 => {
+            let v = u16::from_le_bytes([*data.get(*i + 1)?, *data.get(*i + 2)?]) as i32;
+            *i += 3;
+            Some(v)
+        }
+        0x12 => {
+            let v = u32::from_le_bytes([
+                *data.get(*i + 1)?,
+                *data.get(*i + 2)?,
+                *data.get(*i + 3)?,
+                0,
+            ]) as i32;
+            *i += 4;
+            Some(v)
+        }
+        0x02 => {
+            let v = i32::from_le_bytes(data.get(*i + 1..*i + 5)?.try_into().ok()?);
+            *i += 5;
+            Some(v)
+        }
+        _ => None,
+    }
+}
+
+fn read_u8_tag(data: &[u8], i: &mut usize) -> Option<u8> {
+    if *data.get(*i)? != 0x11 {
+        return None;
+    }
+    let v = *data.get(*i + 1)?;
+    *i += 2;
+    Some(v)
+}
+
+fn read_point_count(data: &[u8], i: &mut usize) -> Option<usize> {
+    match *data.get(*i)? {
+        0x11 => Some(read_u8_tag(data, i)? as usize),
+        0x10 => {
+            let v = u16::from_le_bytes([*data.get(*i + 1)?, *data.get(*i + 2)?]) as usize;
+            *i += 3;
+            Some(v)
+        }
+        0x14 | 0x13 | 0x12 | 0x02 => Some(read_i32(data, i)? as usize),
+        _ => None,
+    }
+}
+
+fn read_f32_tag(data: &[u8], i: &mut usize) -> Option<f32> {
+    if *data.get(*i)? != 0x09 {
+        return None;
+    }
+    let v = f32::from_le_bytes(data.get(*i + 1..*i + 5)?.try_into().ok()?);
+    *i += 5;
+    Some(v)
+}
+
+/// `n` animation samples. On disk each one is 5 bytes; a `0x09` sample is a float.
+fn read_f32_samples(data: &[u8], i: &mut usize, n: usize) -> Option<Vec<f32>> {
+    let mut out = Vec::with_capacity(n.min(8192));
+    for _ in 0..n {
+        if data.get(*i) == Some(&0x09) {
+            out.push(read_f32_tag(data, i)?);
+        } else if *i + 5 <= data.len() {
+            *i += 5;
+        } else {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+fn read_vec2_tag(data: &[u8], i: &mut usize) -> Option<[f32; 2]> {
+    if *data.get(*i)? != 0x15 {
+        return None;
+    }
+    let u = f32::from_le_bytes(data.get(*i + 1..*i + 5)?.try_into().ok()?);
+    let v = f32::from_le_bytes(data.get(*i + 5..*i + 9)?.try_into().ok()?);
+    *i += 9;
+    Some([u, v])
+}
+
+fn read_vec3_tag(data: &[u8], i: &mut usize) -> Option<[f32; 3]> {
+    if *data.get(*i)? != 0x16 {
+        return None;
+    }
+    let x = f32::from_le_bytes(data.get(*i + 1..*i + 5)?.try_into().ok()?);
+    let y = f32::from_le_bytes(data.get(*i + 5..*i + 9)?.try_into().ok()?);
+    let z = f32::from_le_bytes(data.get(*i + 9..*i + 13)?.try_into().ok()?);
+    *i += 13;
+    Some([x, y, z])
+}
+
+fn read_xform(data: &[u8], i: &mut usize) -> Option<([f32; 9], [f32; 3])> {
+    if *data.get(*i)? != 0x1a || *i + 49 > data.len() {
+        return None;
+    }
+    let mut mat = [0.0f32; 9];
+    for (k, m) in mat.iter_mut().enumerate() {
+        let off = *i + 1 + k * 4;
+        *m = f32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+    }
+    let p = *i + 37;
+    let x = f32::from_le_bytes(data[p..p + 4].try_into().ok()?);
+    let y = f32::from_le_bytes(data[p + 4..p + 8].try_into().ok()?);
+    let z = f32::from_le_bytes(data[p + 8..p + 12].try_into().ok()?);
+    *i += 49;
+    Some((mat, [x, y, z]))
+}
+
+fn read_xform_pos(data: &[u8], i: &mut usize) -> Option<[f32; 3]> {
+    read_xform(data, i).map(|(_, p)| p)
+}
+
+fn read_str(data: &[u8], i: &mut usize) -> Option<String> {
+    if *data.get(*i)? != 0x0d {
+        return None;
+    }
+    *i += 1;
+    let len = read_i32(data, i)? as usize;
+    let bytes = data.get(*i..*i + len)?;
+    *i += len;
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn read_str_list(data: &[u8], i: &mut usize, tag: u8) -> Option<Vec<String>> {
+    if *data.get(*i)? != tag {
+        return None;
+    }
+    *i += 1;
+    let count = read_i32(data, i)? as usize;
+    let mut out = Vec::with_capacity(count.min(256));
+    for _ in 0..count {
+        out.push(read_str(data, i)?);
+    }
+    Some(out)
+}
+
+fn skip_color_and_bool(data: &[u8], i: &mut usize) -> Option<()> {
+    match *data.get(*i)? {
+        0x03 => *i += 5,
+        0x0f => *i += 4,
+        0x10 => *i += 3,
+        0x11 => *i += 2,
+        0x14 | 0x13 | 0x12 | 0x02 => {
+            read_i32(data, i)?;
+        }
+        _ => return None,
+    }
+    if *data.get(*i)? != 0x0e {
+        return None;
+    }
+    *i += 2;
+    Some(())
+}
+
+/// Decode JPEG, uncompressed 24/32-bit TGA, or 8-bit ZSoft PCX into `0x00RRGGBB` pixels.
+pub fn decode_texture_blob(blob: &[u8]) -> Option<(u32, u32, Vec<u32>)> {
+    if blob.len() >= 2 && blob[0] == 0xff && blob[1] == 0xd8 {
+        let mut dec = jpeg_decoder::Decoder::new(blob);
+        let rgb = dec.decode().ok()?;
+        let info = dec.info()?;
+        let w = info.width as u32;
+        let h = info.height as u32;
+        let mut pixels = Vec::with_capacity((w * h) as usize);
+        match info.pixel_format {
+            jpeg_decoder::PixelFormat::RGB24 => {
+                let mut k = 0;
+                while k + 3 <= rgb.len() {
+                    pixels.push(
+                        ((rgb[k] as u32) << 16) | ((rgb[k + 1] as u32) << 8) | (rgb[k + 2] as u32),
+                    );
+                    k += 3;
+                }
+            }
+            jpeg_decoder::PixelFormat::L8 => {
+                for &g in &rgb {
+                    let v = g as u32;
+                    pixels.push((v << 16) | (v << 8) | v);
+                }
+            }
+            _ => return None,
+        }
+        return Some((w, h, pixels));
+    }
+    // Uncompressed true-color TGA (byte 2 == 2)
+    if blob.len() >= 18 && blob[1] == 0 && blob[2] == 2 {
+        let id_len = blob[0] as usize;
+        let w = u16::from_le_bytes([blob[12], blob[13]]) as u32;
+        let h = u16::from_le_bytes([blob[14], blob[15]]) as u32;
+        let bpp = blob[16];
+        let flip_y = (blob[17] & 0x20) == 0;
+        let step = (bpp / 8) as usize;
+        let start = 18 + id_len;
+        if (step == 3 || step == 4)
+            && w > 0
+            && h > 0
+            && start + (w * h) as usize * step <= blob.len()
+        {
+            let mut pixels = vec![0u32; (w * h) as usize];
+            let raw = &blob[start..];
+            for y in 0..h as usize {
+                let dst_y = if flip_y { h as usize - 1 - y } else { y };
+                for x in 0..w as usize {
+                    let off = (y * w as usize + x) * step;
+                    let b = raw[off] as u32;
+                    let g = raw[off + 1] as u32;
+                    let r = raw[off + 2] as u32;
+                    pixels[dst_y * w as usize + x] = (r << 16) | (g << 8) | b;
+                }
+            }
+            return Some((w, h, pixels));
+        }
+    }
+    // ZSoft PCX (manufacturer 0x0a, 8-bit 1-plane with 256-color VGA palette at EOF-769)
+    if blob.len() > 896 && blob[0] == 0x0a && blob[2] == 1 && blob[3] == 8 {
+        let xmin = u16::from_le_bytes([blob[4], blob[5]]) as u32;
+        let ymin = u16::from_le_bytes([blob[6], blob[7]]) as u32;
+        let xmax = u16::from_le_bytes([blob[8], blob[9]]) as u32;
+        let ymax = u16::from_le_bytes([blob[10], blob[11]]) as u32;
+        if xmax >= xmin && ymax >= ymin {
+            let w = xmax - xmin + 1;
+            let h = ymax - ymin + 1;
+            let bpl = u16::from_le_bytes([blob[66], blob[67]]) as usize;
+            let pal_pos = blob.len() - 769;
+            if blob[pal_pos] == 0x0c {
+                let pal = &blob[pal_pos + 1..];
+                let mut indices = Vec::with_capacity(bpl * h as usize);
+                let mut p = 128;
+                while indices.len() < bpl * h as usize && p < pal_pos {
+                    let b = blob[p];
+                    p += 1;
+                    if (b & 0xc0) == 0xc0 {
+                        let cnt = (b & 0x3f) as usize;
+                        let val = *blob.get(p)?;
+                        p += 1;
+                        for _ in 0..cnt {
+                            indices.push(val);
+                        }
+                    } else {
+                        indices.push(b);
+                    }
+                }
+                if indices.len() >= bpl * h as usize {
+                    let mut pixels = Vec::with_capacity((w * h) as usize);
+                    for y in 0..h as usize {
+                        for x in 0..w as usize {
+                            let idx = indices[y * bpl + x] as usize * 3;
+                            let r = pal[idx] as u32;
+                            let g = pal[idx + 1] as u32;
+                            let b = pal[idx + 2] as u32;
+                            pixels.push((r << 16) | (g << 8) | b);
+                        }
+                    }
+                    return Some((w, h, pixels));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn read_point_stream_vec(data: &[u8], i: &mut usize) -> Option<Vec<(usize, [f32; 2], [f32; 2])>> {
+    while data.get(*i) == Some(&0x1c)
+        || (matches!(data.get(*i), Some(0x14 | 0x13 | 0x02)) && data.get(*i + 2) != Some(&0x15))
+    {
+        if data[*i] == 0x1c {
+            *i += 1;
+            if matches!(data.get(*i), Some(0x12 | 0x13)) {
+                let mark = *i;
+                let cnt = read_i32(data, i)? as usize;
+                let _sub = read_i32(data, i)?;
+                if data.get(*i) == Some(&0x15) {
+                    return read_point_bodies(data, i, cnt);
+                }
+                *i = mark;
+            }
+        } else {
+            read_i32(data, i)?;
+        }
+    }
+    let cnt = read_i32(data, i)? as usize;
+    let _sub = read_i32(data, i)?;
+    read_point_bodies(data, i, cnt)
+}
+
+fn read_point_bodies(
+    data: &[u8],
+    i: &mut usize,
+    cnt: usize,
+) -> Option<Vec<(usize, [f32; 2], [f32; 2])>> {
+    let mut out = Vec::with_capacity(cnt.min(200_000));
+    for k in 0..cnt {
+        let vid = if k == 0 {
+            0
+        } else {
+            read_i32(data, i)? as usize
+        };
+        let uv = read_vec2_tag(data, i)?;
+        let luv = read_vec2_tag(data, i)?;
+        skip_color_and_bool(data, i)?;
+        out.push((vid, uv, luv));
+    }
+    // Optional trailing uncounted bodies
+    loop {
+        let mark = *i;
+        let Some(vid) = read_i32(data, i) else {
+            *i = mark;
+            break;
+        };
+        if data.get(*i) != Some(&0x15) {
+            *i = mark;
+            break;
+        }
+        let Some(uv) = read_vec2_tag(data, i) else {
+            *i = mark;
+            break;
+        };
+        let Some(luv) = read_vec2_tag(data, i) else {
+            *i = mark;
+            break;
+        };
+        if skip_color_and_bool(data, i).is_none() {
+            *i = mark;
+            break;
+        }
+        out.push((vid as usize, uv, luv));
+    }
+    Some(out)
+}
+
+fn read_mesh_polys_resolved(
+    data: &[u8],
+    i: &mut usize,
+    verts: &[[f32; 3]],
+    points: &[(usize, [f32; 2], [f32; 2])],
+) -> Option<Vec<ScenePoly>> {
+    let poly_count = read_i32(data, i)? as usize;
+    let _hdr1 = read_i32(data, i)?;
+    let mut polys = Vec::with_capacity(poly_count.min(32_768));
+    for p in 0..poly_count {
+        let pref = read_i32(data, i)? as usize;
+        let nverts = read_i32(data, i)? as usize;
+        let normal = read_vec3_tag(data, i)?;
+        let _flag = read_u8_tag(data, i)?;
+        let mat_id = read_i32(data, i)?;
+        let lmap_id = read_i32(data, i)?;
+        let _u_scale = read_f32_tag(data, i)?;
+        let _v_scale = read_f32_tag(data, i)?;
+        let _z1 = read_i32(data, i)?;
+        if p + 1 < poly_count {
+            let _idx = read_i32(data, i)?;
+        }
+        let mut pverts = Vec::with_capacity(nverts);
+        for c in 0..nverts {
+            if let Some(&(vid, uv, luv)) = points.get(pref + c) {
+                if let Some(&pos) = verts.get(vid) {
+                    pverts.push(SceneVertex { pos, uv, luv });
+                }
+            }
+        }
+        if pverts.len() >= 3 {
+            polys.push(ScenePoly {
+                vertices: pverts,
+                normal,
+                material_id: mat_id,
+                lightmap_id: lmap_id,
+            });
+        }
+    }
+    Some(polys)
+}
+
+fn skip_hook_map(
+    data: &[u8],
+    i: &mut usize,
+) -> Option<Vec<(String, Vec<String>, Vec<(String, Vec<String>)>)>> {
+    if *data.get(*i)? != 0x1f {
+        return None;
+    }
+    *i += 1;
+    let cnt = read_i32(data, i)? as usize;
+    let mut out = Vec::with_capacity(cnt);
+    for _ in 0..cnt {
+        let hname = read_str(data, i)?;
+        let mut acts = read_str_list(data, i, 0x1c)?;
+        if *data.get(*i)? != 0x1f {
+            return None;
+        }
+        *i += 1;
+        let c2 = read_i32(data, i)? as usize;
+        let mut state_actions = Vec::with_capacity(c2);
+        for _ in 0..c2 {
+            let state_name = read_str(data, i)?;
+            let s_acts = read_str_list(data, i, 0x1c)?;
+            state_actions.push((state_name, s_acts));
+        }
+        let mut after = read_str_list(data, i, 0x1c)?;
+        acts.append(&mut after);
+        out.push((hname, acts, state_actions));
+    }
+    Some(out)
+}
+
+/// `colour` with `mask` intensity in the top byte (nearest sample when sizes differ).
+fn with_alpha_mask(colour: &DecodedTexture, mask: &DecodedTexture) -> DecodedTexture {
+    let mut pixels = colour.pixels.clone();
+    for y in 0..colour.height {
+        for x in 0..colour.width {
+            let mx = x * mask.width / colour.width.max(1);
+            let my = y * mask.height / colour.height.max(1);
+            // A texel missing from a short decode reads as transparent instead of panicking.
+            let m = mask
+                .pixels
+                .get((my * mask.width + mx) as usize)
+                .copied()
+                .unwrap_or(0);
+            let alpha = (((m >> 16) & 0xff) + ((m >> 8) & 0xff) + (m & 0xff)) / 3;
+            if let Some(p) = pixels.get_mut((y * colour.width + x) as usize) {
+                *p = (alpha << 24) | (*p & 0x00ff_ffff);
+            }
+        }
+    }
+    DecodedTexture {
+        path: format!("{}|{}", colour.path, mask.path),
+        flag: colour.flag,
+        width: colour.width,
+        height: colour.height,
+        pixels,
+    }
+}
+
+/// Embedded texture for `path` by full path, file name, then stem.
+fn lookup_texture(tex_lookup: &BTreeMap<String, usize>, path: &str) -> Option<usize> {
+    let mut clean = path.to_ascii_lowercase();
+    if let Some(stripped) = clean.strip_suffix(" new") {
+        clean = stripped.trim().to_string();
+    }
+    let base = clean.rsplit(['\\', '/']).next().unwrap_or(&clean);
+    let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
+    tex_lookup
+        .get(&clean)
+        .or_else(|| tex_lookup.get(base))
+        .or_else(|| tex_lookup.get(stem))
+        .copied()
+}
+
+/// Parse an entire `.ldb` byte buffer into a walkable [`LdbScene`].
+pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
+    let import_off = super::ras_ldb_after_geometry(data)?;
+    let mut i = import_off + 2; // skip `14 20`
+
+    // 1. Textures
+    let tex_count = read_i32(data, &mut i)? as usize;
+    let mut textures = Vec::with_capacity(tex_count);
+    let mut tex_lookup: BTreeMap<String, usize> = BTreeMap::new();
+    for idx in 0..tex_count {
+        let path = read_str(data, &mut i)?;
+        let flag = read_u8_tag(data, &mut i)?;
+        let blob_len = read_i32(data, &mut i)? as usize;
+        let blob = data.get(i..i + blob_len)?;
+        i += blob_len;
+        let (width, height, pixels) =
+            decode_texture_blob(blob).unwrap_or_else(|| (1, 1, vec![0x00888888]));
+        let lower = path.to_ascii_lowercase();
+        let base = lower
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or(&lower)
+            .to_string();
+        let stem = base
+            .rsplit_once('.')
+            .map(|(s, _)| s.to_string())
+            .unwrap_or_else(|| base.clone());
+        tex_lookup.entry(lower).or_insert(idx);
+        tex_lookup.entry(base).or_insert(idx);
+        tex_lookup.entry(stem).or_insert(idx);
+        textures.push(DecodedTexture {
+            path,
+            flag,
+            width,
+            height,
+            pixels,
+        });
+    }
+
+    // 2. Materials (walk consecutive 0x1f material lists; second list holds zero-based IDs)
+    let mut materials = BTreeMap::new();
+    let mut mat_passes = 0;
+    while data.get(i) == Some(&0x1f) && mat_passes < 4 {
+        let mark = i;
+        i += 1;
+        let Some(mcnt) = read_i32(data, &mut i) else {
+            i = mark;
+            break;
+        };
+        if data.get(i) != Some(&0x25) {
+            // first material list has an extra header int before 0x25
+            let mut probe = i;
+            if read_i32(data, &mut probe).is_some() && data.get(probe) == Some(&0x25) {
+                i = probe;
+            } else {
+                i = mark;
+                break;
+            }
+        }
+        for _ in 0..mcnt {
+            if data.get(i) != Some(&0x25) {
+                break;
+            }
+            i += 1;
+            let category = read_str(data, &mut i)?;
+            let texture_path = read_str(data, &mut i)?;
+            let id = if matches!(data.get(i), Some(0x14 | 0x13 | 0x12 | 0x02)) {
+                read_i32(data, &mut i)?
+            } else {
+                -1
+            };
+            let texture_index = lookup_texture(&tex_lookup, &texture_path);
+            materials.insert(
+                id,
+                SceneMaterial {
+                    id,
+                    category,
+                    texture_path,
+                    texture_index,
+                    alpha_reference: None,
+                },
+            );
+        }
+        mat_passes += 1;
+    }
+
+    // 3. Material categories
+    let (_, categories, after_cats) = super::parse_ras_ldb_import_material_categories_at(data, i)?;
+    // 0x5dc800: a material record's texture file (+0x1c) wins over its name; a third
+    // string is its alpha image, combined into the texture (0x5dc3d8, `P_Map(colour, alpha)`).
+    let mut masked: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    for category in &categories {
+        let records = std::iter::once((&category.texture, &category.path, category.path2.as_str()))
+            .chain(
+                category
+                    .members
+                    .iter()
+                    .map(|m| (&m.name, &m.path, m.path2.as_deref().unwrap_or(""))),
+            );
+        for (name, file, alpha) in records {
+            let colour = (!file.is_empty())
+                .then(|| lookup_texture(&tex_lookup, file))
+                .flatten();
+            let mask = (!alpha.is_empty())
+                .then(|| lookup_texture(&tex_lookup, alpha))
+                .flatten();
+            for material in materials.values_mut() {
+                if !material.texture_path.eq_ignore_ascii_case(name) {
+                    continue;
+                }
+                if let Some(index) = colour {
+                    material.texture_index = Some(index);
+                }
+                let (Some(colour), Some(mask)) = (material.texture_index, mask) else {
+                    continue;
+                };
+                let index = *masked.entry((colour, mask)).or_insert_with(|| {
+                    textures.push(with_alpha_mask(&textures[colour], &textures[mask]));
+                    textures.len() - 1
+                });
+                material.texture_index = Some(index);
+                // `ID_ALPHAREFERENCE` until `materials.txt` overrides it per category.
+                material.alpha_reference = Some(15);
+            }
+        }
+    }
+    i = after_cats;
+
+    // 4. Lightmaps (`256×256` RGB planes)
+    let lm_count = read_i32(data, &mut i)? as usize;
+    let _z = read_i32(data, &mut i)?;
+    let _u = read_u8_tag(data, &mut i)?;
+    if *data.get(i)? != 0x12 {
+        return None;
+    }
+    i += 1;
+    let lm_size = u32::from_le_bytes(data.get(i..i + 4)?.try_into().ok()?) as usize;
+    i += 4 + 12 + 3 + 2; // 3 u32s + 01 00 01 + 18 20
+    let rgb_len = if lm_size as u32 == super::LDB_IMPORT_LIGHTMAP_RGB_SIZE {
+        lm_size - 18
+    } else {
+        lm_size
+    };
+    let mut lightmaps = Vec::with_capacity(lm_count);
+    for n in 0..lm_count {
+        if n > 0 {
+            i += 8; // LDB_IMPORT_LIGHTMAP_SEP
+        }
+        let need = if n + 1 == lm_count { rgb_len } else { lm_size };
+        let plane = data.get(i..i + rgb_len.min(need))?;
+        let mut pixels = Vec::with_capacity(256 * 256);
+        let mut k = 0;
+        while k + 3 <= plane.len() && pixels.len() < 256 * 256 {
+            // BGR/RGB in lightmap plane
+            pixels.push(
+                ((plane[k + 2] as u32) << 16) | ((plane[k + 1] as u32) << 8) | (plane[k] as u32),
+            );
+            k += 3;
+        }
+        lightmaps.push(DecodedLightmap {
+            width: 256,
+            height: 256,
+            pixels,
+        });
+        i += need;
+    }
+
+    // 5. Portal Exits
+    let mut exits = Vec::new();
+    let (_, exits_end) = super::parse_ras_ldb_import_exits_at(data, i, 512)?;
+    let mut ei = i;
+    while ei < exits_end {
+        if data.get(ei) == Some(&0x0d)
+            && data.get(ei + 1) == Some(&0x14)
+            && data.get(ei + 3..ei + 5) == Some(b"::")
+        {
+            let mark = ei;
+            if let Some(name) = read_str(data, &mut ei) {
+                if data.get(ei) == Some(&0x11) {
+                    if let Some(ncorn) = read_u8_tag(data, &mut ei) {
+                        let mut corners = Vec::with_capacity(ncorn as usize);
+                        let mut ok = true;
+                        for _ in 0..ncorn {
+                            if let Some(c) = read_vec3_tag(data, &mut ei) {
+                                corners.push(c);
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok {
+                            if let (
+                                Some(normal),
+                                Some(rel),
+                                Some(_id_b),
+                                Some(target_room_id),
+                                Some(target_exit_name),
+                            ) = (
+                                read_vec3_tag(data, &mut ei),
+                                read_xform_pos(data, &mut ei),
+                                read_i32(data, &mut ei),
+                                read_i32(data, &mut ei),
+                                read_str(data, &mut ei),
+                            ) {
+                                exits.push(ScenePortalExit {
+                                    name,
+                                    corners,
+                                    normal,
+                                    relative_offset: rel,
+                                    target_room_id,
+                                    target_exit_name,
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            ei = mark + 1;
+        } else {
+            ei += 1;
+        }
+    }
+    i = exits_end;
+
+    // 6. Static mesh point stream (`vid, uv, luv`)
+    let static_points = read_point_stream_vec(data, &mut i)?;
+
+    // 7. Static meshes + polygons + optional mesh attribs
+    let mut static_meshes = Vec::new();
+    loop {
+        let mark = i;
+        if data.get(i) == Some(&0x1f) {
+            let mut p = i + 1;
+            if read_i32(data, &mut p) == Some(0) {
+                i = p;
+            } else {
+                break;
+            }
+        }
+        let Some(first) = read_i32(data, &mut i) else {
+            i = mark;
+            break;
+        };
+        let (mesh_id, npts) = if matches!(data.get(i), Some(0x11 | 0x10)) {
+            let Some(n) = read_point_count(data, &mut i) else {
+                i = mark;
+                break;
+            };
+            (first, n)
+        } else if let Some(b) = read_i32(data, &mut i) {
+            if !matches!(data.get(i), Some(0x11 | 0x10)) {
+                i = mark;
+                break;
+            }
+            let Some(n) = read_point_count(data, &mut i) else {
+                i = mark;
+                break;
+            };
+            (b, n)
+        } else {
+            i = mark;
+            break;
+        };
+        if npts == 0 || npts > 500_000 || data.get(i) != Some(&0x16) {
+            i = mark;
+            break;
+        }
+        let mut verts = Vec::with_capacity(npts);
+        for _ in 0..npts {
+            verts.push(read_vec3_tag(data, &mut i)?);
+        }
+        if *data.get(i)? != 0x1c {
+            i = mark;
+            break;
+        }
+        i += 1;
+        let n2 = read_i32(data, &mut i)? as usize;
+        i += n2 * 13; // vertex normals
+        let _editor_pos = read_xform_pos(data, &mut i)?;
+        let polys = read_mesh_polys_resolved(data, &mut i, &verts, &static_points)?;
+        // Optional non-empty mesh attribs (`0x1f` + count + (id, vec3)*count)
+        if data.get(i) == Some(&0x1f) {
+            let mut p = i + 1;
+            if let Some(acnt) = read_i32(data, &mut p) {
+                if acnt > 0 && data.get(p) != Some(&0x25) {
+                    i = p;
+                    for _ in 0..acnt {
+                        read_i32(data, &mut i)?;
+                        read_vec3_tag(data, &mut i)?;
+                    }
+                }
+            }
+        }
+        static_meshes.push(SceneStaticMesh {
+            mesh_id,
+            room_id: None,
+            world_origin: [0.0, 0.0, 0.0],
+            polys,
+        });
+    }
+
+    // 8. Directional/spot lights (may be 0 when preceded by trailing 0 from last poly)
+    if data.get(i) == Some(&0x14) && data.get(i + 1) == Some(&0x00) {
+        let mut p = i + 2;
+        if let Some(next_cnt) = read_i32(data, &mut p) {
+            if next_cnt > 0 && data.get(p) == Some(&0x0d) {
+                // `14 00` was either 0 lights or trailing poly index; check if `p` is Light:: or Jumppoint
+                let mut sp = p;
+                if let Some(s) = read_str(data, &mut sp) {
+                    if !s.starts_with("Light::") {
+                        i += 2; // 0 lights! `next_cnt` at `i` is jumppoint count
+                    }
+                }
+            }
+        }
+    }
+    if let Some((_, _, lend)) = super::parse_ras_ldb_import_lights_at(data, i, 0) {
+        // verify first light was actually a light record (has `0x19` mat3)
+        i = lend;
+    }
+
+    // 9. Jumppoints.
+    // House levels start at the count (`14 <n>`). Startup wraps that count:
+    // empty `0x1f` list, int 0, then the count, then the named records.
+    let mut jumppoints = Vec::new();
+    let jcnt = if data.get(i) == Some(&0x1f) {
+        match super::parse_ras_ldb_import_character_head_at(data, i) {
+            Some((count, at)) => {
+                i = at;
+                Some(count as i32)
+            }
+            None => read_i32(data, &mut i),
+        }
+    } else {
+        read_i32(data, &mut i)
+    };
+    if let Some(jcnt) = jcnt {
+        for _ in 0..jcnt {
+            let name = read_str(data, &mut i)?;
+            let _parent = read_str(data, &mut i)?;
+            let pos = read_xform_pos(data, &mut i)?;
+            let _x2 = read_xform_pos(data, &mut i)?;
+            let room_id = read_i32(data, &mut i)?;
+            let _unk = read_str(data, &mut i)?;
+            let jp_type = read_i32(data, &mut i)?;
+            jumppoints.push(SceneJumppoint {
+                name,
+                room_id,
+                pos,
+                jp_type,
+            });
+        }
+    }
+
+    // 10. FSMs
+    let mut fsms = Vec::new();
+    if let Some(fcnt) = read_i32(data, &mut i) {
+        for _ in 0..fcnt {
+            let name = read_str(data, &mut i)?;
+            let _parent = read_str(data, &mut i)?;
+            let pos = read_xform_pos(data, &mut i)?;
+            let _x2 = read_xform_pos(data, &mut i)?;
+            let room_id = read_i32(data, &mut i)?;
+            let _unk = read_str(data, &mut i)?;
+            let states = read_str_list(data, &mut i, 0x1c)?;
+            let default_state = read_str(data, &mut i)?;
+            let startup_actions = read_str_list(data, &mut i, 0x1c)?;
+            let mut hooks = skip_hook_map(data, &mut i)?;
+            let _extra = read_str_list(data, &mut i, 0x1c)?;
+            hooks.append(&mut skip_hook_map(data, &mut i)?);
+            hooks.append(&mut skip_hook_map(data, &mut i)?);
+            hooks.append(&mut skip_hook_map(data, &mut i)?);
+            fsms.push(SceneFsm {
+                name,
+                room_id,
+                pos,
+                states,
+                default_state,
+                startup_actions,
+                hooks,
+            });
+        }
+    }
+
+    // 11. Characters
+    let mut characters = Vec::new();
+    if let Some(ccnt) = read_i32(data, &mut i) {
+        for _ in 0..ccnt {
+            let name = read_str(data, &mut i)?;
+            let _parent = read_str(data, &mut i)?;
+            let pos = read_xform_pos(data, &mut i)?;
+            let _x2 = read_xform_pos(data, &mut i)?;
+            let room_id = read_i32(data, &mut i)?;
+            let _unk = read_str(data, &mut i)?;
+            let skin = read_str(data, &mut i)?;
+            let mut startup_scripts = read_str_list(data, &mut i, 0x1c)?;
+            for _ in 0..3 {
+                startup_scripts.append(&mut read_str_list(data, &mut i, 0x1c)?);
+            }
+            characters.push(SceneCharacter {
+                name,
+                skin,
+                room_id,
+                pos,
+                startup_scripts,
+            });
+        }
+    }
+
+    // 12. Triggers
+    let mut triggers = Vec::new();
+    if let Some(tcnt) = read_i32(data, &mut i) {
+        for _ in 0..tcnt {
+            let name = read_str(data, &mut i)?;
+            let _parent = read_str(data, &mut i)?;
+            let pos = read_xform_pos(data, &mut i)?;
+            let _x2 = read_xform_pos(data, &mut i)?;
+            let room_id = read_i32(data, &mut i)?;
+            let _target = read_str(data, &mut i)?;
+            let radius = read_f32_tag(data, &mut i)?;
+            let trigger_type = read_i32(data, &mut i)?;
+            triggers.push(SceneTrigger {
+                name,
+                room_id,
+                pos,
+                radius,
+                trigger_type,
+                enabled: true,
+            });
+        }
+    }
+
+    // 13. Dynamic mesh point stream + Dynamic meshes (`X_LevelDBImportDynamicMesh`)
+    let mut dynamic_meshes = Vec::new();
+    if let Some(dyn_points) = read_point_stream_vec(data, &mut i) {
+        if let Some(dm_cnt) = read_i32(data, &mut i) {
+            for d in 0..dm_cnt {
+                let name = read_str(data, &mut i)?;
+                let npts = read_point_count(data, &mut i)?;
+                let mut verts = Vec::with_capacity(npts);
+                for _ in 0..npts {
+                    verts.push(read_vec3_tag(data, &mut i)?);
+                }
+                if *data.get(i)? != 0x1c {
+                    return None;
+                }
+                i += 1;
+                let n2 = read_i32(data, &mut i)? as usize;
+                i += n2 * 13;
+                let (local_start_mat, local_start_pos) = read_xform(data, &mut i)?;
+                let polys = read_mesh_polys_resolved(data, &mut i, &verts, &dyn_points)?;
+                if *data.get(i)? != 0x1f {
+                    return None;
+                }
+                i += 1;
+                let acnt = read_i32(data, &mut i)? as usize;
+                for _ in 0..acnt {
+                    read_i32(data, &mut i)?;
+                    read_vec3_tag(data, &mut i)?;
+                }
+                let _parent = read_str(data, &mut i)?;
+                let (world_mat, world_pos) = read_xform(data, &mut i)?;
+                let _x2 = read_xform_pos(data, &mut i)?;
+                let room_id = read_i32(data, &mut i)?;
+                let _unk_s = read_str(data, &mut i)?;
+                let anim_cnt = read_i32(data, &mut i)? as usize;
+                let mut anims = Vec::with_capacity(anim_cnt);
+                for _ in 0..anim_cnt {
+                    let aname = read_str(data, &mut i)?;
+                    let duration = read_f32_tag(data, &mut i)?;
+                    let (start_mat, start_pos) = read_xform(data, &mut i)?;
+                    let (end_mat, end_pos) = read_xform(data, &mut i)?;
+                    let mut scripts = read_str_list(data, &mut i, 0x1c)?;
+                    scripts.append(&mut read_str_list(data, &mut i, 0x1c)?);
+                    scripts.append(&mut read_str_list(data, &mut i, 0x1c)?);
+                    let mut curves = [Vec::new(), Vec::new()];
+                    for curve in &mut curves {
+                        let _cty = read_i32(data, &mut i)?;
+                        let _cver = read_i32(data, &mut i)?;
+                        let c_ch = read_i32(data, &mut i)? as usize;
+                        let c_smp = read_i32(data, &mut i)? as usize;
+                        *curve = read_f32_samples(data, &mut i, c_ch.saturating_mul(c_smp))?;
+                    }
+                    anims.push(SceneDynamicAnim {
+                        name: aname,
+                        duration,
+                        start_mat,
+                        start_pos,
+                        curves,
+                        end_mat,
+                        end_pos,
+                        scripts,
+                    });
+                }
+                i += 12; // 6 bools (`0e u8`)
+                let _f_start = read_i32(data, &mut i)?;
+                let _f_cnt = read_i32(data, &mut i)?;
+                let _s_start = read_i32(data, &mut i)?;
+                if d + 1 < dm_cnt {
+                    let _next_idx = read_i32(data, &mut i)?;
+                }
+                dynamic_meshes.push(SceneDynamicMesh {
+                    name,
+                    room_id,
+                    world_mat,
+                    world_pos,
+                    local_start_mat,
+                    local_start_pos,
+                    toggled: false,
+                    hidden: false,
+                    hitpoints: None,
+                    polys,
+                    anims,
+                    active_track: None,
+                    track_time: 0.0,
+                    track_duration: 0.0,
+                });
+            }
+        }
+    }
+
+    // 14. Level items (`X_LevelDBImportLevelItem`) + Point lights + Rooms (`X_LevelDBImportRoom`)
+    let mut items = Vec::new();
+    let mut point_lights = Vec::new();
+    let mut rooms = Vec::new();
+    if let Some(_item_ver) = read_i32(data, &mut i) {
+        if let Some(icnt) = read_i32(data, &mut i) {
+            for _ in 0..icnt {
+                let name = read_str(data, &mut i)?;
+                let _parent = read_str(data, &mut i)?;
+                let pos = read_xform_pos(data, &mut i)?;
+                let _x2 = read_xform_pos(data, &mut i)?;
+                let room_id = read_i32(data, &mut i)?;
+                let _unk = read_str(data, &mut i)?;
+                let item_type = read_str(data, &mut i)?;
+                items.push(SceneItem {
+                    name,
+                    item_type,
+                    room_id,
+                    pos,
+                });
+            }
+        }
+        if let Some(pl_cnt) = read_i32(data, &mut i) {
+            for _ in 0..pl_cnt {
+                let id = read_i32(data, &mut i)?;
+                let _name = read_str(data, &mut i)?;
+                let pos = read_xform_pos(data, &mut i)?;
+                let _x2 = read_xform_pos(data, &mut i)?;
+                let room_id = read_i32(data, &mut i)?;
+                let _unk = read_str(data, &mut i)?;
+                let r = read_f32_tag(data, &mut i)?;
+                let g = read_f32_tag(data, &mut i)?;
+                let b = read_f32_tag(data, &mut i)?;
+                let a = read_f32_tag(data, &mut i)?;
+                let radius = read_f32_tag(data, &mut i)?;
+                let intensity = read_f32_tag(data, &mut i)?;
+                point_lights.push(ScenePointLight {
+                    id,
+                    room_id,
+                    pos,
+                    color: [r, g, b, a],
+                    radius,
+                    intensity,
+                });
+            }
+        }
+        if let Some(rcnt) = read_i32(data, &mut i) {
+            for _ in 0..rcnt {
+                let rid = read_i32(data, &mut i)?;
+                let mut sm_ids = Vec::new();
+                let mut exit_names = Vec::new();
+                let mut dm_names = Vec::new();
+                let mut list_idx = 0usize;
+                while data.get(i) == Some(&0x1c) {
+                    i += 1;
+                    let cnt = read_i32(data, &mut i)? as usize;
+                    for _ in 0..cnt {
+                        if data.get(i) == Some(&0x0d) {
+                            let s = read_str(data, &mut i)?;
+                            if list_idx == 2 {
+                                exit_names.push(s);
+                            } else if list_idx == 7 {
+                                dm_names.push(s);
+                            }
+                        } else {
+                            let v = read_i32(data, &mut i)?;
+                            if list_idx == 0 {
+                                sm_ids.push(v);
+                            }
+                        }
+                    }
+                    list_idx += 1;
+                }
+                let rname = read_str(data, &mut i)?;
+                let _f = read_f32_tag(data, &mut i)?;
+                for _ in 0..4 {
+                    read_i32(data, &mut i)?;
+                }
+                rooms.push(SceneRoom {
+                    id: rid,
+                    name: rname,
+                    static_meshes: sm_ids,
+                    exits: exit_names,
+                    dynamic_meshes: dm_names,
+                    world_origin: [0.0, 0.0, 0.0],
+                });
+            }
+        }
+    }
+
+    // Compute room world origins via portal graph BFS from start room (or room with first jumppoint)
+    if !rooms.is_empty() {
+        let start_room = jumppoints
+            .iter()
+            .find(|j| j.name.contains("StartRoom"))
+            .or_else(|| {
+                jumppoints
+                    .iter()
+                    .find(|j| j.name.contains("Start") || j.name.contains("Jumppoint"))
+            })
+            .map(|j| j.room_id)
+            .unwrap_or(rooms[0].id);
+        let mut origins: BTreeMap<i32, [f32; 3]> = BTreeMap::new();
+        let mut queue = VecDeque::new();
+        origins.insert(start_room, [0.0, 0.0, 0.0]);
+        queue.push_back(start_room);
+        while let Some(u) = queue.pop_front() {
+            let u_orig = origins[&u];
+            if let Some(room) = rooms.iter().find(|r| r.id == u) {
+                for ex_name in &room.exits {
+                    if let Some(ex) = exits.iter().find(|e| &e.name == ex_name) {
+                        let v = ex.target_room_id;
+                        if let std::collections::btree_map::Entry::Vacant(e) = origins.entry(v) {
+                            // `ex.relative_offset` transforms room `u` local coords into room `v`:
+                            // `P_v = P_u + rel` => `origin_v = origin_u - rel`
+                            let v_orig = [
+                                u_orig[0] - ex.relative_offset[0],
+                                u_orig[1] - ex.relative_offset[1],
+                                u_orig[2] - ex.relative_offset[2],
+                            ];
+                            e.insert(v_orig);
+                            queue.push_back(v);
+                        }
+                    }
+                }
+            }
+        }
+        for r in &mut rooms {
+            if let Some(&orig) = origins.get(&r.id) {
+                r.world_origin = orig;
+            }
+            for &sm_id in &r.static_meshes {
+                if let Some(sm) = static_meshes.iter_mut().find(|m| m.mesh_id == sm_id) {
+                    sm.room_id = Some(r.id);
+                    sm.world_origin = r.world_origin;
+                }
+            }
+        }
+    }
+
+    // Apply FSM `C_Teleport("::Room::Jumppoint")` scripts to characters starting in `::Teleport`
+    for fsm in &fsms {
+        let all_acts =
+            fsm.startup_actions
+                .iter()
+                .chain(fsm.states.iter())
+                .chain(fsm.hooks.iter().flat_map(|(_, h, states)| {
+                    h.iter()
+                        .chain(states.iter().flat_map(|(_, acts)| acts.iter()))
+                }));
+        for act in all_acts {
+            let lower = act.to_ascii_lowercase();
+            if let Some(arrow_pos) = lower.find("->c_teleport(") {
+                let actor = &act[..arrow_pos].trim();
+                let rest = &act[arrow_pos + 13..];
+                let target = rest.trim_matches(|c: char| {
+                    c == '(' || c == ')' || c == ';' || c == '"' || c.is_whitespace()
+                });
+                if let Some(jp) = jumppoints
+                    .iter()
+                    .find(|j| j.name.eq_ignore_ascii_case(target))
+                {
+                    if let Some(ch) = characters
+                        .iter_mut()
+                        .find(|c| c.name.eq_ignore_ascii_case(actor))
+                    {
+                        ch.room_id = jp.room_id;
+                        ch.pos = jp.pos;
+                    }
+                }
+            }
+        }
+    }
+
+    Some(LdbScene {
+        textures,
+        materials,
+        lightmaps,
+        exits,
+        static_meshes,
+        jumppoints,
+        fsms,
+        characters,
+        triggers,
+        dynamic_meshes,
+        items,
+        point_lights,
+        rooms,
+        bytes_consumed: i,
+        sound_catalogs: BTreeMap::new(),
+        sound_queue: Vec::new(),
+    })
+}
+
+impl LdbScene {
+    /// `::StartRoom::Jumppoint 00` when the node name is only `Jumppoint 00`.
+    pub fn jumppoint_place(&self, jp: &SceneJumppoint) -> String {
+        if jp.name.starts_with("::") {
+            return jp.name.clone();
+        }
+        match self.rooms.iter().find(|r| r.id == jp.room_id) {
+            Some(room) if !room.name.is_empty() => format!("{}::{}", room.name, jp.name),
+            _ => jp.name.clone(),
+        }
+    }
+
+    /// Index of `PlayerStartingPlace`, else the first StartRoom jumppoint.
+    pub fn spawn_jumppoint_index(&self, place: Option<&str>) -> usize {
+        if let Some(place) = place {
+            if let Some(i) = self
+                .jumppoints
+                .iter()
+                .position(|j| self.jumppoint_place(j).eq_ignore_ascii_case(place))
+            {
+                return i;
+            }
+        }
+        self.jumppoints
+            .iter()
+            .position(|j| {
+                let place = self.jumppoint_place(j);
+                place.to_ascii_lowercase().contains("startroom")
+                    && place.to_ascii_lowercase().contains("jumppoint")
+            })
+            .or_else(|| {
+                self.jumppoints
+                    .iter()
+                    .position(|j| j.name.to_ascii_lowercase().contains("jumppoint"))
+            })
+            .unwrap_or(0)
+    }
+}
+
+/// One animated dynamic object in the intro camera rig.
+#[derive(Debug, Clone)]
+struct FlyBone {
+    /// Rest orientation. Column 0, 1, 2 are the local axes.
+    mat: [f32; 9],
+    start_pos: [f32; 3],
+    end_pos: [f32; 3],
+    duration: f32,
+    /// Distance curve (`+0xbc`) and slerp curve (`+0xd8`).
+    curves: [Vec<f32>; 2],
+}
+
+/// Startup flyover: ancestor bones run from t = 0, and `altitude::camera`
+/// plays tracks 1..5 in order. Track 5's script is the graphic-novel handoff.
+#[derive(Debug, Clone)]
+pub struct CameraFlyover {
+    ancestors: Vec<FlyBone>,
+    segments: Vec<FlyBone>,
+    room_origin: [f32; 3],
+    forward: [f32; 3],
+    pub duration: f32,
+}
+
+impl CameraFlyover {
+    /// World position and look direction at `time` seconds.
+    pub fn pose(&self, time: f32) -> ([f32; 3], [f32; 3]) {
+        let mut origin = [0.0f32; 3];
+        let mut mat = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        for (i, bone) in self.ancestors.iter().enumerate() {
+            let local = bone.pos_at(time);
+            if i == 0 {
+                origin = local;
+            } else {
+                origin = xform_point(mat, origin, local);
+            }
+            mat = bone.mat;
+        }
+        let (seg, local_t) = segment_at(&self.segments, time);
+        let local = seg.pos_at(local_t);
+        let mut pos = xform_point(mat, origin, local);
+        pos[0] += self.room_origin[0];
+        pos[1] += self.room_origin[1];
+        pos[2] += self.room_origin[2];
+        (pos, self.forward)
+    }
+}
+
+impl FlyBone {
+    fn pos_at(&self, time: f32) -> [f32; 3] {
+        let (w, _) = track_weights(
+            &self.curves,
+            self.start_pos,
+            self.end_pos,
+            self.duration,
+            time,
+        );
+        [
+            self.start_pos[0] + (self.end_pos[0] - self.start_pos[0]) * w,
+            self.start_pos[1] + (self.end_pos[1] - self.start_pos[1]) * w,
+            self.start_pos[2] + (self.end_pos[2] - self.start_pos[2]) * w,
+        ]
+    }
+}
+
+fn xform_point(mat: [f32; 9], origin: [f32; 3], v: [f32; 3]) -> [f32; 3] {
+    [
+        origin[0] + mat[0] * v[0] + mat[3] * v[1] + mat[6] * v[2],
+        origin[1] + mat[1] * v[0] + mat[4] * v[1] + mat[7] * v[2],
+        origin[2] + mat[2] * v[0] + mat[5] * v[1] + mat[8] * v[2],
+    ]
+}
+
+fn segment_at(segments: &[FlyBone], time: f32) -> (&FlyBone, f32) {
+    let mut remain = time.max(0.0);
+    for seg in segments {
+        if remain <= seg.duration || seg.duration <= 0.0 {
+            return (seg, remain.min(seg.duration.max(0.0)));
+        }
+        remain -= seg.duration;
+    }
+    let last = segments.last().expect("flyover has a segment");
+    (last, last.duration)
+}
+
+fn bone_from_anim(mesh: &SceneDynamicMesh, anim: &SceneDynamicAnim) -> FlyBone {
+    FlyBone {
+        mat: mesh.world_mat,
+        start_pos: anim.start_pos,
+        end_pos: anim.end_pos,
+        duration: anim.duration,
+        curves: anim.curves.clone(),
+    }
+}
+
+fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+}
+
+fn parent_name(name: &str) -> Option<String> {
+    let bare = name.strip_suffix(".DO").unwrap_or(name);
+    let (parent, _) = bare.rsplit_once("::")?;
+    Some(format!("{parent}.DO"))
+}
+
+/// The `startup_level` camera rig, if this scene has the rotator that ends in
+/// `s_modeswitch(graphicnovel)`.
+pub fn camera_flyover(scene: &LdbScene) -> Option<CameraFlyover> {
+    let cam = scene.dynamic_meshes.iter().find(|m| {
+        m.name.ends_with("altitude::camera.DO")
+            && m.anims.iter().any(|a| {
+                a.scripts.iter().any(|s| {
+                    s.to_ascii_lowercase()
+                        .contains("s_modeswitch(graphicnovel)")
+                })
+            })
+    })?;
+    let mut chain = vec![cam];
+    while let Some(parent) = parent_name(&chain.last()?.name) {
+        let Some(mesh) = scene.dynamic_meshes.iter().find(|m| m.name == parent) else {
+            break;
+        };
+        chain.push(mesh);
+    }
+    chain.reverse();
+    let camera = chain.pop()?;
+    let ancestors = chain
+        .iter()
+        .filter_map(|mesh| {
+            mesh.anims
+                .iter()
+                .find(|a| a.name == "1")
+                .or_else(|| mesh.anims.first())
+                .map(|anim| bone_from_anim(mesh, anim))
+        })
+        .collect::<Vec<_>>();
+    if ancestors.is_empty() {
+        return None;
+    }
+    let mut segments = Vec::new();
+    for index in 1..=5 {
+        let anim = camera.anims.iter().find(|a| a.name == index.to_string())?;
+        segments.push(bone_from_anim(camera, anim));
+    }
+    let duration = segments.iter().map(|s| s.duration).sum();
+    let room_origin = scene
+        .rooms
+        .iter()
+        .find(|r| r.id == camera.room_id)
+        .map(|r| r.world_origin)
+        .unwrap_or([0.0; 3]);
+    let z = [
+        camera.world_mat[6],
+        camera.world_mat[7],
+        camera.world_mat[8],
+    ];
+    let len = (z[0] * z[0] + z[1] * z[1] + z[2] * z[2]).sqrt().max(1.0e-6);
+    Some(CameraFlyover {
+        ancestors,
+        segments,
+        room_origin,
+        forward: [z[0] / len, z[1] / len, z[2] / len],
+        duration,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_uncompressed_24bit_tga() {
+        let mut tga = vec![0u8; 18 + 3];
+        tga[2] = 2; // uncompressed true-color
+        tga[12] = 1; // width = 1
+        tga[14] = 1; // height = 1
+        tga[16] = 24; // 24 bpp
+        tga[18] = 0x11; // B
+        tga[19] = 0x22; // G
+        tga[20] = 0x33; // R
+        let (w, h, px) = decode_texture_blob(&tga).unwrap();
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(px, vec![0x00332211]);
+    }
+
+    fn bare_scene(rooms: Vec<SceneRoom>, jumppoints: Vec<SceneJumppoint>) -> LdbScene {
+        LdbScene {
+            textures: Vec::new(),
+            materials: BTreeMap::new(),
+            lightmaps: Vec::new(),
+            exits: Vec::new(),
+            static_meshes: Vec::new(),
+            jumppoints,
+            fsms: Vec::new(),
+            characters: Vec::new(),
+            triggers: Vec::new(),
+            dynamic_meshes: Vec::new(),
+            items: Vec::new(),
+            point_lights: Vec::new(),
+            rooms,
+            bytes_consumed: 0,
+            sound_catalogs: BTreeMap::new(),
+            sound_queue: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn spawn_uses_player_starting_place() {
+        let scene = bare_scene(
+            vec![
+                SceneRoom {
+                    id: 0,
+                    name: "::startroom".into(),
+                    static_meshes: Vec::new(),
+                    exits: Vec::new(),
+                    dynamic_meshes: Vec::new(),
+                    world_origin: [0.0; 3],
+                },
+                SceneRoom {
+                    id: 4,
+                    name: "::Bathroom".into(),
+                    static_meshes: Vec::new(),
+                    exits: Vec::new(),
+                    dynamic_meshes: Vec::new(),
+                    world_origin: [0.0; 3],
+                },
+            ],
+            vec![
+                SceneJumppoint {
+                    name: "Jumppoint 00".into(),
+                    room_id: 4,
+                    pos: [9.0, 0.0, 0.0],
+                    jp_type: 0,
+                },
+                SceneJumppoint {
+                    name: "Jumppoint 00".into(),
+                    room_id: 0,
+                    pos: [1.0, 0.0, 2.0],
+                    jp_type: 0,
+                },
+            ],
+        );
+        let idx = scene.spawn_jumppoint_index(Some("::StartRoom::Jumppoint 00"));
+        assert_eq!(idx, 1);
+        assert_eq!(scene.jumppoints[idx].pos, [1.0, 0.0, 2.0]);
+    }
+
+    #[test]
+    fn material_policy_matches_materials_txt() {
+        let dummy = material_policy("dummy");
+        assert!(!dummy.draw);
+        assert!(!dummy.character_collides);
+
+        let sky = material_policy("Skybox");
+        assert!(!sky.draw);
+        assert!(sky.character_collides);
+        assert!(sky.skybox);
+
+        let graffiti = material_policy("Graffiti");
+        assert!(graffiti.draw);
+        assert!(!graffiti.character_collides);
+        assert!(!graffiti.writes_z);
+        assert_eq!(graffiti.detail_offset, 1);
+
+        let wood = material_policy("wood");
+        assert!(wood.draw);
+        assert!(wood.character_collides);
+        assert!(wood.writes_z);
+        assert_eq!(wood.detail_offset, 0);
+
+        let pass = material_policy("NoCollision");
+        assert!(pass.draw);
+        assert!(!pass.character_collides);
+
+        let ai = material_policy("ai_node_collision_nodraw");
+        assert!(!ai.draw);
+        assert!(!ai.character_collides);
+
+        let shell = material_policy("CharacterCollision_NoDraw");
+        assert!(!shell.draw);
+        assert!(shell.character_collides);
+    }
+
+    #[test]
+    fn material_surfaces_use_the_file_alpha_reference() {
+        let text = "#define ID_ALPHAREFERENCE 15\n[Default]\nAlphaReference = ID_ALPHAREFERENCE;\nBlendedAlphaTest = TRUE;\n[Leaves]\nAlphaReference = 127;\nBlendedAlphaTest = FALSE;\n";
+        let surfaces = parse_material_surfaces(text);
+        assert_eq!(surfaces["Default"].alpha_reference, 15);
+        assert!(surfaces["Default"].blended_alpha_test);
+        assert_eq!(surfaces["Leaves"].alpha_reference, 127);
+        assert!(!surfaces["Leaves"].blended_alpha_test);
+        let path = std::path::Path::new("/tmp/omp-xdata-ref/data/database/materials.txt");
+        if path.is_file() {
+            let retail = parse_material_surfaces(&std::fs::read_to_string(path).unwrap());
+            assert_eq!(retail["Leaves"].alpha_reference, 127);
+            assert!(!retail["Leaves"].blended_alpha_test);
+            assert_eq!(retail["Glass"].alpha_reference, 15);
+            assert!(retail["Glass"].blended_alpha_test);
+        }
+    }
+
+    fn actor(scripts: &[&str]) -> SceneCharacter {
+        SceneCharacter {
+            name: "actor".into(),
+            skin: "lab_junkie".into(),
+            room_id: 1,
+            pos: [0.0; 3],
+            startup_scripts: scripts.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn placed_house_actors_stay_put_until_combat() {
+        let michelle = actor(&["::teleport::michelle->c_kill(1);"]);
+        assert!(michelle.starts_dead());
+        assert!(!michelle.pursues());
+
+        let junkie = actor(&["::babys_room::e1->C_RemoveAllWeapons(beretta);"]);
+        assert!(!junkie.starts_dead());
+        assert!(!junkie.pursues());
+
+        let combat = actor(&["::babys_room::e1->C_SetStateMachine(mobstercombat);"]);
+        assert!(combat.pursues());
+        assert!(!combat.starts_dead());
+    }
+
+    #[test]
+    fn startup_level_reads_the_rotator_camera_tracks() {
+        let path = std::path::Path::new(
+            "/tmp/omp-xdata-ref/data/database/levels/front_end/Startup_level.ldb",
+        );
+        if !path.is_file() {
+            return;
+        }
+        let bytes = std::fs::read(path).unwrap();
+        let scene = parse_ldb_scene(&bytes).expect("startup scene");
+        assert_eq!(scene.bytes_consumed, bytes.len());
+        let jp = scene
+            .jumppoints
+            .iter()
+            .find(|j| j.name == "::start::Jumppoint 00")
+            .expect("jumppoint");
+        assert_eq!(jp.pos, [-139.0, -67.5, -1149.0]);
+        let cam = scene
+            .dynamic_meshes
+            .iter()
+            .find(|m| m.name.ends_with("altitude::camera.DO"))
+            .expect("camera");
+        let track1 = cam.anims.iter().find(|a| a.name == "1").expect("track 1");
+        assert_eq!(track1.duration, 7.0);
+        assert!((track1.start_pos[0] + 0.07).abs() < 0.02);
+        assert!((track1.start_pos[1] - 0.2).abs() < 0.02);
+        assert!((track1.start_pos[2] - 1.56).abs() < 0.02);
+        let fly = camera_flyover(&scene).expect("flyover");
+        assert_eq!(fly.segments.len(), 5);
+        assert!((fly.duration - 28.5).abs() < 0.05);
+        let (pos, forward) = fly.pose(0.0);
+        assert!((pos[0] + 40.57).abs() < 0.05);
+        assert!((pos[1] + 58.55).abs() < 0.05);
+        assert!((pos[2] + 34.44).abs() < 0.05);
+        let flen =
+            (forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]).sqrt();
+        assert!((flen - 1.0).abs() < 0.01);
+    }
+
+    fn door_mesh(anims: Vec<SceneDynamicAnim>) -> SceneDynamicMesh {
+        SceneDynamicMesh {
+            name: "::startroom::door.DO".into(),
+            room_id: 1,
+            world_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            world_pos: [1.0, 0.0, 2.0],
+            local_start_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            local_start_pos: [0.0, 0.0, 0.0],
+            toggled: false,
+            hidden: false,
+            hitpoints: None,
+            polys: Vec::new(),
+            anims,
+            active_track: None,
+            track_time: 0.0,
+            track_duration: 0.0,
+        }
+    }
+
+    fn track(name: &str, end: [f32; 3]) -> SceneDynamicAnim {
+        SceneDynamicAnim {
+            name: name.into(),
+            duration: 1.3,
+            start_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            start_pos: [0.0, 0.0, 0.0],
+            end_mat: [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+            end_pos: end,
+            scripts: Vec::new(),
+            curves: [Vec::new(), Vec::new()],
+        }
+    }
+
+    /// Mesh whose rest pose is the track's start, half way through `anim`.
+    fn mid_track(anim: SceneDynamicAnim) -> SceneDynamicMesh {
+        let mut mesh = door_mesh(vec![anim]);
+        mesh.world_pos = mesh.local_start_pos;
+        mesh.play_track("open");
+        mesh.track_time = mesh.track_duration / 2.0;
+        mesh
+    }
+
+    #[test]
+    fn mid_track_rotation_slerps_by_the_second_curve() {
+        // 0x5ff100: curve +0xd8 is the raw slerp t between start and end.
+        let mut anim = track("open", [0.0; 3]);
+        anim.end_mat = [0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        anim.curves[1] = vec![0.0, 1.0];
+        let (mat, _) = mid_track(anim).posed_local();
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((mat[0] - h).abs() < 1.0e-4 && (mat[1] - h).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn mid_track_translation_is_distance_curve_over_length() {
+        // 0x5ff100: weight = sample(+0xbc) * (+0x88 = 1/|end - start|), no clamp.
+        let mut anim = track("open", [10.0, 0.0, 0.0]);
+        anim.curves[0] = vec![0.0, 12.0, 10.0];
+        let (_, pos) = mid_track(anim).posed_local();
+        assert!((pos[0] - 12.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn opening_track_is_open_not_the_trailing_timer() {
+        let mut door = door_mesh(vec![
+            track("open", [0.2, 0.0, 0.0]),
+            track("timer", [9.0, 9.0, 9.0]),
+        ]);
+        assert_eq!(door.opening_anim().unwrap().name, "open");
+        assert_eq!(door.posed_local().1, [1.0, 0.0, 2.0]);
+        door.toggled = true;
+        assert_eq!(door.posed_local().1, [1.2, 0.0, 2.0]);
+    }
+
+    #[test]
+    fn house_materials_use_their_record_texture_path() {
+        // 0x5dc800: a material record is (name +0xc, texture file +0x1c, bool, bool).
+        let path =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !path.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(path).unwrap()).expect("house");
+        let tex = |id: i32| {
+            let index = scene.materials[&id].texture_index.expect("textured");
+            scene.textures[index].path.clone()
+        };
+        assert!(tex(16).ends_with("MaxHouseWall01_512x512.jpg"));
+        assert!(tex(2).ends_with("Concrete01_128x128.jpg"));
+        let untextured: Vec<_> = scene
+            .materials
+            .values()
+            .filter(|m| m.texture_index.is_none())
+            .map(|m| m.texture_path.as_str())
+            .collect();
+        assert!(untextured.is_empty(), "{untextured:?}");
+    }
+
+    #[test]
+    fn short_mask_pixels_do_not_panic() {
+        let tex = |pixels: Vec<u32>| DecodedTexture {
+            path: String::new(),
+            flag: 4,
+            width: 2,
+            height: 2,
+            pixels,
+        };
+        let out = with_alpha_mask(&tex(vec![0x00ff_ffff; 3]), &tex(vec![0x00ff_ffff]));
+        assert_eq!(out.pixels.len(), 3);
+        assert_eq!(out.pixels[0] >> 24, 0xff);
+        assert_eq!(out.pixels[1] >> 24, 0, "missing mask texel is transparent");
+    }
+
+    #[test]
+    fn masked_materials_take_their_category_alpha_reference() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        for (id, category, alpha) in [(1, "leaves", Some(15)), (2, "wood", None)] {
+            scene.materials.insert(
+                id,
+                SceneMaterial {
+                    id,
+                    category: category.into(),
+                    texture_path: String::new(),
+                    texture_index: None,
+                    alpha_reference: alpha,
+                },
+            );
+        }
+        let surfaces = parse_material_surfaces(
+            "[Leaves]\nAlphaReference = 127;\nBlendedAlphaTest = FALSE;\n\
+             [Wood]\nAlphaReference = 40;\nBlendedAlphaTest = TRUE;\n",
+        );
+        scene.apply_material_surfaces(&surfaces);
+        assert_eq!(scene.materials[&1].alpha_reference, Some(127));
+        assert_eq!(
+            scene.materials[&2].alpha_reference, None,
+            "opaque stays opaque"
+        );
+    }
+
+    #[test]
+    fn house_plant_material_carries_its_alpha_mask() {
+        // 0x5dc3d8: P_Map(colour, alpha) when the record has an alpha image.
+        let path =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !path.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(path).unwrap()).expect("house");
+        let plant = &scene.materials[&52];
+        assert_eq!(plant.alpha_reference, Some(15));
+        let tex = &scene.textures[plant.texture_index.unwrap()];
+        assert!(tex.pixels.iter().any(|p| p >> 24 == 0));
+        assert!(tex.pixels.iter().any(|p| p >> 24 > 0x80));
+        assert_eq!(scene.materials[&16].alpha_reference, None);
+    }
+
+    #[test]
+    fn child_mesh_turns_with_its_animating_parent() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let mut parent = door_mesh(vec![track("open", [0.0; 3])]);
+        parent.name = "::room::hinge.DO".into();
+        parent.world_pos = [0.0; 3];
+        let mut child = door_mesh(Vec::new());
+        child.name = "::room::hinge::panel.DO".into();
+        child.local_start_pos = [1.0, 0.0, 0.0];
+        child.world_pos = [1.0, 0.0, 0.0];
+        scene.dynamic_meshes.push(parent);
+        scene.dynamic_meshes.push(child);
+        scene.dynamic_meshes[0].play_track("open");
+        scene.dynamic_meshes[0].track_time = 1.3;
+        let (mat, pos) = scene.dynamic_world_pose(1);
+        // Parent end pose maps x to -z, so the panel swings from +x to -z.
+        assert_eq!(pos, [0.0, 0.0, -1.0]);
+        assert_eq!(&mat[0..3], &[0.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn house_child_rest_world_is_local_then_parent_world() {
+        // 0x6e1a00: X = L · X(parent); with R191 = B = I the rest world is L0 · W0(parent).
+        let path =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !path.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(path).unwrap()).expect("house");
+        let mut children = 0;
+        for mesh in &scene.dynamic_meshes {
+            let Some(parent) = parent_name(&mesh.name)
+                .and_then(|p| scene.dynamic_meshes.iter().find(|m| m.name == p))
+            else {
+                continue;
+            };
+            children += 1;
+            let pos = xform_point(parent.world_mat, parent.world_pos, mesh.local_start_pos);
+            for k in 0..3 {
+                assert!(
+                    (pos[k] - mesh.world_pos[k]).abs() < 1.0e-3,
+                    "{}: {pos:?} vs {:?}",
+                    mesh.name,
+                    mesh.world_pos
+                );
+            }
+        }
+        assert!(children > 0);
+    }
+
+    #[test]
+    fn house_startroom_door_uses_the_open_track() {
+        let path =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !path.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(path).unwrap()).expect("house");
+        let door = scene
+            .dynamic_meshes
+            .iter()
+            .find(|mesh| mesh.name == "::startroom::New mesh 53::door.DO")
+            .expect("front door");
+        let anim = door.opening_anim().expect("open track");
+        assert_eq!(anim.name, "open");
+        assert!((anim.duration - 1.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn message_parse_reads_a_stored_call() {
+        let msg = Message::parse("::Bathroom::lid.DO->DO_Animate(open);").unwrap();
+        assert_eq!(msg.receiver, "::Bathroom::lid.DO");
+        assert_eq!(msg.verb, "DO_Animate");
+        assert_eq!(msg.args, ["open"]);
+        let bare = Message::parse("DO_Animate(1)").unwrap();
+        assert_eq!(bare.receiver, "this");
+        assert_eq!(bare.args, ["1"]);
+    }
+
+    #[test]
+    fn do_animate_starts_the_named_track() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let mut door = door_mesh(vec![
+            track("open", [0.4, 0.0, 0.0]),
+            track("open2", [0.0; 3]),
+        ]);
+        door.name = "::startroom::door_dummy::Door.DO".into();
+        door.anims[0].scripts = vec!["::startroom::door_dummy::Door.DO->DO_Animate(open2);".into()];
+        scene.dynamic_meshes.push(door);
+        let started = scene.dispatch_message(
+            "::startroom::door_dummy::Door::t1.TRIGGER",
+            "parent->do_animate(open);",
+        );
+        assert!(started);
+        assert_eq!(
+            scene.dynamic_meshes[0].active_track.as_deref(),
+            Some("open")
+        );
+        scene.step_dynamic_anims(1.3);
+        assert_eq!(
+            scene.dynamic_meshes[0].active_track.as_deref(),
+            Some("open2")
+        );
+    }
+
+    #[test]
+    fn retail_do_animate_strings_start_the_named_mesh() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if house.is_file() {
+            let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+            let call = "::Bathroom::lid.DO->DO_Animate(open);";
+            assert!(scene.dispatch_message("", call));
+            let lid = scene
+                .dynamic_meshes
+                .iter()
+                .find(|mesh| mesh.name == "::Bathroom::lid.DO")
+                .expect("lid");
+            assert_eq!(lid.active_track.as_deref(), Some("open"));
+        }
+        let startup = std::path::Path::new(
+            "/tmp/omp-xdata-ref/data/database/levels/front_end/Startup_level.ldb",
+        );
+        if startup.is_file() {
+            let mut scene = parse_ldb_scene(&std::fs::read(startup).unwrap()).expect("startup");
+            let call = "::startroom::cam_rotator::cam_rotator::altitude::camera.DO->DO_Animate(1);";
+            assert!(scene.dispatch_message("", call));
+            let cam = scene
+                .dynamic_meshes
+                .iter()
+                .find(|mesh| mesh.name.ends_with("altitude::camera.DO"))
+                .expect("camera");
+            assert_eq!(cam.active_track.as_deref(), Some("1"));
+        }
+    }
+
+    #[test]
+    fn test_dispatch_t_enable_disables_trigger() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.triggers.push(SceneTrigger {
+            name: "::Bathroom::t_toilet.TRIGGER".into(),
+            room_id: 0,
+            pos: [0.0; 3],
+            radius: 0.2,
+            trigger_type: 0,
+            enabled: true,
+        });
+        let dispatched = scene.dispatch_message(
+            "::Bathroom::lid.DO",
+            "::Bathroom::t_toilet.TRIGGER->T_Enable(false);",
+        );
+        assert!(
+            dispatched,
+            "T_Enable must be recognized by dispatch_message"
+        );
+        let trigger = scene
+            .triggers
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case("::Bathroom::t_toilet.TRIGGER"))
+            .expect("trigger must exist");
+        assert!(!trigger.enabled, "T_Enable(false) must disable the trigger");
+    }
+
+    #[test]
+    fn retail_t_enable_disables_the_bathroom_trigger() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let name = "::Bathroom::t_toilet.TRIGGER";
+        assert!(
+            scene
+                .triggers
+                .iter()
+                .any(|t| t.name.eq_ignore_ascii_case(name) && t.enabled),
+            "parsed trigger starts enabled"
+        );
+        assert!(scene.dispatch_message(
+            "::Bathroom::lid.DO",
+            "::Bathroom::t_toilet.TRIGGER->T_Enable(false);",
+        ));
+        let trigger = scene
+            .triggers
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(name))
+            .expect("trigger");
+        assert!(!trigger.enabled);
+    }
+
+    #[test]
+    fn unparsed_emitter_fails_closed() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.triggers.push(SceneTrigger {
+            name: "::Bathroom::t_toilet.TRIGGER".into(),
+            room_id: 0,
+            pos: [0.0; 3],
+            radius: 0.2,
+            trigger_type: 0,
+            enabled: true,
+        });
+        let res = scene.dispatch_message(
+            "::Bathroom::lid.DO",
+            "::Bathroom::water_faucet->PS_StopAllEmissions(\"\");",
+        );
+        assert!(!res, "unparsed emitter receiver must fail closed");
+        assert!(scene.triggers[0].enabled);
+        assert!(scene.sound_queue.is_empty());
+    }
+
+    #[test]
+    fn test_dispatch_a_play3d_sound_on_action_button_trigger() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let receiver = "::babys_room::New mesh 24::Action button trigger 01";
+        scene.triggers.push(SceneTrigger {
+            name: receiver.into(),
+            room_id: 0,
+            pos: [0.0; 3],
+            radius: 0.2,
+            trigger_type: 0,
+            enabled: true,
+        });
+        scene.sound_catalogs.insert(
+            "dynamic".into(),
+            "[door_wood_locked] // rattle\n{\n[Sound]\nFilename = dynamic\\door\\door_wood_locked3.wav;\n}\n"
+                .into(),
+        );
+        let dispatched = scene.dispatch_message(
+            "::babys_room::New mesh 24",
+            "::babys_room::New mesh 24::Action button trigger 01->A_Play3DSound(dynamic, door_wood_locked, \"\");",
+        );
+        assert!(
+            dispatched,
+            "A_Play3DSound on an action button trigger must dispatch"
+        );
+        assert_eq!(scene.sound_queue.len(), 1);
+        assert_eq!(scene.sound_queue[0].category, "dynamic");
+        assert_eq!(scene.sound_queue[0].cue, "door_wood_locked");
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"dynamic\door\door_wood_locked3.wav")
+        );
+    }
+
+    #[test]
+    fn retail_a_play3dsound_queues_the_locked_door_cue() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        let catalog = std::path::Path::new("/tmp/omp-xdata-ref/data/database/sounds/dynamic.txt");
+        if !house.is_file() || !catalog.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let receiver = "::babys_room::New mesh 24::Action button trigger 01";
+        let near: Vec<_> = scene
+            .triggers
+            .iter()
+            .filter(|trigger| {
+                trigger
+                    .name
+                    .to_ascii_lowercase()
+                    .contains("action button trigger 01")
+            })
+            .map(|trigger| trigger.name.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            scene.triggers.iter().any(|trigger| {
+                trigger.name.eq_ignore_ascii_case(receiver)
+                    || trigger
+                        .name
+                        .eq_ignore_ascii_case(&format!("{receiver}.TRIGGER"))
+            }),
+            "parsed names: {near:?}"
+        );
+        scene
+            .sound_catalogs
+            .insert("dynamic".into(), std::fs::read_to_string(catalog).unwrap());
+        let call = format!("{receiver}->A_Play3DSound(dynamic, door_wood_locked, \"\");");
+        assert!(scene.dispatch_message("::babys_room::New mesh 24", &call));
+        assert_eq!(scene.sound_queue.len(), 1);
+        assert_eq!(scene.sound_queue[0].cue, "door_wood_locked");
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"dynamic\door\door_wood_locked3.wav")
+        );
+    }
+
+    #[test]
+    fn e_near_the_action_button_queues_the_locked_door() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        let catalog = std::path::Path::new("/tmp/omp-xdata-ref/data/database/sounds/dynamic.txt");
+        if !house.is_file() || !catalog.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let fsm_name = "::babys_room::New mesh 24::Action button trigger 01";
+        let call = format!("{fsm_name}->A_Play3DSound(dynamic, door_wood_locked, \"\");");
+        let fsm = scene
+            .fsms
+            .iter()
+            .find(|fsm| fsm.name.eq_ignore_ascii_case(fsm_name))
+            .expect("action fsm");
+        let activate = fsm
+            .hooks
+            .iter()
+            .find(|(name, _, _)| name.eq_ignore_ascii_case("T_Activate"))
+            .expect("activate");
+        assert!(
+            activate.1.iter().any(|act| act == &call),
+            "unconditional={:?} states={:?}",
+            activate.1,
+            activate.2
+        );
+        scene
+            .sound_catalogs
+            .insert("dynamic".into(), std::fs::read_to_string(catalog).unwrap());
+        let trigger = scene
+            .triggers
+            .iter()
+            .find(|trigger| {
+                trigger.name.eq_ignore_ascii_case(fsm_name)
+                    || trigger
+                        .name
+                        .eq_ignore_ascii_case(&format!("{fsm_name}.TRIGGER"))
+            })
+            .expect("trigger");
+        let origins: BTreeMap<i32, [f32; 3]> = scene
+            .rooms
+            .iter()
+            .map(|room| (room.id, room.world_origin))
+            .collect();
+        let ro = origins.get(&trigger.room_id).copied().unwrap_or([0.0; 3]);
+        let at = [
+            ro[0] + trigger.pos[0],
+            ro[1] + trigger.pos[1],
+            ro[2] + trigger.pos[2],
+        ];
+        assert!(scene.activate_nearest_trigger(&origins, at, 36.0));
+        assert_eq!(scene.sound_queue.len(), 1);
+        assert_eq!(scene.sound_queue[0].cue, "door_wood_locked");
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"dynamic\door\door_wood_locked3.wav")
+        );
+        scene.sound_queue.clear();
+        let far = [at[0] + 100.0, at[1], at[2]];
+        assert!(!scene.activate_nearest_trigger(&origins, far, 36.0));
+        assert!(scene.sound_queue.is_empty());
+    }
+
+    #[test]
+    fn test_dispatch_do_hide_hides_dynamic_mesh() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let mut mesh = door_mesh(Vec::new());
+        mesh.name = "::Bathroom::glass01.DO".into();
+        mesh.hidden = false;
+        scene.dynamic_meshes.push(mesh);
+        let dispatched = scene.dispatch_message(
+            "::Bathroom::glass01.DO",
+            "::Bathroom::glass01.DO->do_hide(true);",
+        );
+        assert!(dispatched, "do_hide must be recognized by dispatch_message");
+        let mesh = scene
+            .dynamic_meshes
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case("::Bathroom::glass01.DO"))
+            .expect("glass mesh must exist");
+        assert!(mesh.hidden, "do_hide(true) must set mesh.hidden == true");
+    }
+
+    #[test]
+    fn glass_death_hook_hides_the_mesh() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let fsm = scene
+            .fsms
+            .iter()
+            .find(|fsm| fsm.name.eq_ignore_ascii_case("::Bathroom::glass01"))
+            .expect("glass fsm");
+        let death = fsm
+            .hooks
+            .iter()
+            .find(|(name, _, _)| name.eq_ignore_ascii_case("DO_OnDeath"))
+            .expect("death hook");
+        assert!(
+            death
+                .1
+                .iter()
+                .any(|act| act.eq_ignore_ascii_case("::Bathroom::glass01.DO->do_hide(true);")),
+            "hooks={:?}",
+            fsm.hooks
+                .iter()
+                .map(|(name, acts, states)| (name.clone(), acts.clone(), states.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fsm.startup_actions,
+            ["::Bathroom::glass01.DO->DO_SetHitpoints(20);"]
+        );
+        let bullet = fsm
+            .hooks
+            .iter()
+            .find(|(name, _, _)| name.eq_ignore_ascii_case("DO_BulletCollides"))
+            .map(|(_, acts, _)| acts.as_slice())
+            .unwrap_or(&[]);
+        assert!(bullet.is_empty());
+        let projectile = "::Bathroom::glass01->P_CreateProjectile(debris_glass, 1);";
+        assert!(
+            death.1.iter().any(|act| act == projectile),
+            "death={:?}",
+            death.1
+        );
+        assert!(!scene.dispatch_message("::Bathroom::glass01", projectile));
+        assert!(scene.sound_queue.is_empty());
+    }
+
+    #[test]
+    fn toilet_lid_open_is_the_activate_hook() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let fsm = scene
+            .fsms
+            .iter()
+            .find(|fsm| fsm.name.eq_ignore_ascii_case("::Bathroom::t_toilet"))
+            .expect("toilet fsm");
+        assert_eq!(fsm.states, ["closed", "open"]);
+        assert_eq!(fsm.default_state, "open");
+        let activate = fsm
+            .hooks
+            .iter()
+            .find(|(name, _, _)| name == "T_Activate")
+            .expect("activate");
+        assert!(activate.1.is_empty(), "unconditional={:?}", activate.1);
+        assert_eq!(
+            activate.2,
+            [
+                (
+                    "closed".to_string(),
+                    vec![
+                        "::Bathroom::lid.DO->DO_Animate(open);".to_string(),
+                        "::Bathroom::t_toilet.TRIGGER->T_Enable(false);".to_string(),
+                    ],
+                ),
+                (
+                    "open".to_string(),
+                    vec![
+                        "::Bathroom::lid.DO->DO_Animate(close);".to_string(),
+                        "::Bathroom::t_toilet.TRIGGER->T_Enable(false);".to_string(),
+                    ],
+                ),
+            ]
+        );
+        let lid = scene
+            .dynamic_meshes
+            .iter()
+            .find(|mesh| mesh.name.eq_ignore_ascii_case("::Bathroom::lid.DO"))
+            .expect("lid");
+        let names: Vec<_> = lid.anims.iter().map(|anim| anim.name.as_str()).collect();
+        assert_eq!(names, ["close", "open"], "anims={names:?}");
+    }
+
+    #[test]
+    fn bathroom_unconditional_hooks_outside_glass_use_known_verbs() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let known = [
+            "do_animate",
+            "t_enable",
+            "a_play3dsound",
+            "do_hide",
+            "do_sethitpoints",
+            "ps_starteffect",
+            "ps_stopallemissions",
+            "p_createprojectile",
+        ];
+        let mut other = Vec::new();
+        for fsm in scene.fsms.iter().filter(|fsm| {
+            fsm.name.to_ascii_lowercase().contains("bathroom")
+                && !fsm.name.eq_ignore_ascii_case("::Bathroom::glass01")
+        }) {
+            for (hook, acts, _) in &fsm.hooks {
+                for act in acts {
+                    let Some(msg) = Message::parse(act) else {
+                        continue;
+                    };
+                    let verb = msg.verb.to_ascii_lowercase();
+                    if !known.contains(&verb.as_str()) {
+                        other.push(format!("{} / {} / {act}", fsm.name, hook));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            other,
+            [
+                "::Bathroom::camera2 / start / ::Bathroom::camera2.DO->CAM_AttachToDO(100, false);",
+                "::Bathroom::lid / DO_MovedToInvalidPosition / ::Bathroom::lid.DO->DO_InvertAnimation();",
+                "::Bathroom::water_faucet / T_Activate / ::Bathroom::water_faucet->A_StopAll3DSounds(\"\");",
+            ]
+        );
+        let faucet = scene
+            .fsms
+            .iter()
+            .find(|fsm| fsm.name.eq_ignore_ascii_case("::Bathroom::water_faucet"))
+            .expect("faucet");
+        let activate = faucet
+            .hooks
+            .iter()
+            .find(|(name, _, _)| name == "T_Activate")
+            .expect("faucet activate");
+        assert!(activate.2.is_empty(), "states={:?}", activate.2);
+        assert_eq!(
+            activate.1,
+            [
+                "::Bathroom::water_faucet->PS_StopAllEmissions(\"\");",
+                "::Bathroom::water_faucet->A_StopAll3DSounds(\"\");",
+                "::Bathroom::water_faucet->ps_starteffect(faucet_open_clear, \"\");",
+                "::Bathroom::water_faucet->A_Play3DSound(dynamic, faucet_open, \"\");",
+            ]
+        );
+    }
+
+    #[test]
+    fn four_beretta_shots_break_the_bathroom_glass() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        scene.apply_startup_hitpoints();
+        let index = scene
+            .dynamic_meshes
+            .iter()
+            .position(|mesh| mesh.name.eq_ignore_ascii_case("::Bathroom::glass01.DO"))
+            .expect("glass");
+        assert_eq!(scene.dynamic_meshes[index].hitpoints, Some(20));
+        assert!(!scene.dynamic_meshes[index].hidden);
+        for _ in 0..3 {
+            assert!(!scene.damage_mesh(index, 5));
+            assert!(!scene.dynamic_meshes[index].hidden);
+        }
+        assert!(scene.damage_mesh(index, 5));
+        assert!(scene.dynamic_meshes[index].hidden);
+        assert_eq!(scene.dynamic_meshes[index].hitpoints, Some(0));
+    }
+
+    #[test]
+    fn four_beretta_shots_break_the_second_bathroom_pane() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        scene.apply_startup_hitpoints();
+        let index = scene
+            .dynamic_meshes
+            .iter()
+            .position(|mesh| mesh.name.eq_ignore_ascii_case("::Bathroom::glass02.DO"))
+            .expect("glass02");
+        assert_eq!(scene.dynamic_meshes[index].hitpoints, Some(20));
+        for _ in 0..3 {
+            assert!(!scene.damage_mesh(index, 5));
+        }
+        assert!(scene.damage_mesh(index, 5));
+        assert!(scene.dynamic_meshes[index].hidden);
+        assert_eq!(scene.dynamic_meshes[index].hitpoints, Some(0));
+    }
+
+    #[test]
+    fn house_death_hooks_that_do_not_start_with_hide() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let mut other = Vec::new();
+        for fsm in &scene.fsms {
+            let Some(first) = fsm.hooks.iter().find_map(|(name, acts, _)| {
+                if name.eq_ignore_ascii_case("DO_OnDeath") {
+                    acts.first().cloned()
+                } else {
+                    None
+                }
+            }) else {
+                continue;
+            };
+            let Some(msg) = Message::parse(&first) else {
+                continue;
+            };
+            if !msg.verb.eq_ignore_ascii_case("do_hide") {
+                other.push(format!("{} / {first}", fsm.name));
+            }
+        }
+        assert!(other.is_empty(), "{other:?}");
+    }
+
+    #[test]
+    fn startup_hides_the_broken_entrance_tv() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let hidden_at_start = [
+            "::entrance05::New mesh 57::tv5::tv01.DO",
+            "::entrance05::New mesh 57::tv5::tv02.DO",
+            "::entrance05::New mesh 57::tv5::tv03.DO",
+            "::entrance05::New mesh 57::tv5::tv04.DO",
+            "::entrance05::New mesh 57::tv5::tv_broken.DO",
+        ];
+        for name in hidden_at_start {
+            let mesh = scene
+                .dynamic_meshes
+                .iter()
+                .find(|mesh| mesh.name.eq_ignore_ascii_case(name))
+                .expect(name);
+            assert!(!mesh.hidden, "{name}");
+        }
+        scene.apply_startup_hides();
+        for name in hidden_at_start {
+            let mesh = scene
+                .dynamic_meshes
+                .iter()
+                .find(|mesh| mesh.name.eq_ignore_ascii_case(name))
+                .expect(name);
+            assert!(mesh.hidden, "{name}");
+        }
+        let glass = scene
+            .dynamic_meshes
+            .iter()
+            .find(|mesh| mesh.name.eq_ignore_ascii_case("::Bathroom::glass01.DO"))
+            .expect("glass");
+        assert!(!glass.hidden);
+    }
+
+    #[test]
+    fn startup_disables_the_bathroom_muffle_trigger() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let muffle = scene
+            .triggers
+            .iter()
+            .find(|trigger| {
+                trigger
+                    .name
+                    .eq_ignore_ascii_case("::Bathroom::muffle_sound_trigger.TRIGGER")
+            })
+            .expect("muffle");
+        assert!(muffle.enabled);
+        let toilet = scene
+            .triggers
+            .iter()
+            .find(|trigger| {
+                trigger
+                    .name
+                    .eq_ignore_ascii_case("::Bathroom::t_toilet.TRIGGER")
+            })
+            .expect("toilet");
+        assert!(toilet.enabled);
+        scene.apply_startup_enables();
+        let muffle = scene
+            .triggers
+            .iter()
+            .find(|trigger| {
+                trigger
+                    .name
+                    .eq_ignore_ascii_case("::Bathroom::muffle_sound_trigger.TRIGGER")
+            })
+            .expect("muffle");
+        assert!(!muffle.enabled);
+        let toilet = scene
+            .triggers
+            .iter()
+            .find(|trigger| {
+                trigger
+                    .name
+                    .eq_ignore_ascii_case("::Bathroom::t_toilet.TRIGGER")
+            })
+            .expect("toilet");
+        assert!(toilet.enabled);
+    }
+
+    #[test]
+    fn retail_do_hide_hides_bathroom_glass() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !house.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let name = "::Bathroom::glass01.DO";
+        let mesh = scene
+            .dynamic_meshes
+            .iter()
+            .find(|mesh| mesh.name.eq_ignore_ascii_case(name))
+            .expect("glass mesh");
+        assert!(!mesh.hidden);
+        assert!(scene.dispatch_message(name, "::Bathroom::glass01.DO->do_hide(true);"));
+        let mesh = scene
+            .dynamic_meshes
+            .iter()
+            .find(|mesh| mesh.name.eq_ignore_ascii_case(name))
+            .expect("glass mesh");
+        assert!(mesh.hidden);
+    }
+
+    #[test]
+    fn test_dispatch_a_play3d_sound_on_dynamic_mesh_without_do_suffix() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.sound_catalogs.insert(
+            "breakable".into(),
+            "[window_break_medium] // Glass breaking\n{\n[Sound]\nFilename = breakable\\glass\\break_glass_medium.wav;\n}\n"
+                .into(),
+        );
+        let mut mesh = door_mesh(Vec::new());
+        mesh.name = "::Bathroom::glass01.DO".into();
+        mesh.hidden = true;
+        scene.dynamic_meshes.push(mesh);
+        let dispatched = scene.dispatch_message(
+            "::Bathroom::glass01.DO",
+            "::Bathroom::glass01->A_Play3DSound(breakable, window_break_medium, \"\");",
+        );
+        assert!(
+            dispatched,
+            "a_play3dsound must resolve ::Bathroom::glass01 to ::Bathroom::glass01.DO"
+        );
+        assert_eq!(scene.sound_queue.len(), 1);
+        assert_eq!(scene.sound_queue[0].cue, "window_break_medium");
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"breakable\glass\break_glass_medium.wav")
+        );
+    }
+
+    #[test]
+    fn retail_glass_break_sound_resolves_the_mesh_without_do_suffix() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        let catalog = std::path::Path::new("/tmp/omp-xdata-ref/data/database/sounds/breakable.txt");
+        if !house.is_file() || !catalog.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        assert!(scene
+            .dynamic_meshes
+            .iter()
+            .any(|mesh| mesh.name.eq_ignore_ascii_case("::Bathroom::glass01.DO")));
+        scene.sound_catalogs.insert(
+            "breakable".into(),
+            std::fs::read_to_string(catalog).unwrap(),
+        );
+        assert!(scene.dispatch_message(
+            "::Bathroom::glass01.DO",
+            "::Bathroom::glass01->A_Play3DSound(breakable, window_break_medium, \"\");",
+        ));
+        assert_eq!(scene.sound_queue.len(), 1);
+        assert_eq!(scene.sound_queue[0].cue, "window_break_medium");
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"breakable\glass\break_glass_medium.wav")
+        );
+    }
+
+    #[test]
+    fn test_dispatch_drawer_opener_trigger_sound() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.sound_catalogs.insert(
+            "dynamic".into(),
+            "[Wooden_Desk_Drawer_Open]\n{\n[Sound]\nFilename = dynamic\\door\\Wooden_Desk_Drawer_Open.wav;\n}\n"
+                .into(),
+        );
+        scene.triggers.push(SceneTrigger {
+            name: "::entrance03::New mesh 62::drawer::drawer-opener.TRIGGER".into(),
+            room_id: 0,
+            pos: [0.0; 3],
+            radius: 0.2,
+            trigger_type: 0,
+            enabled: true,
+        });
+        let dispatched = scene.dispatch_message(
+            "::entrance03::New mesh 62::drawer.DO",
+            "::entrance03::New mesh 62::drawer::drawer-opener->A_Play3DSound(dynamic, Wooden_Desk_Drawer_Open, \"\");",
+        );
+        assert!(
+            dispatched,
+            "a_play3dsound must resolve drawer-opener to its .TRIGGER entity record"
+        );
+        assert_eq!(scene.sound_queue.len(), 1);
+        assert_eq!(scene.sound_queue[0].cue, "Wooden_Desk_Drawer_Open");
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"dynamic\door\Wooden_Desk_Drawer_Open.wav")
+        );
+    }
+
+    #[test]
+    fn retail_drawer_sound_resolves_drawer_opener_trigger() {
+        let house =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        let catalog = std::path::Path::new("/tmp/omp-xdata-ref/data/database/sounds/dynamic.txt");
+        if !house.is_file() || !catalog.is_file() {
+            return;
+        }
+        let mut scene = parse_ldb_scene(&std::fs::read(house).unwrap()).expect("house");
+        let near: Vec<_> = scene
+            .triggers
+            .iter()
+            .filter(|trigger| trigger.name.to_ascii_lowercase().contains("drawer-opener"))
+            .map(|trigger| trigger.name.clone())
+            .collect::<Vec<_>>();
+        scene
+            .sound_catalogs
+            .insert("dynamic".into(), std::fs::read_to_string(catalog).unwrap());
+        let dispatched = scene.dispatch_message(
+            "::entrance03::New mesh 62::drawer.DO",
+            "::entrance03::New mesh 62::drawer::drawer-opener->A_Play3DSound(dynamic, Wooden_Desk_Drawer_Open, \"\");",
+        );
+        assert!(dispatched, "parsed trigger names: {near:?}");
+        let queued = scene.sound_queue.last().expect("queued sound");
+        assert_eq!(queued.cue, "Wooden_Desk_Drawer_Open");
+        assert_eq!(
+            queued.filename.as_deref(),
+            Some(r"dynamic\door\Wooden_Desk_Drawer_Open.wav")
+        );
+    }
+}

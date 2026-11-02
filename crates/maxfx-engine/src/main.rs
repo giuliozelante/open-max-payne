@@ -1,21 +1,20 @@
 use maxfx_engine::{
-    classify_ldb_lead, count_ras_ldb_leading_vec3, discover_ras_files, list_level_packages,
-    looks_like_ldb_or_ai, looks_like_memory_file_ai, looks_like_memory_file_ldb,
-    looks_like_ras_ldb, open_archive, parse_levels_txt, parse_ras_ldb_faces,
-    parse_ras_ldb_header, parse_ras_ldb_import_exits_at, parse_ras_ldb_import_lightmaps_at,
+    classify_ldb_lead, count_ras_ldb_leading_vec3, discover_ras_files,
+    find_ras_ldb_import_do_hooks_at, list_level_packages, looks_like_ldb_or_ai,
+    looks_like_memory_file_ai, looks_like_memory_file_ldb, looks_like_ras_ldb, open_archive,
+    parse_levels_txt, parse_ras_ai_preamble, parse_ras_ldb_faces, parse_ras_ldb_header,
+    parse_ras_ldb_import_character_head_at, parse_ras_ldb_import_exits_at,
+    parse_ras_ldb_import_lightmaps_at, parse_ras_ldb_import_lights_at,
     parse_ras_ldb_import_material_categories_at, parse_ras_ldb_import_materials_at,
-    parse_ras_ldb_import_character_head_at, parse_ras_ldb_import_lights_at,
     parse_ras_ldb_import_mesh_attribs_at, parse_ras_ldb_import_mesh_polys_at,
     parse_ras_ldb_import_point_stream_at, parse_ras_ldb_import_static_mesh_at,
-    parse_ras_ldb_import_textures, parse_ras_ldb_section_at, parse_ras_ai_preamble,
-    ras_ldb_import_entity_names_at, ras_ldb_import_jumppoint_names_at,
-    ras_ldb_import_tele_names_at, soft_walk_mf_tags,
-    ras_ldb_after_geometry,
+    parse_ras_ldb_import_textures, parse_ras_ldb_section_at, ras_ldb_after_geometry,
     ras_ldb_after_import_materials, ras_ldb_count_section_end, ras_ldb_first_mf_section_body,
-    ras_ldb_import_paths, ras_ldb_import_stats, ras_ldb_vec3_section_end, split_ldb_records,
-    walk_ras_ldb_known_sections,
-    LDB_IMPORT_VERSION, LDB_RAS_MAGIC, LDB_SECTION_KIND_MF, LDB_SECTION_KIND_VEC3,
-    LDB_SECTION_TAG,
+    ras_ldb_import_do_scripts_at, ras_ldb_import_entity_names_at,
+    ras_ldb_import_jumppoint_names_at, ras_ldb_import_paths, ras_ldb_import_stats,
+    ras_ldb_import_tele_names_at, ras_ldb_vec3_section_end, sample_ras_ldb_vec3_preview,
+    show_vec3_preview_window, soft_walk_mf_tags, split_ldb_records, walk_ras_ldb_known_sections,
+    LDB_IMPORT_VERSION, LDB_RAS_MAGIC, LDB_SECTION_KIND_MF, LDB_SECTION_KIND_VEC3, LDB_SECTION_TAG,
 };
 use openras::RasArchive;
 use std::env;
@@ -23,23 +22,77 @@ use std::path::Path;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
+    let mut args = env::args().skip(1).peekable();
+    let mut want_window = env::var("OPENMAXFX_ENGINE_WINDOW").unwrap_or_default() == "1";
+    while args.peek().is_some_and(|a| a.starts_with('-')) {
+        match args.next().as_deref() {
+            Some("--window") => want_window = true,
+            Some("-h" | "--help") => {
+                eprintln!(
+                    "usage: maxfx-engine [--window] <game-dir|archive.ras|archive.mpm|level.ldb|.ai>"
+                );
+                return ExitCode::SUCCESS;
+            }
+            Some(other) => {
+                eprintln!("unknown flag {other}");
+                return ExitCode::FAILURE;
+            }
+            None => break,
+        }
+    }
     let Some(path) = args.next() else {
-        eprintln!("usage: maxfx-engine <archive.ras|archive.mpm|game-dir|level.ldb|.ai>");
+        eprintln!(
+            "usage: maxfx-engine [--window] <archive.ras|archive.mpm|game-dir|level.ldb|.ai>"
+        );
         return ExitCode::FAILURE;
     };
     let p = Path::new(&path);
     if p.is_file() {
         let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if ext.eq_ignore_ascii_case("kf2") || ext.eq_ignore_ascii_case("skd") {
+            return match std::fs::read(p) {
+                Ok(data) => match maxfx_engine::kf2::parse_kf2_or_skd(&data) {
+                    Some(sum) => {
+                        println!(
+                            "{}: {} bytes, {} chunk(s), total_vec3={}, strings={:?}",
+                            p.display(),
+                            sum.file_size,
+                            sum.chunks.len(),
+                            sum.total_vec3,
+                            &sum.all_strings[..sum.all_strings.len().min(12)]
+                        );
+                        for c in &sum.chunks {
+                            println!(
+                                "  chunk @{:#x}: id={:#010x} ver={} size={} vec3={} strs={:?}",
+                                c.offset,
+                                c.id,
+                                c.version,
+                                c.size,
+                                c.vec3_count,
+                                &c.strings[..c.strings.len().min(6)]
+                            );
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    None => {
+                        eprintln!("error: not a valid 0x0c chunked KF2/SKD file");
+                        ExitCode::FAILURE
+                    }
+                },
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         if ext.eq_ignore_ascii_case("ldb") || ext.eq_ignore_ascii_case("ai") {
             return match std::fs::read(p) {
                 Ok(data) => {
                     if looks_like_ras_ldb(&data) {
                         let h = parse_ras_ldb_header(&data).unwrap();
                         let nvec = count_ras_ldb_leading_vec3(&data);
-                        let end = ras_ldb_vec3_section_end(&data).unwrap_or_else(|| {
-                            ras_ldb_count_section_end(&h)
-                        });
+                        let end = ras_ldb_vec3_section_end(&data)
+                            .unwrap_or_else(|| ras_ldb_count_section_end(&h));
                         println!(
                             "{}: {} bytes, RAS .ldb magic {:#x} count={} flag={} leading_vec3={} (count_match={})",
                             p.display(),
@@ -171,8 +224,10 @@ fn main() -> ExitCode {
                                                 if let Some((exits, eend)) =
                                                     parse_ras_ldb_import_exits_at(&data, lend, 64)
                                                 {
-                                                    let with_pos =
-                                                        exits.iter().filter(|e| e.pos.is_some()).count();
+                                                    let with_pos = exits
+                                                        .iter()
+                                                        .filter(|e| e.pos.is_some())
+                                                        .count();
                                                     println!(
                                                         "  import exits @{lend:#x}: shown={} with_room={with_pos} end={eend:#x}",
                                                         exits.len()
@@ -197,108 +252,152 @@ fn main() -> ExitCode {
                                                         println!(
                                                             "  import point stream @{eend:#x}: bodies={pn} end={pend:#x}"
                                                         );
-                                                            let mut mesh_off = pend;
-                                                            let mut mesh_n = 0;
-                                                            while let Some((mesh, mend)) =
-                                                                parse_ras_ldb_import_static_mesh_at(
-                                                                    &data, mesh_off,
-                                                                )
-                                                            {
-                                                                mesh_n += 1;
-                                                                let [x, y, z] = mesh.pos;
-                                                                println!(
+                                                        let mut mesh_off = pend;
+                                                        let mut mesh_n = 0;
+                                                        while let Some((mesh, mend)) =
+                                                            parse_ras_ldb_import_static_mesh_at(
+                                                                &data, mesh_off,
+                                                            )
+                                                        {
+                                                            mesh_n += 1;
+                                                            let [x, y, z] = mesh.pos;
+                                                            println!(
                                                                     "  import static mesh[{mesh_n}] @{mesh_off:#x}: a={} b={} points={} pos=({x:.1},{y:.1},{z:.1}) end={mend:#x}",
                                                                     mesh.a, mesh.b, mesh.point_count
                                                                 );
-                                                                let mut next = mend;
-                                                                if let Some((h0, polys, pend2)) =
-                                                                    parse_ras_ldb_import_mesh_polys_at(
-                                                                        &data, mend,
-                                                                    )
-                                                                {
-                                                                    println!(
+                                                            let mut next = mend;
+                                                            if let Some((h0, polys, pend2)) =
+                                                                parse_ras_ldb_import_mesh_polys_at(
+                                                                    &data, mend,
+                                                                )
+                                                            {
+                                                                println!(
                                                                         "  import mesh polys @{mend:#x}: hdr={h0} shown={} end={pend2:#x}",
                                                                         polys.len()
                                                                     );
-                                                                    next = pend2;
-                                                                }
-                                                                if let Some((ac, attrs, aend)) =
-                                                                    parse_ras_ldb_import_mesh_attribs_at(
-                                                                        &data, next,
-                                                                    )
-                                                                {
-                                                                    println!(
+                                                                next = pend2;
+                                                            }
+                                                            if let Some((ac, attrs, aend)) =
+                                                                parse_ras_ldb_import_mesh_attribs_at(
+                                                                    &data, next,
+                                                                )
+                                                            {
+                                                                println!(
                                                                         "  import mesh attribs @{next:#x}: count={ac} shown={} end={aend:#x}",
                                                                         attrs.len()
                                                                     );
-                                                                    next = aend;
-                                                                }
-                                                                if next <= mesh_off {
-                                                                    break;
-                                                                }
-                                                                mesh_off = next;
-                                                                if mesh_n >= 32 {
-                                                                    break;
-                                                                }
+                                                                next = aend;
                                                             }
-                                                            if let Some((cc, cstart)) =
-                                                                parse_ras_ldb_import_character_head_at(
-                                                                    &data, mesh_off,
-                                                                )
-                                                            {
-                                                                let jumps =
-                                                                    ras_ldb_import_jumppoint_names_at(
-                                                                        &data, cstart, 16,
-                                                                    );
-                                                                let ents =
-                                                                    ras_ldb_import_entity_names_at(
-                                                                        &data, cstart, 48,
-                                                                    );
-                                                                let (tags, wend) =
-                                                                    soft_walk_mf_tags(
-                                                                        &data, mesh_off, 500_000,
-                                                                    );
-                                                                println!(
+                                                            if next <= mesh_off {
+                                                                break;
+                                                            }
+                                                            mesh_off = next;
+                                                            if mesh_n >= 32 {
+                                                                break;
+                                                            }
+                                                        }
+                                                        if let Some((cc, cstart)) =
+                                                            parse_ras_ldb_import_character_head_at(
+                                                                &data, mesh_off,
+                                                            )
+                                                        {
+                                                            let jumps =
+                                                                ras_ldb_import_jumppoint_names_at(
+                                                                    &data, cstart, 16,
+                                                                );
+                                                            let ents =
+                                                                ras_ldb_import_entity_names_at(
+                                                                    &data, cstart, 48,
+                                                                );
+                                                            let (tags, wend) = soft_walk_mf_tags(
+                                                                &data, mesh_off, 500_000,
+                                                            );
+                                                            println!(
                                                                     "  import character head @{mesh_off:#x}: count={cc} first_name@{cstart:#x} jumppoints={} entities={} soft_tags={tags} walk_end={wend:#x}/{:#x}",
                                                                     jumps.len(),
                                                                     ents.len(),
                                                                     data.len()
                                                                 );
-                                                                for jn in &jumps {
-                                                                    println!("    jump {jn}");
-                                                                }
-                                                                for en in ents.iter().take(12) {
-                                                                    println!("    ent {en}");
-                                                                }
-                                                            } else if let Some((lc, lights, lend)) =
-                                                                parse_ras_ldb_import_lights_at(
-                                                                    &data, mesh_off, 8,
+                                                            for jn in &jumps {
+                                                                println!("    jump {jn}");
+                                                            }
+                                                            for en in ents.iter().take(12) {
+                                                                println!("    ent {en}");
+                                                            }
+                                                            if let Some((at, hooks, hend)) =
+                                                                find_ras_ldb_import_do_hooks_at(
+                                                                    &data,
+                                                                    cstart,
+                                                                    256 * 1024,
                                                                 )
                                                             {
                                                                 println!(
+                                                                    "  import DO hooks @{at:#x}: count={} end={hend:#x}",
+                                                                    hooks.len()
+                                                                );
+                                                                for h in hooks.iter().take(8) {
+                                                                    println!("    {h}");
+                                                                }
+                                                                for sc in
+                                                                    ras_ldb_import_do_scripts_at(
+                                                                        &data, hend, 6,
+                                                                    )
+                                                                {
+                                                                    println!("    script {sc}");
+                                                                }
+                                                            }
+                                                        } else if let Some((lc, lights, lend)) =
+                                                            parse_ras_ldb_import_lights_at(
+                                                                &data, mesh_off, 8,
+                                                            )
+                                                        {
+                                                            println!(
                                                                     "  import lights @{mesh_off:#x}: count={lc} shown={} end={lend:#x}",
                                                                     lights.len()
                                                                 );
-                                                                for lit in &lights {
-                                                                    let [x, y, z] = lit.pos;
-                                                                    println!(
+                                                            for lit in &lights {
+                                                                let [x, y, z] = lit.pos;
+                                                                println!(
                                                                         "    light {} subtype={} params={} pos=({x:.1},{y:.1},{z:.1})",
                                                                         lit.name, lit.subtype, lit.param_count
                                                                     );
-                                                                }
-                                                                let teles = ras_ldb_import_tele_names_at(
+                                                            }
+                                                            let teles =
+                                                                ras_ldb_import_tele_names_at(
                                                                     &data, lend, 24,
                                                                 );
-                                                                if !teles.is_empty() {
-                                                                    println!(
+                                                            if !teles.is_empty() {
+                                                                println!(
                                                                         "  import teles after lights: shown={}",
                                                                         teles.len()
                                                                     );
-                                                                    for t in &teles {
-                                                                        println!("    tele {t}");
-                                                                    }
+                                                                for t in &teles {
+                                                                    println!("    tele {t}");
                                                                 }
                                                             }
+                                                            if let Some((at, hooks, hend)) =
+                                                                find_ras_ldb_import_do_hooks_at(
+                                                                    &data,
+                                                                    lend,
+                                                                    256 * 1024,
+                                                                )
+                                                            {
+                                                                println!(
+                                                                    "  import DO hooks @{at:#x}: count={} end={hend:#x}",
+                                                                    hooks.len()
+                                                                );
+                                                                for h in hooks.iter().take(8) {
+                                                                    println!("    {h}");
+                                                                }
+                                                                for sc in
+                                                                    ras_ldb_import_do_scripts_at(
+                                                                        &data, hend, 6,
+                                                                    )
+                                                                {
+                                                                    println!("    script {sc}");
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -312,6 +411,48 @@ fn main() -> ExitCode {
                                 }
                             }
                             None => println!("  ImportLevel MF head not found after geometry"),
+                        }
+                        if let Some(scene) = maxfx_engine::scene::parse_ldb_scene(&data) {
+                            println!(
+                                "  full scene decoded: rooms={} static_meshes={} dyn_meshes={} exits={} jumppoints={} fsms={} chars={} triggers={} items={} point_lights={} consumed={:#x}/{:#x}",
+                                scene.rooms.len(),
+                                scene.static_meshes.len(),
+                                scene.dynamic_meshes.len(),
+                                scene.exits.len(),
+                                scene.jumppoints.len(),
+                                scene.fsms.len(),
+                                scene.characters.len(),
+                                scene.triggers.len(),
+                                scene.items.len(),
+                                scene.point_lights.len(),
+                                scene.bytes_consumed,
+                                data.len()
+                            );
+                            if want_window {
+                                if let Err(e) = maxfx_engine::render3d::run_3d_walkthrough(
+                                    scene,
+                                    p,
+                                    &format!("Open Max Payne 3D — {}", p.display()),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                ) {
+                                    eprintln!("3D walkthrough error: {e}");
+                                    return ExitCode::FAILURE;
+                                }
+                                return ExitCode::SUCCESS;
+                            }
+                        } else if want_window {
+                            let pts = sample_ras_ldb_vec3_preview(&data, 120_000);
+                            println!("  preview window: {} points (Esc to close)", pts.len());
+                            if let Err(e) = show_vec3_preview_window(
+                                &pts,
+                                &format!("maxfx-engine — {}", p.display()),
+                            ) {
+                                eprintln!("preview window: {e}");
+                                return ExitCode::FAILURE;
+                            }
                         }
                         return ExitCode::SUCCESS;
                     }
@@ -383,6 +524,9 @@ fn main() -> ExitCode {
         }
     }
     if p.is_dir() {
+        if want_window {
+            return launch_startup(p);
+        }
         return match discover_ras_files(p) {
             Ok(files) => {
                 println!("{}: {} *.ras", p.display(), files.len());
@@ -445,6 +589,86 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn launch_startup(game_dir: &Path) -> ExitCode {
+    if let Some(video) = maxfx_engine::startup_video_path(game_dir) {
+        println!("startup video {}", video.display());
+        if let Err(e) = maxfx_engine::play_intro_video(&video) {
+            eprintln!("intro: {e} — continuing to the main menu");
+        }
+    } else {
+        println!("startup video: none");
+    }
+    let menu = match maxfx_engine::load_main_menu(game_dir) {
+        Ok(menu) => menu,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(level_id) = maxfx_engine::menu_ui::run_main_menu(&menu) else {
+        println!("quit");
+        return ExitCode::SUCCESS;
+    };
+    println!("start level {level_id}");
+    if let Err(e) = play_level(game_dir, &level_id, true) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// One menu level. `startup_level` plays the rotator camera tracks, then the
+/// comic page, then the next level. Escape or Space skips the tracks.
+fn play_level(game_dir: &Path, level_id: &str, allow_handoff: bool) -> Result<(), String> {
+    let (win, bytes) =
+        maxfx_engine::load_level_by_id(game_dir, level_id).map_err(|e| e.to_string())?;
+    let handoff = if allow_handoff {
+        maxfx_engine::level_handoff(&bytes)
+    } else {
+        None
+    };
+    if handoff.is_none() {
+        let pages = maxfx_engine::level_opening_pages(&bytes);
+        if !pages.is_empty() {
+            println!("opening pages {}", pages.join(", "));
+            let (chrome, shown) = maxfx_engine::load_novel_session(game_dir, &pages);
+            maxfx_engine::menu_ui::show_novel_session(&chrome, &shown);
+        }
+    }
+    let scene = maxfx_engine::scene::parse_ldb_scene(&bytes)
+        .ok_or_else(|| format!("{win} did not decode"))?;
+    let entry = maxfx_engine::level_entry(game_dir, level_id).ok();
+    let player_start = entry.as_ref().and_then(|entry| entry.player_start.clone());
+    let player_skin = entry.as_ref().and_then(|entry| entry.player_skin.clone());
+    let world_sphere = entry.as_ref().and_then(|entry| entry.world_sphere.clone());
+    let title = format!("Open Max Payne — {level_id}");
+    let shot = if handoff.is_some() {
+        maxfx_engine::scene::camera_flyover(&scene)
+    } else {
+        None
+    };
+    maxfx_engine::render3d::run_3d_walkthrough(
+        scene,
+        game_dir,
+        &title,
+        player_start.as_deref(),
+        player_skin.as_deref(),
+        world_sphere.as_deref(),
+        shot,
+    )?;
+    if let Some(hand) = handoff {
+        println!(
+            "handoff {level_id} → {} → {}",
+            hand.novel_page, hand.next_level
+        );
+        let (chrome, shown) =
+            maxfx_engine::load_novel_session(game_dir, std::slice::from_ref(&hand.novel_page));
+        maxfx_engine::menu_ui::show_novel_session(&chrome, &shown);
+        return play_level(game_dir, &hand.next_level, false);
+    }
+    Ok(())
 }
 
 fn extract_levels_txt(arc: &RasArchive) -> Option<String> {

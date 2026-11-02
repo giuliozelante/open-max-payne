@@ -52,10 +52,10 @@ pub fn pse_curve_to_keyframes(parsed: &PseCurveFloats) -> Result<Vec<CurveKeyfra
             if times_monotonic(times) {
                 let mut out = Vec::with_capacity(kf);
                 let vals = &floats[kf..full];
-                for i in 0..kf {
+                for (i, &t) in times.iter().enumerate() {
                     let start = i * channels;
                     out.push(CurveKeyframe {
-                        t: times[i],
+                        t,
                         values: vals[start..start + channels].to_vec(),
                     });
                 }
@@ -66,17 +66,13 @@ pub fn pse_curve_to_keyframes(parsed: &PseCurveFloats) -> Result<Vec<CurveKeyfra
             let times = &floats[..kf];
             let interleaved_ok = channels == 1
                 && floats.len() >= kf * 2
-                && times_monotonic(
-                    &(0..kf)
-                        .map(|i| floats[i * 2])
-                        .collect::<Vec<_>>(),
-                );
+                && times_monotonic(&(0..kf).map(|i| floats[i * 2]).collect::<Vec<_>>());
             if times_monotonic(times) && (channels > 1 || !interleaved_ok) {
                 let mut out = Vec::with_capacity(kf);
-                for i in 0..kf {
+                for (i, &t) in times.iter().enumerate() {
                     let s = floats[kf + i];
                     out.push(CurveKeyframe {
-                        t: times[i],
+                        t,
                         values: vec![s; channels],
                     });
                 }
@@ -112,7 +108,8 @@ pub fn pse_curve_to_keyframes(parsed: &PseCurveFloats) -> Result<Vec<CurveKeyfra
 }
 pub use memory_file::{obj as rps_obj, MemoryFileWriter};
 pub use rps::{
-    encode_rps, parse_rps, pse_header_to_rps_preamble, read_rps, roundtrip_rps, RpsHeader, RpsValue,
+    encode_rps, parse_rps, pse_header_to_rps_preamble, read_rps, roundtrip_rps,
+    validate_rps_game_gates, RpsHeader, RpsValue,
 };
 
 #[derive(Debug, Error)]
@@ -358,10 +355,9 @@ pub fn group_bitmap_stems(stems: &[String]) -> Vec<Vec<String>> {
             .unwrap_or("")
             .to_string();
         match groups.last_mut() {
-            Some(g) if g
-                .last()
-                .and_then(|s| s.rsplit_once('\\').map(|(p, _)| p))
-                == Some(parent.as_str()) =>
+            Some(g)
+                if g.last().and_then(|s| s.rsplit_once('\\').map(|(p, _)| p))
+                    == Some(parent.as_str()) =>
             {
                 g.push(stem.clone());
             }
@@ -374,10 +370,7 @@ pub fn group_bitmap_stems(stems: &[String]) -> Vec<Vec<String>> {
 /// Resolve a stem against a bitmap root (case-insensitive components).
 ///
 /// Tries `.jpg` / `.JPG` then `.pcx` / `.PCX`. Returns `(rps_relative_path, bytes)`.
-pub fn resolve_bitmap_stem(
-    bitmap_root: &std::path::Path,
-    stem: &str,
-) -> Option<Vec<TextureFrame>> {
+pub fn resolve_bitmap_stem(bitmap_root: &std::path::Path, stem: &str) -> Option<Vec<TextureFrame>> {
     use std::fs;
     let parts: Vec<&str> = stem.split('\\').collect();
     if parts.is_empty() {
@@ -610,10 +603,7 @@ pub fn pse_to_rps_export_with_curves(
                         )));
                     }
                     let samples = u8::try_from(sc.values.len() / need).map_err(|_| {
-                        PfxError::Msg(format!(
-                            "curve samples {} > 255",
-                            sc.values.len() / need
-                        ))
+                        PfxError::Msg(format!("curve samples {} > 255", sc.values.len() / need))
                     })?;
                     w.write_curve(ch, samples, &sc.values)?;
                 } else if slot == 1 {
@@ -962,7 +952,10 @@ mod tests {
         .unwrap();
         let walked = parse_rps(&bytes).unwrap();
         assert_eq!(walked.bytes_consumed, bytes.len());
-        assert!(walked.values.iter().all(|v| !matches!(v, RpsValue::Unknown { .. })));
+        assert!(walked
+            .values
+            .iter()
+            .all(|v| !matches!(v, RpsValue::Unknown { .. })));
         let blobs: Vec<_> = walked
             .values
             .iter()
@@ -972,6 +965,15 @@ mod tests {
             })
             .collect();
         assert_eq!(blobs, vec![4, 3]);
+        validate_rps_game_gates(&bytes).unwrap();
+    }
+
+    #[test]
+    fn game_gates_reject_bad_version() {
+        let mut bad = vec![0x14, 0x60, 0x14, 0x06]; // type ok, version 6
+        bad.extend_from_slice(&[0x11, 0]); // pad so parse has something
+        let err = validate_rps_game_gates(&bad).unwrap_err().to_string();
+        assert!(err.contains("Invalid File Version"), "{err}");
     }
 
     #[test]

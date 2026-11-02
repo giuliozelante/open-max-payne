@@ -52,7 +52,8 @@ Done when (north star — open):
   - [x] RASMaker flag parity documented + green on matrix
   - [x] At least one additional native MAX-FX tool beyond archiver (`openpfx` dump)
   - [x] Engine walking skeleton loads a BYOD archive (`maxfx-engine` + skeleton spec)
-  - [ ] Play path can prefer native engine when ready; Wine remains fallback
-  - [ ] `openpfx` PSE→RPS export (`-e` parity) after RPS version REA
+  - [x] Play path can prefer native engine for BYOD smoke; Wine remains fallback
+        (`OPENMAXFX_PLAY=native` + Studio checkbox → `maxfx-engine --window` point preview; epic #16)
+  - [x] `openpfx` PSE→RPS export (`-e` parity) after RPS version REA (`openpfx export` + `validate-rps` gate accept; issue #11)
   - [x] Engine REA note naming archive mount + level-load tokens
   - [x] Decompiled `R_File::loadArchives` → `FindFirstFile("*.RAS")` (+ secondary path)

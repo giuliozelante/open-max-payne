@@ -103,7 +103,7 @@ Payloads follow immediately after both tables, in file-table order. Offset of fi
 | Mode | Meaning |
 |------|---------|
 | 3 | Stored — `compressed_size == uncompressed_size`, raw bytes |
-| 1 | Okumura-style LZSS: 4 KiB ring, fill `0x20`, write pos `0xFEE`, flag bytes, match len = `(low_nibble)+3` |
+| 1 | Okumura-style LZSS framed with a 12-byte header (`b"RA->"` + `uncompressed_size: u32` + `compressed_body_size: u32`), 4 KiB ring, fill `0x20`, write pos `0xFEE`, flag bytes, match len = `(low_nibble)+3` |
 
 `R_File::decompress` (`0x10012fa0`) implements the LZSS decode used for mode 1.
 

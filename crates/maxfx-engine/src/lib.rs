@@ -1,10 +1,15 @@
-//! Native Max Payne 1 engine — walking skeleton only.
-//!
-//! Loads a BYOD RAS/MPM via `openras`. Rendering / gameplay come later
-//! (see `docs/specs/2026-10-30-engine-skeleton.md`).
+//! Native Max Payne 1 engine — level decoder, 3D walkthrough renderer, and KF2/SKD inspector.
+
+pub mod kf2;
+pub mod menu_ui;
+pub mod render3d;
+pub mod scene;
 
 use openras::RasArchive;
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -132,7 +137,7 @@ pub fn parse_ras_ldb_section_at(data: &[u8], offset: usize) -> Option<RasLdbSect
     let kind = data[offset + 1];
     let count = u16::from_le_bytes([data[offset + 2], data[offset + 3]]);
     match kind {
-        LDB_SECTION_KIND_VEC3 => {
+        LDB_SECTION_KIND_VEC3 if offset == 0 || data.get(offset + 5) == Some(&0x16) => {
             if data.len() < offset + 5 {
                 return None;
             }
@@ -142,11 +147,30 @@ pub fn parse_ras_ldb_section_at(data: &[u8], offset: usize) -> Option<RasLdbSect
                 flag: Some(data[offset + 4]),
             })
         }
-        LDB_SECTION_KIND_MF => Some(RasLdbSection {
-            kind,
-            count,
-            flag: None,
-        }),
+        LDB_SECTION_KIND_MF | LDB_SECTION_KIND_VEC3 | 0x14 => {
+            // MemoryFile compressed uint count after 0x1c (`14 <u8>`, `13 <u16>`, `12 <u24>`)
+            let mut i = offset + 1;
+            let count32 = match data.get(i).copied()? {
+                0x14 => {
+                    i += 1;
+                    *data.get(i)? as u32
+                }
+                0x13 => {
+                    i += 1;
+                    u16::from_le_bytes([*data.get(i)?, *data.get(i + 1)?]) as u32
+                }
+                0x12 => {
+                    i += 1;
+                    u32::from_le_bytes([*data.get(i)?, *data.get(i + 1)?, *data.get(i + 2)?, 0])
+                }
+                _ => return None,
+            };
+            Some(RasLdbSection {
+                kind: LDB_SECTION_KIND_MF,
+                count: count32.min(u16::MAX as u32) as u16,
+                flag: None,
+            })
+        }
         _ => Some(RasLdbSection {
             kind,
             count,
@@ -183,6 +207,74 @@ pub fn count_ras_ldb_leading_vec3(data: &[u8]) -> usize {
         i += 13;
     }
     n
+}
+
+/// Sample up to `max` leading geometry vec3s for a native preview frame (#16).
+pub fn sample_ras_ldb_vec3_preview(data: &[u8], max: usize) -> Vec<[f32; 3]> {
+    let mut out = Vec::new();
+    if !looks_like_ras_ldb(data) || max == 0 {
+        return out;
+    }
+    let mut i = LDB_RAS_HEADER_LEN;
+    while out.len() < max && i + 13 <= data.len() && data[i] == 0x16 {
+        i += 1;
+        let x = f32::from_le_bytes(data[i..i + 4].try_into().unwrap_or([0; 4]));
+        let y = f32::from_le_bytes(data[i + 4..i + 8].try_into().unwrap_or([0; 4]));
+        let z = f32::from_le_bytes(data[i + 8..i + 12].try_into().unwrap_or([0; 4]));
+        i += 12;
+        if x.is_finite() && y.is_finite() && z.is_finite() {
+            out.push([x, y, z]);
+        }
+    }
+    out
+}
+
+/// Orthographic point-cloud preview window (BYOD smoke for epic #16). Esc / close to exit.
+pub fn show_vec3_preview_window(points: &[[f32; 3]], title: &str) -> Result<(), String> {
+    use minifb::{Key, Window, WindowOptions};
+    const W: usize = 960;
+    const H: usize = 640;
+    if points.is_empty() {
+        return Err("no preview points".into());
+    }
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_z = f32::INFINITY;
+    let mut max_z = f32::NEG_INFINITY;
+    for p in points {
+        min_x = min_x.min(p[0]);
+        max_x = max_x.max(p[0]);
+        min_z = min_z.min(p[2]);
+        max_z = max_z.max(p[2]);
+    }
+    let dx = (max_x - min_x).max(1.0);
+    let dz = (max_z - min_z).max(1.0);
+    let mut window = Window::new(
+        title,
+        W,
+        H,
+        WindowOptions {
+            resize: false,
+            ..WindowOptions::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    window.set_target_fps(30);
+    let mut buf = vec![0u32; W * H];
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+        buf.fill(0x00101820);
+        for p in points {
+            let u = ((p[0] - min_x) / dx * (W as f32 - 1.0)) as usize;
+            let v = ((p[2] - min_z) / dz * (H as f32 - 1.0)) as usize;
+            let v = H - 1 - v.min(H - 1);
+            let u = u.min(W - 1);
+            buf[v * W + u] = 0x00e8f0ff;
+        }
+        window
+            .update_with_buffer(&buf, W, H)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// One face-like record from a kind-`0x13` MemoryFile body (BYOD Startup).
@@ -354,14 +446,11 @@ pub fn parse_ras_ldb_faces_ex(body: &[u8], max: usize) -> (Vec<RasLdbFace>, usiz
     (out, i)
 }
 
-/// Body slice of the first kind-`0x13` section after a flag-0 vec3 cloud.
+/// Body slice of the first kind-`0x13` section after a vec3 cloud.
 pub fn ras_ldb_first_mf_section_body(data: &[u8]) -> Option<&[u8]> {
     let end = ras_ldb_vec3_section_end(data)?;
-    let sec = parse_ras_ldb_section_at(data, end)?;
-    if sec.kind != LDB_SECTION_KIND_MF {
-        return None;
-    }
-    Some(&data[end + 4..])
+    let (_, body_off) = offset_plus_mf_count(data, end)?;
+    Some(&data[body_off..])
 }
 
 /// Top-level `0x1c` sections with known sizes (vec3 cloud + face `0x13` only).
@@ -716,8 +805,7 @@ pub fn ras_ldb_after_import_materials(data: &[u8]) -> Option<usize> {
 }
 
 /// Separator between ImportLightmap blobs after the first (`00 00 00 01 00 01 18 20`).
-pub const LDB_IMPORT_LIGHTMAP_SEP: [u8; 8] =
-    [0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x18, 0x20];
+pub const LDB_IMPORT_LIGHTMAP_SEP: [u8; 8] = [0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x18, 0x20];
 
 /// Blob marker immediately before each lightmap payload (`0x18 0x20`).
 pub const LDB_IMPORT_LIGHTMAP_MARK: [u8; 2] = [0x18, 0x20];
@@ -980,10 +1068,7 @@ pub fn parse_ras_ldb_import_lights_at(
 ///
 /// Layout: empty `0x1f`, int `0`, count, then named entities (`0d 14` paths,
 /// dual `0x1a` transforms, nested DO_* graphs). Returns `(count, offset_at_first_name)`.
-pub fn parse_ras_ldb_import_character_head_at(
-    data: &[u8],
-    offset: usize,
-) -> Option<(u32, usize)> {
+pub fn parse_ras_ldb_import_character_head_at(data: &[u8], offset: usize) -> Option<(u32, usize)> {
     let mut i = offset;
     if data.get(i) != Some(&LDB_IMPORT_MATERIAL_LIST_TAG) {
         return None;
@@ -1004,12 +1089,103 @@ pub fn parse_ras_ldb_import_character_head_at(
     Some((count, i))
 }
 
-/// Harvest `::…Jumppoint…` names from a character-block window.
-pub fn ras_ldb_import_jumppoint_names_at(
+/// Parse a character `DO_*` hook list at `offset` (BYOD Tutorial.ldb @`0x1f7458f`).
+///
+/// Layout: `0x1f` + count, then ×N: `0x0d` `DO_*` string, empty nest (`0x1c`+0),
+/// empty list (`0x1f`+0), empty nest (`0x1c`+0). Returns `(hooks, offset_after)`.
+pub fn parse_ras_ldb_import_do_hooks_at(
     data: &[u8],
     offset: usize,
-    max: usize,
-) -> Vec<String> {
+) -> Option<(Vec<String>, usize)> {
+    let mut i = offset;
+    if data.get(i) != Some(&LDB_IMPORT_MATERIAL_LIST_TAG) {
+        return None;
+    }
+    i += 1;
+    let count = read_mf_i32(data, &mut i)? as usize;
+    if count == 0 || count > 64 {
+        return None;
+    }
+    let mut hooks = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = read_mf_str(data, &mut i)?;
+        if !name.starts_with("DO_") {
+            return None;
+        }
+        if data.get(i) != Some(&0x1c) {
+            return None;
+        }
+        i += 1;
+        if read_mf_i32(data, &mut i)? != 0 {
+            return None;
+        }
+        if data.get(i) != Some(&LDB_IMPORT_MATERIAL_LIST_TAG) {
+            return None;
+        }
+        i += 1;
+        if read_mf_i32(data, &mut i)? != 0 {
+            return None;
+        }
+        if data.get(i) != Some(&0x1c) {
+            return None;
+        }
+        i += 1;
+        if read_mf_i32(data, &mut i)? != 0 {
+            return None;
+        }
+        hooks.push(name);
+    }
+    Some((hooks, i))
+}
+
+/// Scan `[offset, offset+window)` for the first parseable `DO_*` hook list.
+pub fn find_ras_ldb_import_do_hooks_at(
+    data: &[u8],
+    offset: usize,
+    window: usize,
+) -> Option<(usize, Vec<String>, usize)> {
+    let end = data.len().min(offset.saturating_add(window));
+    let mut i = offset;
+    while i < end {
+        if data[i] == LDB_IMPORT_MATERIAL_LIST_TAG {
+            if let Some((hooks, after)) = parse_ras_ldb_import_do_hooks_at(data, i) {
+                return Some((i, hooks, after));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Harvest `.DO->` / `->` FSM script action strings from a character-block window.
+pub fn ras_ldb_import_do_scripts_at(data: &[u8], offset: usize, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = offset;
+    let end = data.len().min(offset.saturating_add(512 * 1024));
+    while i + 3 < end && out.len() < max {
+        if data[i] == 0x0d && data[i + 1] == 0x14 {
+            let len = data[i + 2] as usize;
+            let start = i + 3;
+            if start + len <= data.len() {
+                let bytes = &data[start..start + len];
+                if bytes.windows(2).any(|w| w == b"->")
+                    && bytes.iter().all(|&b| (0x20..=0x7e).contains(&b))
+                {
+                    if let Ok(s) = String::from_utf8(bytes.to_vec()) {
+                        out.push(s);
+                    }
+                }
+                i = start + len;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Harvest `::…Jumppoint…` names from a character-block window.
+pub fn ras_ldb_import_jumppoint_names_at(data: &[u8], offset: usize, max: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = offset;
     let end = data.len().min(offset.saturating_add(512 * 1024));
@@ -1077,20 +1253,17 @@ pub fn parse_ras_ldb_import_static_mesh_at(
             return None;
         }
     }
-    let a;
-    let b;
-    let n;
     // Form A: a, b, n — Form B: b, n (a defaults 0)
     let first = read_mf_i32(data, &mut i)?;
-    if data.get(i) == Some(&0x11) || data.get(i) == Some(&0x10) {
-        a = 0;
-        b = first;
-        n = read_point_count(data, &mut i)?;
+    let (a, b, n) = if data.get(i) == Some(&0x11) || data.get(i) == Some(&0x10) {
+        (0, first, read_point_count(data, &mut i)?)
     } else {
-        a = first;
-        b = read_mf_i32(data, &mut i)?;
-        n = read_point_count(data, &mut i)?;
-    }
+        (
+            first,
+            read_mf_i32(data, &mut i)?,
+            read_point_count(data, &mut i)?,
+        )
+    };
     if n == 0 || n > 500_000 {
         return None;
     }
@@ -1132,10 +1305,7 @@ pub fn parse_ras_ldb_import_static_mesh_at(
 /// Layout after ImportExit: nest `0x1c` + ints, then `0x12` count (even;
 /// body count = count/2), subtype int, first body without id, then
 /// `(id, body) × (n-1)`. Each body: `15 f32 f32 15 f32 f32 03 i32 0e u8`.
-pub fn parse_ras_ldb_import_point_stream_at(
-    data: &[u8],
-    offset: usize,
-) -> Option<(u32, usize)> {
+pub fn parse_ras_ldb_import_point_stream_at(data: &[u8], offset: usize) -> Option<(u32, usize)> {
     if offset >= data.len() {
         return None;
     }
@@ -1174,11 +1344,11 @@ pub fn parse_ras_ldb_import_point_stream_at(
     // Trailing uncounted bodies (same shape, optional leading id).
     loop {
         let mark = i;
-        if matches!(data.get(i), Some(0x14 | 0x13 | 0x12 | 0x02)) {
-            if read_mf_i32(data, &mut i).is_none() {
-                i = mark;
-                break;
-            }
+        if matches!(data.get(i), Some(0x14 | 0x13 | 0x12 | 0x02))
+            && read_mf_i32(data, &mut i).is_none()
+        {
+            i = mark;
+            break;
         }
         match read_point_body(data, i) {
             Some(next) => {
@@ -1390,12 +1560,11 @@ pub fn parse_ras_ldb_import_exits_at(
         let lim = i.saturating_add(8192).min(data.len());
         let mut j = i;
         while j < lim {
-            // Post-exit stream: `15 <f32> <f32> 15 <f32> <f32> 03 <i32> 0e <u8>`
-            if j + 20 <= data.len()
+            // Post-exit stream: `15 <f32> <f32> 15 <f32> <f32> 03|0f|10|11 ... 0e <u8>`
+            if j + 19 <= data.len()
                 && data[j] == 0x15
-                && data[j + 5] == 0x15
-                && data[j + 10] == 0x03
-                && data[j + 15] == 0x0e
+                && data[j + 9] == 0x15
+                && matches!(data[j + 18], 0x03 | 0x0f | 0x10 | 0x11)
             {
                 break;
             }
@@ -1426,13 +1595,19 @@ pub fn parse_ras_ldb_import_exits_at(
     }
 }
 
+fn offset_plus_mf_count(data: &[u8], off: usize) -> Option<(usize, usize)> {
+    if data.get(off) != Some(&LDB_SECTION_TAG) {
+        return None;
+    }
+    let mut i = off + 1;
+    let count = read_mf_i32(data, &mut i)? as usize;
+    Some((count, i))
+}
+
 pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
     let mut out = Vec::new();
     let mut off = 0;
-    loop {
-        let Some(sec) = parse_ras_ldb_section_at(data, off) else {
-            break;
-        };
+    while let Some(sec) = parse_ras_ldb_section_at(data, off) {
         match sec.kind {
             LDB_SECTION_KIND_VEC3 => {
                 // Advance by contiguous 0x16 run (Tutorial flag=1: run > declared count).
@@ -1458,8 +1633,10 @@ pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
                 off = end;
             }
             LDB_SECTION_KIND_MF => {
-                let body = &data[off + 4..];
-                let n = sec.count as usize;
+                let Some((n, body_start)) = offset_plus_mf_count(data, off) else {
+                    break;
+                };
+                let body = &data[body_start..];
                 let (faces, face_bytes) = parse_ras_ldb_faces_ex(body, n);
                 let (surfs, surf_bytes) = parse_ras_ldb_surfs_ex(body, n);
                 let (ints, int_bytes) = parse_ras_ldb_ints_ex(body, n);
@@ -1478,7 +1655,7 @@ pub fn walk_ras_ldb_known_sections(data: &[u8]) -> Vec<RasLdbSectionSpan> {
                     });
                     break;
                 };
-                let end = off + 4 + consumed;
+                let end = body_start + consumed;
                 out.push(RasLdbSectionSpan {
                     offset: off,
                     kind: sec.kind,
@@ -1774,6 +1951,12 @@ pub struct LevelsTxtEntry {
     pub directory: String,
     /// `Level` property basename (e.g. `part0_level1.ldb`).
     pub level_file: String,
+    /// `PlayerStartingPlace`, e.g. `::StartRoom::Jumppoint 00`.
+    pub player_start: Option<String>,
+    /// `PlayerSkinName`, e.g. `young_max_payne` in the house, `max_payne` later.
+    pub player_skin: Option<String>,
+    /// `WorldSphere`, e.g. `sunset` for the house.
+    pub world_sphere: Option<String>,
 }
 
 impl LevelsTxtEntry {
@@ -1845,9 +2028,41 @@ pub fn parse_levels_txt(text: &str) -> Vec<LevelsTxtEntry> {
             id: id.to_string(),
             directory,
             level_file,
+            player_start: prop_value(body, "PlayerStartingPlace"),
+            player_skin: prop_value(body, "PlayerSkinName"),
+            world_sphere: prop_value(body, "WorldSphere"),
         });
     }
     out
+}
+
+/// `worldspheres.txt` block `[sunset]` → `bg_sunset.kf2`.
+pub fn world_sphere_export(catalog: &str, name: &str) -> Option<String> {
+    let lower = catalog.to_ascii_lowercase();
+    let key = format!("[{}]", name.to_ascii_lowercase());
+    let at = lower.find(&key)? + key.len();
+    let body = &catalog[at..];
+    let end = body.find('}').unwrap_or(body.len());
+    prop_value(&body[..end], "ExportData")
+}
+
+/// First `*.tga` / `*.jpg` string embedded in a world-sphere `.kf2`.
+pub fn first_image_name(bytes: &[u8]) -> Option<String> {
+    let mut cur = Vec::new();
+    for &b in bytes {
+        if b.is_ascii_graphic() && b != b';' {
+            cur.push(b);
+        } else if !cur.is_empty() {
+            if let Ok(s) = std::str::from_utf8(&cur) {
+                let ext = s.to_ascii_lowercase();
+                if ext.ends_with(".tga") || ext.ends_with(".jpg") {
+                    return Some(s.to_string());
+                }
+            }
+            cur.clear();
+        }
+    }
+    None
 }
 
 fn prop_value(body: &str, key: &str) -> Option<String> {
@@ -1866,6 +2081,796 @@ fn prop_value(body: &str, key: &str) -> Option<String> {
         let v = v.trim_matches('"').trim().to_string();
         if !v.is_empty() {
             return Some(v);
+        }
+    }
+    None
+}
+
+/// Retail boot after the options dialog: intro from `globalconfig.txt`, then `startup_level`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupPlan {
+    pub video: Option<PathBuf>,
+    pub level_win_path: String,
+    pub level_bytes: Vec<u8>,
+}
+
+/// `StartupVideoName` inside the `[startup]` block. Other sections are ignored.
+pub fn startup_video_name(text: &str) -> Option<String> {
+    let mut in_startup = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            let name = t[1..t.len() - 1].trim();
+            in_startup = name.eq_ignore_ascii_case("startup");
+            continue;
+        }
+        if !in_startup {
+            continue;
+        }
+        let Some((k, v)) = t.split_once('=') else {
+            continue;
+        };
+        if !k.trim().eq_ignore_ascii_case("StartupVideoName") {
+            continue;
+        }
+        let v = v
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .trim_matches('"')
+            .trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+/// Loose `data/` (or parked `data.disabled-hires/`), then `x_data.ras`, then other `*.ras`.
+pub fn resolve_startup(game_dir: &Path) -> Result<StartupPlan, EngineError> {
+    let mut src = GameSource::open(game_dir);
+    let config = src.read(r"\data\globalconfig.txt").unwrap_or_default();
+    let config_text = String::from_utf8_lossy(&config);
+    let video = startup_video_name(&config_text).and_then(|rel| {
+        let path = game_dir.join(rel.replace('\\', "/"));
+        path.is_file().then_some(path)
+    });
+    let levels = src
+        .read(r"\data\database\levels\levels.txt")
+        .ok_or_else(|| {
+            EngineError::Msg("levels.txt not found under data/ or a *.ras archive".into())
+        })?;
+    let entries = parse_levels_txt(&String::from_utf8_lossy(&levels));
+    let entry = entries
+        .iter()
+        .find(|e| e.id.eq_ignore_ascii_case("startup_level"))
+        .ok_or_else(|| EngineError::Msg("startup_level missing from levels.txt".into()))?;
+    let level_win_path = entry.ldb_archive_path();
+    let level_bytes = src
+        .read(&level_win_path)
+        .ok_or_else(|| EngineError::Msg(format!("startup level not found: {level_win_path}")))?;
+    Ok(StartupPlan {
+        video,
+        level_win_path,
+        level_bytes,
+    })
+}
+
+/// Top-level or nested row from `data\menu\menu.txt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuEntry {
+    pub id: String,
+    pub label: String,
+    pub level_id: Option<String>,
+    pub children: Vec<MenuEntry>,
+    /// `S_Quit()` — leave without loading a level.
+    pub quits: bool,
+}
+
+pub fn menu_label(id: &str) -> String {
+    match id {
+        "GCID_RESUMEGAME" => "Resume".into(),
+        "GCID_STARTTUTORIAL" => "Start Tutorial".into(),
+        "GCID_NEWGAME" => "New Game".into(),
+        "GCID_NORMAL" => "Normal".into(),
+        "GCID_NIGHTMARE" => "Nightmare".into(),
+        "GCID_HELL" => "Hell".into(),
+        "GCID_TIMEDMODE" => "Timed".into(),
+        "GCID_LOAD" => "Load".into(),
+        "GCID_SAVE" => "Save".into(),
+        "GCID_OPTIONS" => "Options".into(),
+        "GCID_CREDITS" => "Credits".into(),
+        "GCID_QUIT" => "Quit".into(),
+        "GCID_QUIT_YES" => "Yes".into(),
+        "GCID_QUIT_NO" => "No".into(),
+        "GCID_BACK" => "Back".into(),
+        other => other.trim_start_matches("GCID_").to_string(),
+    }
+}
+
+/// First `[Menu]` in `menu.txt`. `gm_init(id)` becomes `level_id`. `GCID_BACK` is omitted.
+pub fn parse_main_menu(text: &str) -> Vec<MenuEntry> {
+    let mut stack: Vec<MenuFrame> = Vec::new();
+    let mut pending: Option<FrameKind> = None;
+    let mut started = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("//") {
+            continue;
+        }
+        if t == "{" {
+            if !started {
+                if matches!(pending, Some(FrameKind::Menu)) {
+                    started = true;
+                    stack.push(MenuFrame::new(FrameKind::Menu));
+                }
+                pending = None;
+                continue;
+            }
+            let kind = pending.take().unwrap_or(FrameKind::Skip);
+            stack.push(MenuFrame::new(kind));
+            continue;
+        }
+        if t == "}" {
+            let Some(frame) = stack.pop() else {
+                continue;
+            };
+            if stack.is_empty() {
+                return frame.children;
+            }
+            if frame.id.as_deref() != Some("GCID_BACK") && !matches!(frame.kind, FrameKind::Skip) {
+                if let Some(id) = frame.id.clone() {
+                    stack.last_mut().unwrap().children.push(MenuEntry {
+                        label: menu_label(&id),
+                        level_id: frame.level_id,
+                        children: frame.children,
+                        quits: frame.quits,
+                        id,
+                    });
+                }
+            }
+            continue;
+        }
+        if t.starts_with('[') {
+            let tag = t.trim_start_matches('[').split(']').next().unwrap_or("");
+            pending = Some(match tag {
+                "Menu" => FrameKind::Menu,
+                "Item" => FrameKind::Item,
+                _ => FrameKind::Skip,
+            });
+        }
+        if let Some(id) = gcid_assign(t) {
+            if let Some(frame) = stack.last_mut() {
+                if frame.id.is_none() {
+                    frame.id = Some(id);
+                }
+            }
+        }
+        if let Some(id) = gm_init_id(t) {
+            if let Some(frame) = stack.last_mut() {
+                frame.level_id = Some(id);
+            }
+        }
+        if t.to_ascii_lowercase().contains("s_quit(") {
+            if let Some(frame) = stack.last_mut() {
+                frame.quits = true;
+            }
+        }
+    }
+    stack
+        .first()
+        .map(|f| f.children.clone())
+        .unwrap_or_default()
+}
+
+#[derive(Clone, Copy)]
+enum FrameKind {
+    Menu,
+    Item,
+    Skip,
+}
+
+struct MenuFrame {
+    kind: FrameKind,
+    id: Option<String>,
+    level_id: Option<String>,
+    quits: bool,
+    children: Vec<MenuEntry>,
+}
+
+impl MenuFrame {
+    fn new(kind: FrameKind) -> Self {
+        Self {
+            kind,
+            id: None,
+            level_id: None,
+            quits: false,
+            children: Vec::new(),
+        }
+    }
+}
+
+fn gcid_assign(line: &str) -> Option<String> {
+    let (k, v) = line.split_once('=')?;
+    if !k.trim().eq_ignore_ascii_case("name") {
+        return None;
+    }
+    let v = v.trim().trim_end_matches(';').trim().trim_matches('"');
+    v.starts_with("GCID_").then(|| v.to_string())
+}
+
+fn gm_init_id(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let idx = lower.find("gm_init(")?;
+    let rest = line[idx + "gm_init(".len()..].trim_start();
+    let end = rest.find(')')?;
+    let id = rest[..end].trim().trim_matches('"');
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+/// End of a level script: the comic page it picks up, then the next `gm_init`.
+///
+/// `Startup_level.ldb` stores these three calls in order:
+/// `mpgnm_pickupnote(P1L0a_001)`, `s_modeswitch(graphicnovel)`, `gm_init(part0_level1)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelHandoff {
+    pub novel_page: String,
+    pub next_level: String,
+}
+
+pub fn level_handoff(data: &[u8]) -> Option<LevelHandoff> {
+    // The three calls are one script. A later `gm_init` in the same file
+    // (the house does this after an in-level comic) is not this handoff.
+    const WINDOW: usize = 192;
+    let marker = b"mpgnm_pickupnote(";
+    let mut from = 0;
+    while let Some(rel) = find_bytes(&data[from..], marker) {
+        let at = from + rel;
+        let end = (at + WINDOW).min(data.len());
+        let window = &data[at..end];
+        if let (Some(novel_page), Some(switch_at)) = (
+            call_arg(window, marker),
+            find_bytes(window, b"s_modeswitch(graphicnovel)"),
+        ) {
+            if let Some(next_level) = call_arg(&window[switch_at..], b"gm_init(") {
+                return Some(LevelHandoff {
+                    novel_page,
+                    next_level,
+                });
+            }
+        }
+        from = at + marker.len();
+    }
+    None
+}
+
+/// Comic pages the level shows on entry, then stays in this level.
+///
+/// The house start FSM picks up `P1L0a_002`, marks every note read, then picks
+/// up `003`–`005` and switches to the graphic novel. Pages before that mark
+/// stay unread-cleared. A `gm_init` in the same window is a level handoff.
+pub fn level_opening_pages(data: &[u8]) -> Vec<String> {
+    let mut from = 0;
+    while let Some(rel) = find_bytes_ci(&data[from..], b"startfsm") {
+        let at = from + rel;
+        let end = (at + 1536).min(data.len());
+        let window = &data[at..end];
+        if let Some(switch_at) = find_bytes_ci(window, b"s_modeswitch(graphicnovel)") {
+            let tail = &window[switch_at..(switch_at + 80).min(window.len())];
+            if find_bytes_ci(tail, b"gm_init(").is_none() {
+                let body = &window[..switch_at];
+                let body = rfind_bytes_ci(body, b"markallnotesread")
+                    .map(|mark| &body[mark..])
+                    .unwrap_or(body);
+                return call_args_ci(body, b"mpgnm_pickupnote(");
+            }
+        }
+        from = at + b"startfsm".len();
+    }
+    Vec::new()
+}
+
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn find_bytes_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len())
+        .position(|w| w.iter().zip(needle).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+}
+
+fn rfind_bytes_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len())
+        .rposition(|w| w.iter().zip(needle).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+}
+
+fn call_args_ci(data: &[u8], marker: &[u8]) -> Vec<String> {
+    let mut from = 0;
+    let mut out = Vec::new();
+    while let Some(rel) = find_bytes_ci(&data[from..], marker) {
+        let at = from + rel;
+        let rest = &data[at + marker.len()..];
+        let Some(end) = rest.iter().position(|b| *b == b')') else {
+            break;
+        };
+        if let Ok(raw) = std::str::from_utf8(&rest[..end]) {
+            let raw = raw.trim().trim_matches('"').trim();
+            if !raw.is_empty() {
+                out.push(raw.to_string());
+            }
+        }
+        from = at + marker.len();
+    }
+    out
+}
+
+fn call_arg(data: &[u8], marker: &[u8]) -> Option<String> {
+    let at = find_bytes(data, marker)?;
+    let rest = &data[at + marker.len()..];
+    let end = rest.iter().position(|b| *b == b')')?;
+    let raw = std::str::from_utf8(&rest[..end]).ok()?;
+    let raw = raw.trim().trim_matches('"').trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw.to_string())
+    }
+}
+
+/// `P1L0a_001` → `\data\database\graphicnovelpages\part1\textures\P1L0a_001.jpg`.
+pub fn novel_page_win_path(page: &str) -> String {
+    let part = page
+        .as_bytes()
+        .get(1)
+        .copied()
+        .filter(|c| c.is_ascii_digit())
+        .map(|c| c - b'0')
+        .unwrap_or(1);
+    format!("\\data\\database\\graphicnovelpages\\part{part}\\textures\\{page}.jpg")
+}
+
+pub fn load_novel_jpeg(game_dir: &Path, page: &str) -> Option<Vec<u8>> {
+    GameSource::open(game_dir).read(&novel_page_win_path(page))
+}
+
+/// Chrome from `data/graphicnovel/graphicnovel.txt` `[Properties]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphicNovelChrome {
+    pub default_page: String,
+    pub background: String,
+    pub background_width: u32,
+    pub background_height: u32,
+}
+
+/// One row of `graphicnovelpages.txt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NovelPageDef {
+    pub id: String,
+    /// Second argument of `A_PlaySound`, for example `P1L0a_001` or `empty`.
+    pub sound: String,
+    pub new_chapter: bool,
+}
+
+/// `bitmaps\gn_background.jpg` under `data/graphicnovel`.
+pub fn novel_background_win_path(background: &str) -> String {
+    format!(
+        "\\data\\graphicnovel\\{}",
+        background.replace('/', "\\").trim_start_matches('\\')
+    )
+}
+
+/// `story\part1\P1L0a_001.wav` under `data/database/sounds`.
+pub fn story_wav_win_path(filename: &str) -> String {
+    format!(
+        "\\data\\database\\sounds\\{}",
+        filename.replace('/', "\\").trim_start_matches('\\')
+    )
+}
+
+pub fn parse_graphic_novel_chrome(text: &str) -> GraphicNovelChrome {
+    let mut chrome = GraphicNovelChrome {
+        default_page: String::new(),
+        background: String::new(),
+        background_width: 0,
+        background_height: 0,
+    };
+    for line in text.lines() {
+        let Some((key, value)) = assign_pair(line) else {
+            continue;
+        };
+        match key.to_ascii_lowercase().as_str() {
+            "defaultpagename" => chrome.default_page = value,
+            "background" => chrome.background = value,
+            "backgroundwidth" => chrome.background_width = value.parse().unwrap_or(0),
+            "backgroundheight" => chrome.background_height = value.parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+    chrome
+}
+
+pub fn parse_graphic_novel_pages(text: &str) -> Vec<NovelPageDef> {
+    let mut pages = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with('[') || !line.contains("ExportData") {
+            continue;
+        }
+        let Some(end) = line.find(']') else {
+            continue;
+        };
+        let id = line[1..end].trim();
+        if id.is_empty() {
+            continue;
+        }
+        let sound = play_sound_cue(line).unwrap_or_default();
+        let new_chapter = line.to_ascii_lowercase().contains("newchapter = yes")
+            || line.to_ascii_lowercase().contains("newchapter=yes");
+        pages.push(NovelPageDef {
+            id: id.to_string(),
+            sound,
+            new_chapter,
+        });
+    }
+    pages
+}
+
+/// One archive or loose file. Same search as the catalogs: loose `data/`, then `x_data.ras`.
+pub fn read_game_bytes(game_dir: &Path, win_path: &str) -> Option<Vec<u8>> {
+    GameSource::open(game_dir).read(win_path)
+}
+
+/// Raw SharedDB text for `breakable` and `dynamic`, from loose `data/` or `x_data.ras`.
+pub fn load_sound_catalogs(game_dir: &Path) -> BTreeMap<String, String> {
+    let mut src = GameSource::open(game_dir);
+    let mut catalogs = BTreeMap::new();
+    for (category, win_path) in [
+        ("breakable", r"\data\database\sounds\breakable.txt"),
+        ("dynamic", r"\data\database\sounds\dynamic.txt"),
+    ] {
+        let Some(bytes) = src.read(win_path) else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        catalogs.insert(category.to_string(), text);
+    }
+    catalogs
+}
+
+/// Filename inside `[cue]` in `sounds/story.txt`. `empty` reads `[Empty]`.
+pub fn story_sound_filename(text: &str, cue: &str) -> Option<String> {
+    let header = format!("[{}]", cue.trim());
+    let mut grab = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !grab {
+            let head = trimmed.split("//").next().unwrap_or("").trim();
+            if head.eq_ignore_ascii_case(&header) {
+                grab = true;
+            }
+            continue;
+        }
+        if let Some(name) = bracket_name(trimmed) {
+            if !matches!(
+                name.to_ascii_lowercase().as_str(),
+                "properties" | "default" | "sound"
+            ) {
+                break;
+            }
+        }
+        if let Some((key, value)) = assign_pair(line) {
+            if key.eq_ignore_ascii_case("filename") && !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// What the graphic-novel chrome does with one key or click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NovelInput {
+    /// Next-page indicator. Past the last collected page, leave the mode.
+    Next,
+    /// Previous-page indicator. Stays on the first page.
+    Previous,
+    /// Exit-to-game indicator.
+    Quit,
+}
+
+/// `None` commits the pending mode exit. `Some` is the page index to show.
+pub fn novel_turn(index: usize, count: usize, input: NovelInput) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let index = index.min(count - 1);
+    match input {
+        NovelInput::Quit => None,
+        NovelInput::Previous => Some(index.saturating_sub(1)),
+        NovelInput::Next => {
+            let next = index + 1;
+            if next >= count {
+                None
+            } else {
+                Some(next)
+            }
+        }
+    }
+}
+
+/// Escape leaves. Right, Space, Enter, and the left click advance. Left goes back.
+pub fn novel_input(escape: bool, advance: bool, back: bool) -> Option<NovelInput> {
+    if escape {
+        Some(NovelInput::Quit)
+    } else if advance {
+        Some(NovelInput::Next)
+    } else if back {
+        Some(NovelInput::Previous)
+    } else {
+        None
+    }
+}
+
+fn assign_pair(line: &str) -> Option<(String, String)> {
+    let line = line.split("//").next()?.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let (key, value) = line.split_once('=')?;
+    let value = value.trim().trim_end_matches(';').trim().trim_matches('"');
+    if key.trim().is_empty() {
+        None
+    } else {
+        Some((key.trim().to_string(), value.to_string()))
+    }
+}
+
+fn play_sound_cue(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let at = lower.find("a_playsound(")?;
+    let rest = &line[at + "a_playsound(".len()..];
+    let end = rest.find(')')?;
+    let cue = rest[..end].split(',').nth(1)?.trim().trim_matches('"');
+    if cue.is_empty() {
+        None
+    } else {
+        Some(cue.to_string())
+    }
+}
+
+fn bracket_name(trimmed: &str) -> Option<&str> {
+    let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if inner.is_empty() || inner.contains('[') {
+        None
+    } else {
+        Some(inner)
+    }
+}
+
+/// Jpeg bytes for `gn_background.jpg`, plus each collected page and its story wav.
+pub fn load_novel_session(game_dir: &Path, pages: &[String]) -> (Vec<u8>, Vec<NovelShownPage>) {
+    let mut src = GameSource::open(game_dir);
+    let chrome_txt = src
+        .read(r"\data\graphicnovel\graphicnovel.txt")
+        .unwrap_or_default();
+    let chrome = parse_graphic_novel_chrome(&String::from_utf8_lossy(&chrome_txt));
+    let background = if chrome.background.is_empty() {
+        Vec::new()
+    } else {
+        src.read(&novel_background_win_path(&chrome.background))
+            .unwrap_or_default()
+    };
+    let pages_txt = src
+        .read(r"\data\database\graphicnovelpages\graphicnovelpages.txt")
+        .unwrap_or_default();
+    let catalog = parse_graphic_novel_pages(&String::from_utf8_lossy(&pages_txt));
+    let story_txt = src
+        .read(r"\data\database\sounds\story.txt")
+        .unwrap_or_default();
+    let story = String::from_utf8_lossy(&story_txt);
+    let shown = pages
+        .iter()
+        .map(|id| {
+            let def = catalog.iter().find(|p| p.id.eq_ignore_ascii_case(id));
+            let cue = def.map(|p| p.sound.clone()).unwrap_or_default();
+            let wav = story_sound_filename(&story, &cue)
+                .filter(|name| !name.eq_ignore_ascii_case("placeholder.wav"))
+                .and_then(|name| src.read(&story_wav_win_path(&name)))
+                .unwrap_or_default();
+            NovelShownPage {
+                id: id.clone(),
+                jpeg: src.read(&novel_page_win_path(id)).unwrap_or_default(),
+                wav,
+            }
+        })
+        .collect();
+    (background, shown)
+}
+
+#[derive(Debug, Clone)]
+pub struct NovelShownPage {
+    pub id: String,
+    pub jpeg: Vec<u8>,
+    pub wav: Vec<u8>,
+}
+
+pub fn level_entry(game_dir: &Path, level_id: &str) -> Result<LevelsTxtEntry, EngineError> {
+    let mut src = GameSource::open(game_dir);
+    let levels = src
+        .read(r"\data\database\levels\levels.txt")
+        .ok_or_else(|| {
+            EngineError::Msg("levels.txt not found under data/ or a *.ras archive".into())
+        })?;
+    parse_levels_txt(&String::from_utf8_lossy(&levels))
+        .into_iter()
+        .find(|e| e.id.eq_ignore_ascii_case(level_id))
+        .ok_or_else(|| EngineError::Msg(format!("level {level_id} missing from levels.txt")))
+}
+
+/// `levels.txt` entry `level_id` as archive bytes (loose file or `*.ras`).
+pub fn load_level_by_id(game_dir: &Path, level_id: &str) -> Result<(String, Vec<u8>), EngineError> {
+    let mut src = GameSource::open(game_dir);
+    let levels = src
+        .read(r"\data\database\levels\levels.txt")
+        .ok_or_else(|| {
+            EngineError::Msg("levels.txt not found under data/ or a *.ras archive".into())
+        })?;
+    let entries = parse_levels_txt(&String::from_utf8_lossy(&levels));
+    let entry = entries
+        .iter()
+        .find(|e| e.id.eq_ignore_ascii_case(level_id))
+        .ok_or_else(|| EngineError::Msg(format!("level {level_id} missing from levels.txt")))?;
+    let win = entry.ldb_archive_path();
+    let bytes = src
+        .read(&win)
+        .ok_or_else(|| EngineError::Msg(format!("level file not found: {win}")))?;
+    Ok((win, bytes))
+}
+
+pub fn load_main_menu(game_dir: &Path) -> Result<Vec<MenuEntry>, EngineError> {
+    let mut src = GameSource::open(game_dir);
+    let bytes = src.read(r"\data\menu\menu.txt").ok_or_else(|| {
+        EngineError::Msg("menu.txt not found under data/ or a *.ras archive".into())
+    })?;
+    let menu = parse_main_menu(&String::from_utf8_lossy(&bytes));
+    if menu.is_empty() {
+        return Err(EngineError::Msg("main menu has no entries".into()));
+    }
+    Ok(menu)
+}
+
+/// Intro path only. Does not read a level.
+pub fn startup_video_path(game_dir: &Path) -> Option<PathBuf> {
+    let mut src = GameSource::open(game_dir);
+    let config = src.read(r"\data\globalconfig.txt")?;
+    let name = startup_video_name(&String::from_utf8_lossy(&config))?;
+    let path = game_dir.join(name.replace('\\', "/"));
+    path.is_file().then_some(path)
+}
+
+/// Play the intro. Missing `ffplay` or a non-zero exit is an error string; the caller still opens the menu.
+pub fn play_intro_video(path: &Path) -> Result<(), String> {
+    let status = Command::new("ffplay")
+        .args(["-autoexit", "-loglevel", "error"])
+        .arg(path)
+        .status()
+        .map_err(|e| format!("ffplay: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("ffplay exited {status}"))
+    }
+}
+
+struct GameSource {
+    game_dir: PathBuf,
+    ras_paths: Vec<PathBuf>,
+    opened: Vec<RasArchive>,
+    cursor: usize,
+}
+
+impl GameSource {
+    fn open(game_dir: &Path) -> Self {
+        Self {
+            game_dir: game_dir.to_path_buf(),
+            ras_paths: ras_candidates(game_dir),
+            opened: Vec::new(),
+            cursor: 0,
+        }
+    }
+
+    fn read(&mut self, win_path: &str) -> Option<Vec<u8>> {
+        if let Some(bytes) = loose_bytes(&self.game_dir, win_path) {
+            return Some(bytes);
+        }
+        for arc in &self.opened {
+            if let Some(bytes) = archive_member(arc, win_path) {
+                return Some(bytes.to_vec());
+            }
+        }
+        while self.cursor < self.ras_paths.len() {
+            let path = self.ras_paths[self.cursor].clone();
+            self.cursor += 1;
+            let Ok(arc) = RasArchive::read(&path) else {
+                continue;
+            };
+            let hit = archive_member(&arc, win_path).map(|b| b.to_vec());
+            self.opened.push(arc);
+            if hit.is_some() {
+                return hit;
+            }
+        }
+        None
+    }
+}
+
+fn loose_bytes(game_dir: &Path, win_path: &str) -> Option<Vec<u8>> {
+    let rel = win_to_rel(win_path);
+    let loose = game_dir.join(&rel);
+    if loose.is_file() {
+        return fs::read(loose).ok();
+    }
+    if let Ok(rest) = rel.strip_prefix("data") {
+        let parked = game_dir.join("data.disabled-hires").join(rest);
+        if parked.is_file() {
+            return fs::read(parked).ok();
+        }
+    }
+    None
+}
+
+fn win_to_rel(win_path: &str) -> PathBuf {
+    PathBuf::from(win_path.trim_matches(['\\', '/']).replace('\\', "/"))
+}
+
+fn ras_candidates(game_dir: &Path) -> Vec<PathBuf> {
+    let mut data = Vec::new();
+    let mut rest = Vec::new();
+    let Ok(rd) = fs::read_dir(game_dir) else {
+        return Vec::new();
+    };
+    for ent in rd.flatten() {
+        let name = ent.file_name().to_string_lossy().to_ascii_lowercase();
+        if !name.ends_with(".ras") {
+            continue;
+        }
+        if name == "x_data.ras" {
+            data.push(ent.path());
+        } else {
+            rest.push(ent.path());
+        }
+    }
+    rest.sort();
+    data.extend(rest);
+    data
+}
+
+fn archive_member<'a>(arc: &'a RasArchive, win_path: &str) -> Option<&'a [u8]> {
+    let mut want = win_path.replace('/', "\\");
+    if !want.starts_with('\\') {
+        want.insert(0, '\\');
+    }
+    for f in &arc.files {
+        let dname = arc
+            .directories
+            .get(f.dir_index as usize)
+            .map(|d| d.name.as_str())
+            .unwrap_or("\\");
+        let full = format!("{dname}{}", f.name);
+        if full.eq_ignore_ascii_case(&want) {
+            return Some(f.data.as_slice());
         }
     }
     None
@@ -1925,6 +2930,7 @@ pub fn discover_ras_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, EngineE
 }
 
 #[cfg(test)]
+#[allow(clippy::same_item_push)] // MF fixture builders push tag bytes then payloads
 mod tests {
     use super::*;
     use openras::archive::{RasArchive, RasDirEntry, RasFileEntry, MODE_STORED};
@@ -2002,6 +3008,9 @@ mod tests {
         assert_eq!(h.count, 0xcdab);
         assert_eq!(h.flag, 0);
         assert_eq!(count_ras_ldb_leading_vec3(&buf), 2);
+        let preview = sample_ras_ldb_vec3_preview(&buf, 8);
+        assert_eq!(preview.len(), 2);
+        assert_eq!(preview[0], [1.0, 2.0, 3.0]);
         // flag=0: declared count matches contiguous run when we build it that way
         let mut tight = Vec::new();
         tight.extend_from_slice(&LDB_RAS_MAGIC.to_le_bytes());
@@ -2279,7 +3288,9 @@ mod tests {
         }
         for _ in 0..2 {
             body.push(0x1a);
-            for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 3.0, 4.0, 5.0] {
+            for v in [
+                1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 3.0, 4.0, 5.0,
+            ] {
                 body.extend_from_slice(&v.to_le_bytes());
             }
         }
@@ -2311,7 +3322,9 @@ mod tests {
         body.extend_from_slice(b"::start::Jumppoint 00");
         body.extend_from_slice(&[0x0d, 0x14, 0]);
         body.push(0x1a);
-        for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0] {
+        for v in [
+            1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0,
+        ] {
             body.extend_from_slice(&v.to_le_bytes());
         }
         let jp2 = b"::room::Jumppoint 01";
@@ -2322,6 +3335,44 @@ mod tests {
         assert_eq!(body[at], 0x0d);
         let names = ras_ldb_import_jumppoint_names_at(&body, at, 8);
         assert_eq!(names, vec!["::start::Jumppoint 00", "::room::Jumppoint 01"]);
+    }
+
+    #[test]
+    fn parses_import_do_hook_list_tutorial_shape() {
+        // BYOD Tutorial.ldb @0x1f7458f: 1f + count + (DO_* + empty nest/list/nest)×N
+        let mut body = Vec::new();
+        body.push(LDB_IMPORT_MATERIAL_LIST_TAG);
+        body.extend_from_slice(&[0x14, 4]);
+        for name in [
+            "DO_BulletCollides",
+            "DO_CharacterCollides",
+            "DO_MovedToInvalidPosition",
+            "DO_OnDeath",
+        ] {
+            body.extend_from_slice(&[0x0d, 0x14, name.len() as u8]);
+            body.extend_from_slice(name.as_bytes());
+            body.extend_from_slice(&[0x1c, 0x14, 0, 0x1f, 0x14, 0, 0x1c, 0x14, 0]);
+        }
+        body.extend_from_slice(&[0x0d, 0x14, 18]);
+        body.extend_from_slice(b"::Alley2::next_ent");
+        let sc = b"::Alley2::barrel04.DO->DO_SetHitpoints(15);";
+        body.extend_from_slice(&[0x0d, 0x14, sc.len() as u8]);
+        body.extend_from_slice(sc);
+        let (hooks, end) = parse_ras_ldb_import_do_hooks_at(&body, 0).unwrap();
+        assert_eq!(
+            hooks,
+            vec![
+                "DO_BulletCollides",
+                "DO_CharacterCollides",
+                "DO_MovedToInvalidPosition",
+                "DO_OnDeath",
+            ]
+        );
+        assert_eq!(&body[end..end + 3], &[0x0d, 0x14, 18]);
+        assert_eq!(
+            ras_ldb_import_do_scripts_at(&body, end, 4),
+            vec!["::Alley2::barrel04.DO->DO_SetHitpoints(15);"]
+        );
     }
 
     #[test]
@@ -2363,7 +3414,7 @@ mod tests {
         body.extend_from_slice(&[0x1c, 0x14, 1, 0x1c]);
         body.extend_from_slice(&[0x12, 4, 0, 0]); // count = 4
         body.extend_from_slice(&[0x14, 3]); // subtype
-        // body without id
+                                            // body without id
         body.push(0x15);
         body.extend_from_slice(&1.0f32.to_le_bytes());
         body.extend_from_slice(&2.0f32.to_le_bytes());
@@ -2485,7 +3536,7 @@ mod tests {
         body.extend_from_slice(b"p/a");
         body.extend_from_slice(&[0x0d, 0x14, 0]); // empty path2
         body.extend_from_slice(&[0x0e, 0, 0x0e, 1]); // bools
-        // child member
+                                                     // child member
         body.extend_from_slice(&[0x0d, 0x14, 5]);
         body.extend_from_slice(b"b.JPG");
         body.extend_from_slice(&[0x0d, 0x14, 3]);
@@ -2563,7 +3614,9 @@ mod tests {
         }
         body.extend_from_slice(&[0x14, 1, 0x14, 5]);
         body.push(0x1a);
-        for v in [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0] {
+        for v in [
+            1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+        ] {
             body.extend_from_slice(&v.to_le_bytes());
         }
         body.push(0xff);
@@ -2679,6 +3732,9 @@ mod tests {
 	[Properties]
 	Directory 		= part1;
 	Level 			= part0_level1.ldb;
+	PlayerStartingPlace = "::StartRoom::Jumppoint 00";
+	PlayerSkinName  = "young_max_payne";
+	WorldSphere = "sunset";
 }
 "#;
         let entries = parse_levels_txt(txt);
@@ -2692,6 +3748,502 @@ mod tests {
             entries[1].ai_archive_path(),
             "\\data\\database\\levels\\part1\\part0_level1.ai"
         );
+        assert_eq!(entries[0].player_start, None);
+        assert_eq!(
+            entries[1].player_start.as_deref(),
+            Some("::StartRoom::Jumppoint 00")
+        );
+        assert_eq!(entries[0].player_skin, None);
+        assert_eq!(entries[0].world_sphere, None);
+        assert_eq!(entries[1].player_skin.as_deref(), Some("young_max_payne"));
+        assert_eq!(entries[1].world_sphere.as_deref(), Some("sunset"));
+    }
+
+    #[test]
+    fn world_sphere_catalog_names_the_house_sky() {
+        let catalog = r#"
+[sunset] //used in maxhome
+{
+	[Geometry]
+	ExportData = bg_sunset.kf2;
+}
+[bronx]
+{
+	[Geometry]
+	ExportData = bg_bronx.kf2;
+}
+"#;
+        assert_eq!(
+            world_sphere_export(catalog, "sunset").as_deref(),
+            Some("bg_sunset.kf2")
+        );
+        assert_eq!(
+            world_sphere_export(catalog, "SUNSET").as_deref(),
+            Some("bg_sunset.kf2")
+        );
+        let kf2 = b"textures;..\\sharedtextures\0SkyboxDefault\0bg_sunset_all.tga\0";
+        assert_eq!(first_image_name(kf2).as_deref(), Some("bg_sunset_all.tga"));
+    }
+
+    #[test]
+    fn startup_level_decodes_and_still_names_the_comic() {
+        let path = std::path::Path::new(
+            "/tmp/omp-xdata-ref/data/database/levels/front_end/Startup_level.ldb",
+        );
+        if !path.is_file() {
+            return;
+        }
+        let bytes = std::fs::read(path).expect("startup ldb");
+        assert!(
+            scene::parse_ldb_scene(&bytes).is_some(),
+            "startup_level did not decode"
+        );
+        let hand = level_handoff(&bytes).expect("handoff");
+        assert_eq!(hand.novel_page, "P1L0a_001");
+        assert_eq!(hand.next_level, "part0_level1");
+    }
+
+    #[test]
+    fn level_handoff_reads_the_startup_script() {
+        let bytes = b"maxpayne_graphicnovelmode->mpgnm_pickupnote(P1L0a_001);x_modeswitch->s_modeswitch(graphicnovel);maxpayne_gamemode->gm_init(part0_level1);";
+        let hand = level_handoff(bytes).expect("handoff");
+        assert_eq!(hand.novel_page, "P1L0a_001");
+        assert_eq!(hand.next_level, "part0_level1");
+        assert_eq!(
+            novel_page_win_path("P1L0a_001"),
+            "\\data\\database\\graphicnovelpages\\part1\\textures\\P1L0a_001.jpg"
+        );
+    }
+
+    #[test]
+    fn graphic_novel_catalog_reads_the_startup_page() {
+        let chrome = parse_graphic_novel_chrome(
+            "DefaultPageName = \"p1l0a_002\";\nBackground = \"bitmaps\\gn_background.jpg\";\nBackgroundWidth = 640;\nBackgroundHeight = 100;\n",
+        );
+        assert_eq!(chrome.default_page, "p1l0a_002");
+        assert_eq!(chrome.background, "bitmaps\\gn_background.jpg");
+        assert_eq!(
+            (chrome.background_width, chrome.background_height),
+            (640, 100)
+        );
+        assert_eq!(
+            novel_background_win_path(&chrome.background),
+            "\\data\\graphicnovel\\bitmaps\\gn_background.jpg"
+        );
+        let pages = parse_graphic_novel_pages(
+            "[P1L0a_001]\t\t{ [geometry] ExportData = \"part1\\P1L0a_001.kf2\"; [general] NewChapter = no;\t[OnInitMessage] String = \"this->A_PlaySound( story, P1L0a_001 );\"; }\n[P1L0a_002]\t\t{ [geometry] ExportData = \"part1\\P1L0a_002.kf2\"; [general] NewChapter = yes;\t[OnInitMessage] String = \"this->A_PlaySound( story, empty );\"; }\n",
+        );
+        assert_eq!(pages[0].id, "P1L0a_001");
+        assert_eq!(pages[0].sound, "P1L0a_001");
+        assert!(!pages[0].new_chapter);
+        assert!(pages[1].new_chapter);
+        assert_eq!(pages[1].sound, "empty");
+        let story = "[Empty]\n{\n\t[Sound]\n\t\tFilename = placeholder.wav;\n}\n[P1L0a_001]\n{\n\t[Sound]\n\t\tFilename = story\\part1\\P1L0a_001.wav;\n}\n";
+        assert_eq!(
+            story_sound_filename(story, "P1L0a_001").as_deref(),
+            Some("story\\part1\\P1L0a_001.wav")
+        );
+        assert_eq!(
+            story_wav_win_path("story\\part1\\P1L0a_001.wav"),
+            "\\data\\database\\sounds\\story\\part1\\P1L0a_001.wav"
+        );
+        assert_eq!(novel_turn(0, 1, NovelInput::Next), None);
+        assert_eq!(novel_turn(0, 3, NovelInput::Next), Some(1));
+        assert_eq!(novel_turn(2, 3, NovelInput::Next), None);
+        assert_eq!(novel_turn(0, 3, NovelInput::Previous), Some(0));
+        assert_eq!(novel_turn(1, 3, NovelInput::Previous), Some(0));
+        assert_eq!(novel_turn(1, 3, NovelInput::Quit), None);
+        assert_eq!(novel_input(false, true, false), Some(NovelInput::Next));
+        assert_eq!(novel_input(true, true, true), Some(NovelInput::Quit));
+        assert_eq!(novel_input(false, false, true), Some(NovelInput::Previous));
+    }
+
+    #[test]
+    fn retail_graphic_novel_files_match_when_extracted() {
+        let root = std::path::Path::new("/tmp/omp-xdata-ref/data");
+        let chrome_path = root.join("graphicnovel/graphicnovel.txt");
+        let pages_path = root.join("database/graphicnovelpages/graphicnovelpages.txt");
+        let story_path = root.join("database/sounds/story.txt");
+        if !chrome_path.is_file() || !pages_path.is_file() || !story_path.is_file() {
+            return;
+        }
+        let chrome = parse_graphic_novel_chrome(&std::fs::read_to_string(&chrome_path).unwrap());
+        assert_eq!(chrome.default_page, "p1l0a_002");
+        assert_eq!(chrome.background_height, 100);
+        let pages = parse_graphic_novel_pages(&std::fs::read_to_string(&pages_path).unwrap());
+        let intro = pages
+            .iter()
+            .find(|p| p.id == "P1L0a_001")
+            .expect("intro page");
+        assert_eq!(intro.sound, "P1L0a_001");
+        assert!(!intro.new_chapter);
+        let story = std::fs::read_to_string(&story_path).unwrap();
+        assert_eq!(
+            story_sound_filename(&story, &intro.sound).as_deref(),
+            Some("story\\part1\\P1L0a_001.wav")
+        );
+    }
+
+    #[test]
+    fn sound_catalogs_load_breakable_and_dynamic() {
+        let game = std::path::Path::new("/home/gzelante/Games/MaxPayne1");
+        if !game.join("x_data.ras").is_file() {
+            return;
+        }
+        let catalogs = load_sound_catalogs(game);
+        assert_eq!(
+            story_sound_filename(
+                catalogs.get("breakable").expect("breakable"),
+                "window_break_medium"
+            )
+            .as_deref(),
+            Some(r"breakable\glass\break_glass_medium.wav")
+        );
+        assert_eq!(
+            story_sound_filename(
+                catalogs.get("dynamic").expect("dynamic"),
+                "door_wood_locked"
+            )
+            .as_deref(),
+            Some(r"dynamic\door\door_wood_locked3.wav")
+        );
+        let win = story_wav_win_path(r"breakable\glass\break_glass_medium.wav");
+        assert_eq!(
+            win,
+            r"\data\database\sounds\breakable\glass\break_glass_medium.wav"
+        );
+        let wav = read_game_bytes(game, &win).expect("break wav");
+        assert!(wav.starts_with(b"RIFF"));
+    }
+
+    #[test]
+    fn italian_pack_holds_the_startup_story_wav() {
+        let path = std::path::Path::new("/home/gzelante/Games/MaxPayne1/x_italian.ras");
+        if !path.is_file() {
+            return;
+        }
+        let arc = RasArchive::read(path).expect("x_italian.ras");
+        let wav = archive_member(&arc, r"\data\database\sounds\story\part1\P1L0a_001.wav")
+            .expect("story wav member");
+        assert!(
+            wav.starts_with(b"RIFF"),
+            "got {:02x?}",
+            &wav[..wav.len().min(12)]
+        );
+        assert_eq!(&wav[8..12], b"WAVE");
+        let (_chrome, shown) =
+            load_novel_session(path.parent().expect("game dir"), &["P1L0a_001".to_string()]);
+        assert!(shown[0].wav.starts_with(b"RIFF"));
+        assert_eq!(&shown[0].wav[8..12], b"WAVE");
+    }
+
+    #[test]
+    fn italian_pack_holds_the_house_opening_wavs() {
+        let path = std::path::Path::new("/home/gzelante/Games/MaxPayne1/x_italian.ras");
+        if !path.is_file() {
+            return;
+        }
+        let arc = RasArchive::read(path).expect("x_italian.ras");
+        for page in ["P1L0a_003", "P1L0a_004", "P1L0a_005"] {
+            let member = story_wav_win_path(&format!("story\\part1\\{page}.wav"));
+            let wav = archive_member(&arc, &member).expect("house story wav");
+            assert!(wav.starts_with(b"RIFF"), "{page}");
+            assert_eq!(&wav[8..12], b"WAVE");
+        }
+    }
+
+    #[test]
+    fn level_handoff_ignores_a_comic_that_stays_in_the_level() {
+        let mut bytes =
+            b"mpgnm_pickupnote(P1L0a_007);s_modeswitch(graphicnovel);fsm_switch(normal);".to_vec();
+        bytes.extend(std::iter::repeat_n(b' ', 300));
+        bytes.extend(b"gm_init(part1_level1);");
+        assert_eq!(level_handoff(&bytes), None);
+    }
+
+    #[test]
+    fn level_opening_pages_are_the_unread_notes_before_the_novel() {
+        let bytes = b"::startroom::startFSM->FSM_Send(start);player->c_pickupweapon(painkiller);MaxPayne_GraphicNovelMode->MPGNM_PickupNote(P1L0a_002);MPGNM_MarkAllNotesRead();MPGNM_PickupNote(P1L0a_003);MPGNM_PickupNote(P1L0a_004);MPGNM_PickupNote(P1L0a_005);x_modeswitch->s_modeswitch(graphicnovel);";
+        assert_eq!(
+            level_opening_pages(bytes),
+            ["P1L0a_003", "P1L0a_004", "P1L0a_005"]
+        );
+    }
+
+    #[test]
+    fn level_opening_pages_ignores_a_handoff_and_a_later_note() {
+        let handoff = b"startFSM mpgnm_pickupnote(P1L0a_001);s_modeswitch(graphicnovel);gm_init(part0_level1);";
+        assert!(level_opening_pages(handoff).is_empty());
+        let note = b"T_Activate mpgnm_pickupnote(P1L0a_007);s_modeswitch(graphicnovel);fsm_switch(normal);";
+        assert!(level_opening_pages(note).is_empty());
+    }
+
+    #[test]
+    fn house_opening_pages_when_the_level_is_present() {
+        let path =
+            std::path::Path::new("/tmp/omp-xlevel1/data/database/levels/part1/Part0_Level1.ldb");
+        if !path.is_file() {
+            return;
+        }
+        let data = std::fs::read(path).unwrap();
+        assert_eq!(
+            level_opening_pages(&data),
+            ["P1L0a_003", "P1L0a_004", "P1L0a_005"]
+        );
+    }
+
+    #[test]
+    fn resolve_startup_uses_intro_then_startup_level() {
+        let dir = std::env::temp_dir().join(format!("omp-startup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data/database/levels/front_end")).unwrap();
+        std::fs::create_dir_all(dir.join("movies")).unwrap();
+        std::fs::write(
+            dir.join("data/globalconfig.txt"),
+            "[startup]\nStartupVideoName = \"movies\\intro.mpg\";\n[character]\nFallingThresholdVelocity = 1.0;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("data/database/levels/levels.txt"),
+            "[startup_level]\n{\n\tDirectory = front_end;\n\tLevel = startup_level.ldb;\n}\n[part0_level1]\n{\n\tDirectory = part1;\n\tLevel = part0_level1.ldb;\n}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("movies/intro.mpg"), b"mpg").unwrap();
+        std::fs::write(
+            dir.join("data/database/levels/front_end/startup_level.ldb"),
+            b"LEVELBYTES",
+        )
+        .unwrap();
+        let plan = resolve_startup(&dir).expect("plan");
+        assert_eq!(
+            plan.video.as_deref(),
+            Some(dir.join("movies/intro.mpg").as_path())
+        );
+        assert_eq!(plan.level_bytes, b"LEVELBYTES");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_startup_reads_startup_level_from_x_data_ras() {
+        let dir = std::env::temp_dir().join(format!("omp-startup-ras-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("movies")).unwrap();
+        std::fs::write(dir.join("movies/intro.mpg"), b"mpg").unwrap();
+        let arc = RasArchive {
+            seed: 1,
+            version: 1.2,
+            compatibility: 3,
+            directories: vec![
+                RasDirEntry {
+                    name: "\\".into(),
+                    timestamp: [0; 16],
+                },
+                RasDirEntry {
+                    name: "\\data\\".into(),
+                    timestamp: [0; 16],
+                },
+                RasDirEntry {
+                    name: "\\data\\database\\levels\\".into(),
+                    timestamp: [0; 16],
+                },
+                RasDirEntry {
+                    name: "\\data\\database\\levels\\front_end\\".into(),
+                    timestamp: [0; 16],
+                },
+            ],
+            files: vec![
+                RasFileEntry {
+                    name: "globalconfig.txt".into(),
+                    dir_index: 1,
+                    data: b"[startup]\nStartupVideoName = \"movies\\intro.mpg\";\n".to_vec(),
+                    compression_mode: MODE_STORED,
+                    compressed_data: None,
+                    unknown_0: 0,
+                    unknown_1: 0,
+                    timestamp: [0; 16],
+                },
+                RasFileEntry {
+                    name: "levels.txt".into(),
+                    dir_index: 2,
+                    data: b"[startup_level]\n{\nDirectory = front_end;\nLevel = startup_level.ldb;\n}\n"
+                        .to_vec(),
+                    compression_mode: MODE_STORED,
+                    compressed_data: None,
+                    unknown_0: 0,
+                    unknown_1: 0,
+                    timestamp: [0; 16],
+                },
+                RasFileEntry {
+                    name: "startup_level.ldb".into(),
+                    dir_index: 3,
+                    data: b"FROMRAS".to_vec(),
+                    compression_mode: MODE_STORED,
+                    compressed_data: None,
+                    unknown_0: 0,
+                    unknown_1: 0,
+                    timestamp: [0; 16],
+                },
+            ],
+        };
+        arc.write(&dir.join("x_data.ras"), false).unwrap();
+        let plan = resolve_startup(&dir).expect("plan");
+        assert_eq!(plan.level_bytes, b"FROMRAS");
+        assert_eq!(
+            plan.level_win_path,
+            "\\data\\database\\levels\\front_end\\startup_level.ldb"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn main_menu_routes_tutorial_and_new_game() {
+        let text = r#"
+[Menu]
+{
+	[Item]
+	{
+		name = GCID_STARTTUTORIAL;
+		[Message] String = "maxpayne_gamemode->gm_init( tutorial );";
+	}
+	[Menu]
+	{
+		Name = GCID_NEWGAME;
+		[Item]
+		{
+			Name = GCID_NORMAL;
+			[Message] String = "maxpayne_gamemode->gm_init( startup_level );";
+		}
+		[Back]
+		Name = GCID_BACK;
+	}
+	[Item]
+	{
+		Name = GCID_QUIT;
+	}
+}
+"#;
+        let menu = parse_main_menu(text);
+        assert_eq!(menu[0].label, "Start Tutorial");
+        assert_eq!(menu[0].level_id.as_deref(), Some("tutorial"));
+        assert_eq!(
+            menu[1].children[0].level_id.as_deref(),
+            Some("startup_level")
+        );
+        assert!(menu[2].level_id.is_none());
+        assert!(!menu[2].quits);
+    }
+
+    #[test]
+    fn first_menu_lists_every_top_entry_and_quit_loads_nothing() {
+        let text = r#"
+[Menu]
+{
+	[Item]
+	{
+		name = GCID_RESUMEGAME;
+	}
+	[Item]
+	{
+		name = GCID_STARTTUTORIAL;
+		[Message] String = "maxpayne_gamemode->gm_init( tutorial );";
+	}
+	[Menu]
+	{
+		Name = GCID_NEWGAME;
+		[Item]
+		{
+			Name = GCID_NORMAL;
+			[Message] String = "maxpayne_gamemode->gm_init( startup_level );";
+		}
+	}
+	[Menu]
+	{
+		Name = GCID_LOAD;
+	}
+	[Menu]
+	{
+		Name = GCID_SAVE;
+	}
+	[Menu]
+	{
+		Name = GCID_OPTIONS;
+	}
+	[Menu]
+	{
+		Name = GCID_CREDITS;
+	}
+	[Menu]
+	{
+		Name = GCID_QUIT;
+		[Item]
+		{
+			name = GCID_QUIT_YES;
+			[Message] String = "X_ModeSwitch->S_Quit();";
+		}
+	}
+}
+"#;
+        let menu = parse_main_menu(text);
+        let labels: Vec<&str> = menu.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Resume",
+                "Start Tutorial",
+                "New Game",
+                "Load",
+                "Save",
+                "Options",
+                "Credits",
+                "Quit",
+            ]
+        );
+        assert_eq!(menu[1].level_id.as_deref(), Some("tutorial"));
+        assert_eq!(
+            menu[2].children[0].level_id.as_deref(),
+            Some("startup_level")
+        );
+        let yes = &menu[7].children[0];
+        assert!(yes.quits);
+        assert!(yes.level_id.is_none());
+    }
+
+    #[test]
+    fn extracted_menu_txt_routes_tutorial_and_new_game() {
+        let path = std::path::Path::new("/tmp/omp-xdata-ref/data/menu/menu.txt");
+        if !path.is_file() {
+            return;
+        }
+        let text = std::fs::read_to_string(path).unwrap();
+        let menu = parse_main_menu(&text);
+        let labels: Vec<&str> = menu.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Resume",
+                "Start Tutorial",
+                "New Game",
+                "Load",
+                "Save",
+                "Options",
+                "Credits",
+                "Quit",
+            ]
+        );
+        let yes = menu
+            .iter()
+            .find(|e| e.id == "GCID_QUIT")
+            .and_then(|e| e.children.iter().find(|c| c.id == "GCID_QUIT_YES"))
+            .unwrap();
+        assert!(yes.quits);
+        assert!(yes.level_id.is_none());
+        let tutorial = menu.iter().find(|e| e.label == "Start Tutorial").unwrap();
+        assert_eq!(tutorial.level_id.as_deref(), Some("tutorial"));
+        let new_game = menu.iter().find(|e| e.label == "New Game").unwrap();
+        assert!(new_game
+            .children
+            .iter()
+            .any(|c| c.level_id.as_deref() == Some("startup_level")));
     }
 
     #[test]
