@@ -302,17 +302,29 @@ impl SceneDynamicMesh {
 
 fn pose_on_track(mesh: &SceneDynamicMesh, anim: &SceneDynamicAnim) -> ([f32; 9], [f32; 3]) {
     let time = mesh.track_time.min(anim.duration.max(0.0));
-    let w = anim_weight(anim, time);
+    let (w, t) = track_weights(
+        &anim.curves,
+        anim.start_pos,
+        anim.end_pos,
+        anim.duration,
+        time,
+    );
     let local = [
         anim.start_pos[0] + (anim.end_pos[0] - anim.start_pos[0]) * w,
         anim.start_pos[1] + (anim.end_pos[1] - anim.start_pos[1]) * w,
         anim.start_pos[2] + (anim.end_pos[2] - anim.start_pos[2]) * w,
     ];
     if mesh.world_pos == mesh.local_start_pos {
-        let mat = if w >= 1.0 {
+        let mat = if time <= 0.0 {
+            anim.start_mat
+        } else if time >= anim.duration {
             anim.end_mat
         } else {
-            anim.start_mat
+            crate::kf2::quat_to_mat(crate::kf2::quat_slerp(
+                crate::kf2::mat_to_quat(anim.start_mat),
+                crate::kf2::mat_to_quat(anim.end_mat),
+                t,
+            ))
         };
         (mat, local)
     } else {
@@ -327,27 +339,45 @@ fn pose_on_track(mesh: &SceneDynamicMesh, anim: &SceneDynamicAnim) -> ([f32; 9],
     }
 }
 
-fn anim_weight(anim: &SceneDynamicAnim, time: f32) -> f32 {
-    let delta = dist3(anim.end_pos, anim.start_pos);
-    let mut best: &[f32] = &[];
-    let mut best_err = f32::MAX;
-    for samples in &anim.curves {
-        let Some(&last) = samples.last() else {
-            continue;
-        };
-        if samples.len() < 2 {
-            continue;
-        }
-        let err = (last.abs() - delta).abs();
-        if err < best_err {
-            best_err = err;
-            best = samples;
+/// Retail sampler `0x5ff100`: translation lerp weight is the distance curve
+/// (`+0xbc`) times `1/|end - start|` (`+0x88`); slerp `t` is the second curve
+/// (`+0xd8`) raw. Neither is clamped. An empty curve falls back to linear
+/// time (HYPOTHESIS: retail leaves the output unwritten).
+fn track_weights(
+    curves: &[Vec<f32>; 2],
+    start: [f32; 3],
+    end: [f32; 3],
+    duration: f32,
+    time: f32,
+) -> (f32, f32) {
+    if time <= 0.0 {
+        return (0.0, 0.0);
+    }
+    if time >= duration {
+        return (1.0, 1.0);
+    }
+    let u = time / duration;
+    let dist = dist3(end, start);
+    let w = match sample_curve(&curves[0], u) {
+        Some(d) if dist > 0.0 => d / dist,
+        Some(_) => 0.0,
+        None => u,
+    };
+    (w, sample_curve(&curves[1], u).unwrap_or(u))
+}
+
+/// Uniform piecewise-linear curve sample at `u` in `0..1` (`0x783450`).
+fn sample_curve(curve: &[f32], u: f32) -> Option<f32> {
+    match curve.len() {
+        0 => None,
+        1 => Some(curve[0]),
+        n => {
+            let f = u * (n - 1) as f32;
+            let k = (f.floor() as usize).min(n - 2);
+            let frac = f - k as f32;
+            Some(curve[k] * (1.0 - frac) + curve[k + 1] * frac)
         }
     }
-    if delta <= 0.05 || best_err > (delta * 0.05).max(0.5) {
-        best = &[];
-    }
-    curve_weight(best, anim.duration, time)
 }
 
 #[derive(Debug, Clone)]
@@ -1992,8 +2022,8 @@ struct FlyBone {
     start_pos: [f32; 3],
     end_pos: [f32; 3],
     duration: f32,
-    /// Distance-along-segment samples. Empty means a linear blend.
-    curve: Vec<f32>,
+    /// Distance curve (`+0xbc`) and slerp curve (`+0xd8`).
+    curves: [Vec<f32>; 2],
 }
 
 /// Startup flyover: ancestor bones run from t = 0, and `altitude::camera`
@@ -2033,11 +2063,13 @@ impl CameraFlyover {
 
 impl FlyBone {
     fn pos_at(&self, time: f32) -> [f32; 3] {
-        let w = if self.duration <= 0.0 {
-            1.0
-        } else {
-            curve_weight(&self.curve, self.duration, time.min(self.duration))
-        };
+        let (w, _) = track_weights(
+            &self.curves,
+            self.start_pos,
+            self.end_pos,
+            self.duration,
+            time,
+        );
         [
             self.start_pos[0] + (self.end_pos[0] - self.start_pos[0]) * w,
             self.start_pos[1] + (self.end_pos[1] - self.start_pos[1]) * w,
@@ -2054,26 +2086,6 @@ fn xform_point(mat: [f32; 9], origin: [f32; 3], v: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn curve_weight(curve: &[f32], duration: f32, time: f32) -> f32 {
-    let linear = if duration <= 0.0 {
-        1.0
-    } else {
-        (time / duration).clamp(0.0, 1.0)
-    };
-    let Some(&last) = curve.last() else {
-        return linear;
-    };
-    if curve.len() < 2 || last.abs() < 1.0e-4 {
-        return linear;
-    }
-    let f = linear * (curve.len() - 1) as f32;
-    let i = (f.floor() as usize).min(curve.len() - 1);
-    let j = (i + 1).min(curve.len() - 1);
-    let frac = f - i as f32;
-    let sample = curve[i] + (curve[j] - curve[i]) * frac;
-    (sample / last).clamp(0.0, 1.0)
-}
-
 fn segment_at(segments: &[FlyBone], time: f32) -> (&FlyBone, f32) {
     let mut remain = time.max(0.0);
     for seg in segments {
@@ -2087,31 +2099,12 @@ fn segment_at(segments: &[FlyBone], time: f32) -> (&FlyBone, f32) {
 }
 
 fn bone_from_anim(mesh: &SceneDynamicMesh, anim: &SceneDynamicAnim) -> FlyBone {
-    let delta = dist3(anim.end_pos, anim.start_pos);
-    let mut curve = Vec::new();
-    let mut best_err = f32::MAX;
-    for samples in &anim.curves {
-        let Some(&last) = samples.last() else {
-            continue;
-        };
-        if samples.len() < 2 {
-            continue;
-        }
-        let err = (last.abs() - delta).abs();
-        if err < best_err {
-            best_err = err;
-            curve.clone_from(samples);
-        }
-    }
-    if delta <= 0.05 || best_err > (delta * 0.05).max(0.5) {
-        curve.clear();
-    }
     FlyBone {
         mat: mesh.world_mat,
         start_pos: anim.start_pos,
         end_pos: anim.end_pos,
         duration: anim.duration,
-        curve,
+        curves: anim.curves.clone(),
     }
 }
 
@@ -2416,6 +2409,35 @@ mod tests {
             scripts: Vec::new(),
             curves: [Vec::new(), Vec::new()],
         }
+    }
+
+    /// Mesh whose rest pose is the track's start, half way through `anim`.
+    fn mid_track(anim: SceneDynamicAnim) -> SceneDynamicMesh {
+        let mut mesh = door_mesh(vec![anim]);
+        mesh.world_pos = mesh.local_start_pos;
+        mesh.play_track("open");
+        mesh.track_time = mesh.track_duration / 2.0;
+        mesh
+    }
+
+    #[test]
+    fn mid_track_rotation_slerps_by_the_second_curve() {
+        // 0x5ff100: curve +0xd8 is the raw slerp t between start and end.
+        let mut anim = track("open", [0.0; 3]);
+        anim.end_mat = [0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        anim.curves[1] = vec![0.0, 1.0];
+        let (mat, _) = mid_track(anim).posed_local();
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((mat[0] - h).abs() < 1.0e-4 && (mat[1] - h).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn mid_track_translation_is_distance_curve_over_length() {
+        // 0x5ff100: weight = sample(+0xbc) * (+0x88 = 1/|end - start|), no clamp.
+        let mut anim = track("open", [10.0, 0.0, 0.0]);
+        anim.curves[0] = vec![0.0, 12.0, 10.0];
+        let (_, pos) = mid_track(anim).posed_local();
+        assert!((pos[0] - 12.0).abs() < 1.0e-4);
     }
 
     #[test]

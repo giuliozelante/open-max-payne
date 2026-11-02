@@ -570,7 +570,7 @@ fn slerp_mat(a: [f32; 9], b: [f32; 9], t: f32) -> [f32; 9] {
     quat_to_mat(quat_slerp(mat_to_quat(a), mat_to_quat(b), t))
 }
 
-fn mat_to_quat(m: [f32; 9]) -> [f32; 4] {
+pub(crate) fn mat_to_quat(m: [f32; 9]) -> [f32; 4] {
     let (m00, m10, m20) = (m[0], m[1], m[2]);
     let (m01, m11, m21) = (m[3], m[4], m[5]);
     let (m02, m12, m22) = (m[6], m[7], m[8]);
@@ -590,7 +590,7 @@ fn mat_to_quat(m: [f32; 9]) -> [f32; 4] {
     }
 }
 
-fn quat_slerp(a: [f32; 4], mut b: [f32; 4], t: f32) -> [f32; 4] {
+pub(crate) fn quat_slerp(a: [f32; 4], mut b: [f32; 4], t: f32) -> [f32; 4] {
     let mut dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
     if dot < 0.0 {
         b = [-b[0], -b[1], -b[2], -b[3]];
@@ -626,7 +626,7 @@ fn quat_norm(q: [f32; 4]) -> [f32; 4] {
     }
 }
 
-fn quat_to_mat(q: [f32; 4]) -> [f32; 9] {
+pub(crate) fn quat_to_mat(q: [f32; 4]) -> [f32; 9] {
     let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
     let (xx, yy, zz) = (x * x, y * y, z * z);
     let (xy, xz, yz) = (x * y, x * z, y * z);
