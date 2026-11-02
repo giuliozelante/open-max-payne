@@ -58,5 +58,8 @@ record stores `0e 00`.
 **VERIFIED (game data, `data/database/materials.txt`):** each category sets `AlphaReference`
 (default `ID_ALPHAREFERENCE` = 15; `[Leaves]` = 127) and `BlendedAlphaTest` (default TRUE; `[Leaves]` FALSE).
 
-UNKNOWN: the exact comparison (`>` vs `>=` the reference), and how `BlendedAlphaTest` blends. e2mfc
-`P_Material::enableAlphaTest` / `setAlphaReference` are the places to read next.
+**VERIFIED (static, `e2driver/e2_d3d8_driver_mfc.dll`):** the only constant `D3DRS_ALPHAFUNC` (`0x19`)
+setting is **7 = `D3DCMP_GREATEREQUAL`** (`0x100353f8`, next to `D3DRS_ALPHAREF = 0x7f`; also
+`0x1002871a`). The other two sites restore saved state. So a texel passes when `alpha >= AlphaReference`.
+
+UNKNOWN: how `BlendedAlphaTest` blends.

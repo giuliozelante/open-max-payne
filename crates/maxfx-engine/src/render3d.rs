@@ -1474,8 +1474,8 @@ fn rasterize_tri(
                 0x008899aa
             };
             // Alpha test before the depth write, so cut-out texels hide nothing.
-            // HYPOTHESIS: retail passes when alpha > AlphaReference.
-            if alpha_reference.is_some_and(|reference| (base_rgb >> 24) as u8 <= reference) {
+            // Retail passes when alpha >= AlphaReference (D3DCMP_GREATEREQUAL).
+            if alpha_reference.is_some_and(|reference| ((base_rgb >> 24) as u8) < reference) {
                 continue;
             }
             if write_z {
@@ -1786,14 +1786,15 @@ mod tests {
     }
 
     #[test]
-    fn texels_at_or_below_the_alpha_reference_are_not_drawn() {
+    fn texels_below_the_alpha_reference_are_not_drawn() {
+        // e2_d3d8_driver_mfc 0x100353f8: D3DRS_ALPHAFUNC = 7 (D3DCMP_GREATEREQUAL).
         let mut scene = empty_scene();
         scene.textures.push(DecodedTexture {
             path: "mask".into(),
             flag: 4,
             width: 1,
             height: 1,
-            pixels: vec![0x0f80_8080],
+            pixels: vec![0x0e80_8080],
         });
         scene.materials.insert(
             1,
@@ -1806,9 +1807,9 @@ mod tests {
             },
         );
         scene.dynamic_meshes.push(glass_quad(false));
-        assert_eq!(painted_pixels(&scene), 0, "alpha 15 fails reference 15");
-        scene.textures[0].pixels[0] = 0x1080_8080;
-        assert!(painted_pixels(&scene) > 0, "alpha 16 passes reference 15");
+        assert_eq!(painted_pixels(&scene), 0, "alpha 14 fails reference 15");
+        scene.textures[0].pixels[0] = 0x0f80_8080;
+        assert!(painted_pixels(&scene) > 0, "alpha 15 passes reference 15");
     }
 
     #[test]
