@@ -430,9 +430,18 @@ pub struct SceneFsm {
     pub states: Vec<String>,
     pub default_state: String,
     pub startup_actions: Vec<String>,
-    /// `(hook name, calls with no state, per-state calls in file order)`.
-    pub hooks: Vec<(String, Vec<String>, Vec<(String, Vec<String>)>)>,
+    /// Every named script of the record (states, commands, events), in file order.
+    pub hooks: Vec<FsmScript>,
+    /// State scripts (`.ldb` map 2, runtime `+0x441`): `FSM_Switch` runs them.
+    pub state_scripts: Vec<FsmScript>,
+    /// Commands (`.ldb` map 3, runtime `+0x431`): `FSM_Send` runs them.
+    pub commands: Vec<FsmScript>,
+    /// Current state (runtime `+0x365`); starts at `default_state`.
+    pub state: String,
 }
+
+/// `(name, calls with no state, per-state calls in file order)`.
+pub type FsmScript = (String, Vec<String>, Vec<(String, Vec<String>)>);
 
 #[derive(Debug, Clone)]
 pub struct SceneCharacter {
@@ -657,6 +666,18 @@ impl LdbScene {
                         true
                     })
             }
+            "fsm_switch" => {
+                let Some(state) = msg.args.first().copied() else {
+                    return false;
+                };
+                self.fsm_switch(msg.receiver, state)
+            }
+            "fsm_send" => {
+                let Some(command) = msg.args.first().copied() else {
+                    return false;
+                };
+                self.fsm_send(msg.receiver, command)
+            }
             "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
             "do_hide" => {
                 let hidden = match msg.args.first().copied().unwrap_or("") {
@@ -809,23 +830,69 @@ impl LdbScene {
     }
 
     fn dispatch_hook(&mut self, fsm_name: &str, hook_name: &str) -> bool {
-        let scripts = self
-            .fsms
-            .iter()
-            .find(|fsm| fsm.name.eq_ignore_ascii_case(fsm_name))
-            .and_then(|fsm| {
-                fsm.hooks
-                    .iter()
-                    .find(|(name, _, _)| name.eq_ignore_ascii_case(hook_name))
-                    .map(|(_, acts, _)| acts.clone())
-            });
-        let Some(scripts) = scripts else {
+        let Some(index) = self.fsm_index(fsm_name) else {
             return false;
         };
-        let mut ran = false;
-        for act in &scripts {
-            ran |= self.dispatch_message(fsm_name, act);
+        let fsm = &self.fsms[index];
+        let Some(script) = find_script(&fsm.hooks, hook_name) else {
+            return false;
+        };
+        let state = fsm.state.clone();
+        self.run_fsm_script(index, script, &state)
+    }
+
+    /// `FSM_Switch` (0x6e30a0): store the new state, then run its script with the old state.
+    fn fsm_switch(&mut self, fsm_name: &str, state: &str) -> bool {
+        let Some(index) = self.fsm_index(fsm_name) else {
+            return false;
+        };
+        let old = std::mem::replace(&mut self.fsms[index].state, state.to_string());
+        if let Some(script) = find_script(&self.fsms[index].state_scripts, state) {
+            self.run_fsm_script(index, script, &old);
         }
+        true
+    }
+
+    /// `FSM_Send` (0x6e2f10): run the command's script with the current state.
+    fn fsm_send(&mut self, fsm_name: &str, command: &str) -> bool {
+        let Some(index) = self.fsm_index(fsm_name) else {
+            return false;
+        };
+        let fsm = &self.fsms[index];
+        let Some(script) = find_script(&fsm.commands, command) else {
+            return false;
+        };
+        let state = fsm.state.clone();
+        self.run_fsm_script(index, script, &state)
+    }
+
+    fn fsm_index(&self, fsm_name: &str) -> Option<usize> {
+        self.fsms
+            .iter()
+            .position(|fsm| fsm.name.eq_ignore_ascii_case(fsm_name))
+    }
+
+    /// The calls with no state, then the calls of the `section` state. Nested FSM scripts stop
+    /// at depth 32, the limit retail warns at (`0x89b294`).
+    fn run_fsm_script(&mut self, index: usize, script: FsmScript, section: &str) -> bool {
+        thread_local! {
+            static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        if DEPTH.get() >= 32 {
+            return false;
+        }
+        DEPTH.set(DEPTH.get() + 1);
+        let name = self.fsms[index].name.clone();
+        let (_, plain, per_state) = script;
+        let calls = per_state
+            .into_iter()
+            .filter(|(state, _)| state.eq_ignore_ascii_case(section))
+            .flat_map(|(_, calls)| calls);
+        let mut ran = false;
+        for act in plain.into_iter().chain(calls) {
+            ran |= self.dispatch_message(&name, &act);
+        }
+        DEPTH.set(DEPTH.get() - 1);
         ran
     }
 
@@ -916,6 +983,13 @@ fn strip_trigger_suffix(name: &str) -> &str {
     } else {
         name
     }
+}
+
+fn find_script(scripts: &[FsmScript], name: &str) -> Option<FsmScript> {
+    scripts
+        .iter()
+        .find(|(script, _, _)| script.eq_ignore_ascii_case(name))
+        .cloned()
 }
 
 fn strip_mesh_suffix(name: &str) -> &str {
@@ -1754,19 +1828,26 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
             let states = read_str_list(data, &mut i, 0x1c)?;
             let default_state = read_str(data, &mut i)?;
             let startup_actions = read_str_list(data, &mut i, 0x1c)?;
+            // `X_LevelDBFSM` (0x5fad40): the startup script (list, per-state map, list), then
+            // maps of named scripts: states +0xe4, commands +0xf4, events +0x104.
             let mut hooks = skip_hook_map(data, &mut i)?;
             let _extra = read_str_list(data, &mut i, 0x1c)?;
-            hooks.append(&mut skip_hook_map(data, &mut i)?);
-            hooks.append(&mut skip_hook_map(data, &mut i)?);
+            let state_scripts = skip_hook_map(data, &mut i)?;
+            let commands = skip_hook_map(data, &mut i)?;
+            hooks.extend(state_scripts.iter().cloned());
+            hooks.extend(commands.iter().cloned());
             hooks.append(&mut skip_hook_map(data, &mut i)?);
             fsms.push(SceneFsm {
                 name,
                 room_id,
                 pos,
                 states,
+                state: default_state.clone(),
                 default_state,
                 startup_actions,
                 hooks,
+                state_scripts,
+                commands,
             });
         }
     }
@@ -3012,6 +3093,86 @@ mod tests {
         let far = [at[0] + 100.0, at[1], at[2]];
         assert!(!scene.activate_nearest_trigger(&origins, far, 36.0));
         assert!(scene.sound_queue.is_empty());
+    }
+
+    const HIDE: &str = "::startroom::door.DO->DO_Hide(true);";
+    const SHOW: &str = "::startroom::door.DO->DO_Hide(false);";
+
+    /// `::startroom::door` FSM in state `closed`, next to its door mesh.
+    fn door_fsm_scene() -> LdbScene {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.dynamic_meshes.push(door_mesh(Vec::new()));
+        scene.fsms.push(SceneFsm {
+            name: "::startroom::door".into(),
+            room_id: 1,
+            pos: [0.0; 3],
+            states: vec!["closed".into(), "open".into()],
+            default_state: "closed".into(),
+            startup_actions: Vec::new(),
+            hooks: vec![(
+                "T_Activate".into(),
+                Vec::new(),
+                vec![("open".into(), vec![SHOW.into()])],
+            )],
+            state_scripts: vec![(
+                "open".into(),
+                Vec::new(),
+                vec![("closed".into(), vec![HIDE.into()])],
+            )],
+            commands: vec![(
+                "toggle".into(),
+                Vec::new(),
+                vec![
+                    ("closed".into(), vec![HIDE.into()]),
+                    ("open".into(), vec![SHOW.into()]),
+                ],
+            )],
+            state: "closed".into(),
+        });
+        scene
+    }
+
+    #[test]
+    fn fsm_switch_runs_the_new_state_script_with_the_previous_state_section() {
+        // 0x6e30a0 saves the old state (0x6e1670), stores the new one at +0x365, then runs the
+        // state's script (map +0x441, 0x6e3910) with the old state.
+        let mut scene = door_fsm_scene();
+        assert!(scene.dispatch_message("", "::startroom::door->FSM_Switch(open);"));
+        assert_eq!(scene.fsms[0].state, "open");
+        assert!(scene.dynamic_meshes[0].hidden);
+    }
+
+    #[test]
+    fn fsm_send_runs_the_command_section_for_the_current_state() {
+        // 0x6e2f10 looks the command up in map +0x431 (0x6e37c0) with the current state.
+        let mut scene = door_fsm_scene();
+        assert!(scene.dispatch_message("", "::startroom::door->FSM_Send(toggle);"));
+        assert!(scene.dynamic_meshes[0].hidden);
+        scene.fsms[0].state = "open".into();
+        assert!(scene.dispatch_message("", "::startroom::door->FSM_Send(toggle);"));
+        assert!(!scene.dynamic_meshes[0].hidden);
+    }
+
+    #[test]
+    fn event_hooks_run_the_current_state_section() {
+        let mut scene = door_fsm_scene();
+        scene.dynamic_meshes[0].hidden = true;
+        assert!(!scene.dispatch_hook("::startroom::door", "T_Activate"));
+        assert!(scene.dynamic_meshes[0].hidden);
+        scene.fsms[0].state = "open".into();
+        assert!(scene.dispatch_hook("::startroom::door", "T_Activate"));
+        assert!(!scene.dynamic_meshes[0].hidden);
+    }
+
+    #[test]
+    fn fsm_switch_to_itself_from_its_own_script_stops() {
+        // Retail warns at a depth above 32 (`0x89b294`, "recursively switching").
+        let mut scene = door_fsm_scene();
+        scene.fsms[0].state_scripts[0]
+            .1
+            .push("::startroom::door->FSM_Switch(open);".into());
+        assert!(scene.dispatch_message("", "::startroom::door->FSM_Switch(open);"));
+        assert_eq!(scene.fsms[0].state, "open");
     }
 
     #[test]
