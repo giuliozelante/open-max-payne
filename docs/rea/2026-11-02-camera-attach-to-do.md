@@ -39,7 +39,8 @@ cutscene pairing only; the `MaxPayne_GameMode` handler has not been read.
 ## Open
 
 - The view pose has been checked only in offline engine frames, not against a retail frame.
-- The startup flyover (`camera_flyover`) still uses **+z** for its forward vector; by the evidence above that is
-  backwards. It is not changed here.
+- The startup flyover (`camera_flyover`) uses **+z** for a fixed forward vector and ignores the rotation of its
+  two `cam_rotator` ancestors. Offline frames along +z dolly forward down the street, which reads plausibly, so
+  this note does not settle its direction. UNKNOWN until the rotators are applied.
 - Blend between weights (does 50 mix the views?), arg 1, field of view (`GM_ChangeFOV`).
 - `CAM_AnimateInPlace` (184) and `CAM_AnimateParented` (64).
