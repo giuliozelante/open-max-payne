@@ -1048,6 +1048,14 @@ fn player_mesh_yaw(look_yaw: f32) -> f32 {
 }
 
 /// Pull a decal toward the camera by its `DetailOffset` distance.
+/// Lightmap layer `MUL` = `D3DTOP_MODULATE` (`e2_d3d8_driver_mfc` `0x10008082`): per channel
+/// `texture × lightmap / 255`, no overbright. Alpha bits are dropped.
+fn lightmap_modulate(texture: u32, lightmap: u32) -> u32 {
+    let channel =
+        |shift: u32| (((texture >> shift) & 0xff) * ((lightmap >> shift) & 0xff) / 255) << shift;
+    channel(16) | channel(8) | channel(0)
+}
+
 fn decal_depth(z: f32, depth_bias: f32) -> f32 {
     z - depth_bias
 }
@@ -1484,12 +1492,10 @@ fn rasterize_tri(
                 let lx = (lu.clamp(0.0, 1.0) * (lm.width - 1) as f32) as u32;
                 let ly = (lv.clamp(0.0, 1.0) * (lm.height - 1) as f32) as u32;
                 if let Some(&lcol) = lm.pixels.get((ly * lm.width + lx) as usize) {
-                    let lr = (((lcol >> 16) & 0xff) as f32 / 255.0 * 1.65).clamp(0.22, 1.4);
-                    let lg = (((lcol >> 8) & 0xff) as f32 / 255.0 * 1.65).clamp(0.22, 1.4);
-                    let lb = ((lcol & 0xff) as f32 / 255.0 * 1.65).clamp(0.22, 1.4);
-                    r *= lr;
-                    g *= lg;
-                    b *= lb;
+                    let lit = lightmap_modulate(base_rgb, lcol);
+                    r = ((lit >> 16) & 0xff) as f32;
+                    g = ((lit >> 8) & 0xff) as f32;
+                    b = (lit & 0xff) as f32;
                 }
             } else {
                 r *= shade;
@@ -1622,6 +1628,14 @@ fn draw_line(fb: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, col: u32) {
 mod tests {
     use super::*;
     use crate::scene::{SceneDynamicMesh, SceneMaterial, ScenePoly, SceneVertex};
+
+    #[test]
+    fn lightmap_modulates_the_texture_like_d3dtop_modulate() {
+        // e2_d3d8_driver_mfc 0x10008082: layer MUL -> colour op 4 (D3DTOP_MODULATE).
+        assert_eq!(lightmap_modulate(0x0080_8080, 0x0080_8080), 0x0040_4040);
+        assert_eq!(lightmap_modulate(0x0020_4060, 0x00ff_ffff), 0x0020_4060);
+        assert_eq!(lightmap_modulate(0x00ff_ffff, 0x0000_0000), 0x0000_0000);
+    }
 
     #[test]
     fn chase_eye_sits_behind_and_above_the_player() {
