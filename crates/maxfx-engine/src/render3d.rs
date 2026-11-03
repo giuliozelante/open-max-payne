@@ -629,6 +629,7 @@ pub fn run_3d_walkthrough(
                         en.world_pos,
                         en.hit_flash > 0.0,
                         &world_lights,
+                        scene.ambient,
                     );
                     characters.push(crate::gpu::GpuCharacter {
                         mesh: &erig.mesh,
@@ -651,8 +652,14 @@ pub fn run_3d_walkthrough(
                     player_moving,
                     false,
                 );
-                let light =
-                    character_vertex_light(&prig.mesh, &verts, player_feet, false, &world_lights);
+                let light = character_vertex_light(
+                    &prig.mesh,
+                    &verts,
+                    player_feet,
+                    false,
+                    &world_lights,
+                    scene.ambient,
+                );
                 characters.push(crate::gpu::GpuCharacter {
                     mesh: &prig.mesh,
                     verts,
@@ -719,6 +726,7 @@ pub fn run_3d_walkthrough(
                     en.health <= 0,
                     en.hit_flash > 0.0,
                     &world_lights,
+                    scene.ambient,
                     cam_pos,
                     cam_right,
                     cam_up,
@@ -747,6 +755,7 @@ pub fn run_3d_walkthrough(
                     false,
                     false,
                     &world_lights,
+                    scene.ambient,
                     cam_pos,
                     cam_right,
                     cam_up,
@@ -1521,6 +1530,7 @@ pub(crate) fn character_vertex_light(
     world_pos: [f32; 3],
     hit_flash: bool,
     lights: &[ScenePointLight],
+    ambient: [f32; 3],
 ) -> Vec<[f32; 3]> {
     if hit_flash {
         return vec![[1.35; 3]; world.len()];
@@ -1539,7 +1549,11 @@ pub(crate) fn character_vertex_light(
     world
         .iter()
         .zip(&normals)
-        .map(|(p, n)| vertex_diffuse(*p, *n, &picked))
+        .map(|(p, n)| {
+            // D3D fixed function: white material ambient × D3DRS_AMBIENT + Σ light diffuse, clamped.
+            let d = vertex_diffuse(*p, *n, &picked);
+            std::array::from_fn(|c| (d[c] + ambient[c] / 255.0).min(1.0))
+        })
         .collect()
 }
 
@@ -1553,6 +1567,7 @@ fn render_kfs_character(
     dead: bool,
     hit_flash: bool,
     lights: &[ScenePointLight],
+    ambient: [f32; 3],
     cam_pos: [f32; 3],
     cam_right: [f32; 3],
     cam_up: [f32; 3],
@@ -1579,7 +1594,7 @@ fn render_kfs_character(
         cam_pts.push([cx, cy_c, cz]);
     }
 
-    let vertex_light = character_vertex_light(mesh, &world, world_pos, hit_flash, lights);
+    let vertex_light = character_vertex_light(mesh, &world, world_pos, hit_flash, lights, ambient);
     let mut tris = Vec::new();
     for face in &mesh.faces {
         let [i0, i1, i2] = face.indices;
@@ -2241,6 +2256,7 @@ pub(crate) fn test_software_character(
         false,
         hit_flash,
         &[],
+        [0.0; 3],
         cam,
         right,
         up,
@@ -2340,6 +2356,25 @@ mod tests {
             &near.iter().collect::<Vec<_>>(),
         );
         assert_eq!(sat, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn character_light_adds_the_level_ambient_before_the_clamp() {
+        // One vertex, no faces: no normal, so point lights add nothing and only the ambient shows.
+        let rig = crate::kf2::KfsMesh {
+            name: "dot".into(),
+            vertices: vec![[0.0; 3]],
+            faces: Vec::new(),
+            material_textures: Vec::new(),
+        };
+        let verts = vec![[0.0, 0.0, 0.0]];
+        let dark = character_vertex_light(&rig, &verts, [0.0; 3], false, &[], [0.0; 3]);
+        assert_eq!(dark[0], [0.0, 0.0, 0.0]);
+        let lit = character_vertex_light(&rig, &verts, [0.0; 3], false, &[], [140.0, 135.0, 110.0]);
+        assert_eq!(lit[0], [140.0 / 255.0, 135.0 / 255.0, 110.0 / 255.0]);
+        let near = [light([0.0, 0.1, 0.0], 255.0, 10.0, 1.0)];
+        let sat = character_vertex_light(&rig, &verts, [0.0; 3], false, &near, [300.0, 0.0, 0.0]);
+        assert_eq!(sat[0], [1.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -2450,6 +2485,7 @@ mod tests {
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
+            ambient: [0.0; 3],
             mode_switch: None,
         }
     }
