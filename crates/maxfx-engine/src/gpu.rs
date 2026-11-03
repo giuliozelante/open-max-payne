@@ -173,7 +173,7 @@ fn window_targets(
         &renderer.device,
         &renderer.image_layout,
         &color.create_view(&Default::default()),
-        &renderer.binder.tex_sampler,
+        &renderer.binder.image_sampler,
     );
     (color, depth, group)
 }
@@ -306,6 +306,8 @@ struct Binder {
     model_layout: wgpu::BindGroupLayout,
     tex_sampler: wgpu::Sampler,
     lmap_sampler: wgpu::Sampler,
+    /// Nearest, for screen-space images (frame layers, render targets) and the sky strip.
+    image_sampler: wgpu::Sampler,
     blank: wgpu::TextureView,
 }
 
@@ -397,42 +399,87 @@ pub struct GpuCharacter<'a> {
     pub light: Vec<[f32; 3]>,
 }
 
+/// Box-filtered mip levels, from the full image down to 1x1 (`(width, height, pixels)`).
+fn mip_chain(width: u32, height: u32, pixels: &[u32]) -> Vec<(u32, u32, Vec<u32>)> {
+    let mut levels = vec![(width, height, pixels.to_vec())];
+    while let Some((w, h, src)) = levels.last().filter(|l| l.0 > 1 || l.1 > 1) {
+        let (w, h) = (*w, *h);
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let texel = |x: u32, y: u32| src[(y.min(h - 1) * w + x.min(w - 1)) as usize];
+        let mut out = Vec::with_capacity((nw * nh) as usize);
+        for y in 0..nh {
+            for x in 0..nw {
+                let quad = [
+                    texel(2 * x, 2 * y),
+                    texel(2 * x + 1, 2 * y),
+                    texel(2 * x, 2 * y + 1),
+                    texel(2 * x + 1, 2 * y + 1),
+                ];
+                let channel = |shift: u32| {
+                    let sum: u32 = quad.iter().map(|p| (p >> shift) & 0xff).sum();
+                    ((sum + 2) / 4) << shift
+                };
+                out.push(channel(24) | channel(16) | channel(8) | channel(0));
+            }
+        }
+        levels.push((nw, nh, out));
+    }
+    levels
+}
+
+/// Upload an image; `mipmaps` adds the `mip_chain` levels (diffuse textures, sampled trilinearly).
 fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     width: u32,
     height: u32,
     pixels: &[u32],
+    mipmaps: bool,
 ) -> wgpu::TextureView {
-    let size = wgpu::Extent3d {
-        width,
-        height,
-        depth_or_array_layers: 1,
+    let levels = if mipmaps {
+        mip_chain(width, height, pixels)
+    } else {
+        vec![(width, height, pixels.to_vec())]
     };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
-        size,
-        mip_level_count: 1,
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: levels.len() as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let bytes: Vec<u8> = pixels
-        .iter()
-        .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8])
-        .collect();
-    queue.write_texture(
-        texture.as_image_copy(),
-        &bytes,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4 * width),
-            rows_per_image: Some(height),
-        },
-        size,
-    );
+    for (mip_level, (w, h, level)) in levels.iter().enumerate() {
+        let bytes: Vec<u8> = level
+            .iter()
+            .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8])
+            .collect();
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: mip_level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * w),
+                rows_per_image: Some(*h),
+            },
+            wgpu::Extent3d {
+                width: *w,
+                height: *h,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
     texture.create_view(&Default::default())
 }
 
@@ -569,7 +616,7 @@ struct Frag { @location(0) color: vec4f, @builtin(frag_depth) depth: f32 };
 fn fs(i: Out) -> Frag {
     var base = vec4f(0.533, 0.6, 0.667, 1.0);
     if batch.params.z > 0.5 {
-        base = textureSample(tex, tex_sampler, fract(i.uv));
+        base = textureSample(tex, tex_sampler, i.uv);
     }
     if batch.params.x >= 0.0 && base.a < batch.params.x {
         discard;
@@ -814,10 +861,16 @@ impl GpuRenderer {
                 address_mode_w: address,
                 mag_filter: filter,
                 min_filter: filter,
+                mipmap_filter: match filter {
+                    wgpu::FilterMode::Linear => wgpu::MipmapFilterMode::Linear,
+                    wgpu::FilterMode::Nearest => wgpu::MipmapFilterMode::Nearest,
+                },
                 ..Default::default()
             })
         };
-        let tex_sampler = sampler(wgpu::AddressMode::Repeat, wgpu::FilterMode::Nearest);
+        // Retail filters diffuse textures (`FilteringMode`: bilinear, trilinear or anisotropic; the
+        // default is not read yet). Trilinear over `mip_chain` levels.
+        let tex_sampler = sampler(wgpu::AddressMode::Repeat, wgpu::FilterMode::Linear);
         // `render3d::sample_lightmap`: lightmaps are filtered, so their shading is smooth.
         let lmap_sampler = sampler(wgpu::AddressMode::ClampToEdge, wgpu::FilterMode::Linear);
         let binder = Binder {
@@ -825,14 +878,15 @@ impl GpuRenderer {
             model_layout,
             tex_sampler,
             lmap_sampler,
-            blank: upload(&device, &queue, 1, 1, &[0xffff_ffff]),
+            image_sampler: sampler(wgpu::AddressMode::Repeat, wgpu::FilterMode::Nearest),
+            blank: upload(&device, &queue, 1, 1, &[0xffff_ffff], false),
         };
         let textures: Vec<_> = scene
             .textures
             .iter()
             .map(|t| {
                 (t.width > 0 && t.height > 0)
-                    .then(|| upload(&device, &queue, t.width, t.height, &t.pixels))
+                    .then(|| upload(&device, &queue, t.width, t.height, &t.pixels, true))
             })
             .collect();
         let lightmaps: Vec<_> = scene
@@ -840,7 +894,7 @@ impl GpuRenderer {
             .iter()
             .map(|l| {
                 (l.width > 0 && l.height > 0)
-                    .then(|| upload(&device, &queue, l.width, l.height, &l.pixels))
+                    .then(|| upload(&device, &queue, l.width, l.height, &l.pixels, false))
             })
             .collect();
 
@@ -967,7 +1021,7 @@ impl GpuRenderer {
                 view_formats: &[],
             });
             let view = texture.create_view(&Default::default());
-            let group = image_group(&device, &image_layout, &view, &binder.tex_sampler);
+            let group = image_group(&device, &image_layout, &view, &binder.image_sampler);
             (texture, group)
         };
         let background_image = frame_image();
@@ -990,7 +1044,7 @@ impl GpuRenderer {
             None,
             true,
         );
-        let sky_group = image_group(&device, &image_layout, &binder.blank, &binder.tex_sampler);
+        let sky_group = image_group(&device, &image_layout, &binder.blank, &binder.image_sampler);
         Self {
             device,
             queue,
@@ -1316,7 +1370,14 @@ impl GpuRenderer {
                     .map(|m| {
                         let tex = ch.mesh.material_textures.get(m).and_then(Option::as_ref);
                         let view = tex.filter(|t| t.width > 0 && t.height > 0).map(|t| {
-                            upload(&self.device, &self.queue, t.width, t.height, &t.pixels)
+                            upload(
+                                &self.device,
+                                &self.queue,
+                                t.width,
+                                t.height,
+                                &t.pixels,
+                                true,
+                            )
                         });
                         let uniform = BatchUniform {
                             params: [-1.0, 0.0, if view.is_some() { 1.0 } else { 0.0 }, 0.0],
@@ -1400,14 +1461,21 @@ impl GpuRenderer {
 impl GpuRenderer {
     /// The level's world sphere strip (`sky_strip_uv`), or `None` for the flat background.
     pub fn set_sky(&mut self, sky: Option<&crate::scene::DecodedTexture>) {
-        let view = sky
-            .filter(|t| t.width > 0 && t.height > 0)
-            .map(|t| upload(&self.device, &self.queue, t.width, t.height, &t.pixels));
+        let view = sky.filter(|t| t.width > 0 && t.height > 0).map(|t| {
+            upload(
+                &self.device,
+                &self.queue,
+                t.width,
+                t.height,
+                &t.pixels,
+                false,
+            )
+        });
         let group = image_group(
             &self.device,
             &self.image_layout,
             view.as_ref().unwrap_or(&self.binder.blank),
-            &self.binder.tex_sampler,
+            &self.binder.image_sampler,
         );
         self.sky = (group, view.is_some());
     }
@@ -2100,6 +2168,80 @@ mod tests {
         let row = (h / 2) * w;
         let covered: Vec<usize> = (row..row + w).filter(|&i| sw_zb[i].is_finite()).collect();
         assert!(covered.len() > 20, "the quad must cover the middle row");
+        let close = covered
+            .iter()
+            .filter(|&&i| {
+                (0..3).all(|k| {
+                    ((fb[i] >> (8 * k)) & 0xff).abs_diff((sw_fb[i] >> (8 * k)) & 0xff) <= 3
+                })
+            })
+            .count();
+        assert!(
+            close as f32 / covered.len() as f32 > 0.95,
+            "{close} of {}",
+            covered.len()
+        );
+    }
+
+    #[test]
+    fn mip_chain_halves_each_level_with_a_box_filter() {
+        let levels = mip_chain(2, 2, &[0xff00_0000, 0xff00_0000, 0xffff_ffff, 0x00ff_ffff]);
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[1], (1, 1, vec![0xbf80_8080]));
+        // Non-square: 4x1 -> 2x1 -> 1x1.
+        let levels = mip_chain(4, 1, &[0, 0x0004_0404, 0x0008_0808, 0x000c_0c0c]);
+        assert_eq!(
+            levels.iter().map(|l| (l.0, l.1)).collect::<Vec<_>>(),
+            [(4, 1), (2, 1), (1, 1)]
+        );
+        assert_eq!(levels[2].2, vec![0x0006_0606]);
+    }
+
+    #[test]
+    fn gpu_texture_filtering_matches_the_software_texture() {
+        // A black-to-white 2x1 texture stretched across the quad: both renderers blend it.
+        let mut poly = quad(1, -1);
+        for v in &mut poly.vertices {
+            v.uv = [(v.pos[2] + 1.0) * 0.5, 0.5];
+        }
+        let mut scene = scene_with(vec![poly], [0.0; 3]);
+        scene.textures.push(crate::scene::DecodedTexture {
+            path: "ramp".into(),
+            flag: 0,
+            width: 2,
+            height: 1,
+            pixels: vec![0xff00_0000, 0xffff_ffff],
+        });
+        scene.materials.insert(
+            1,
+            SceneMaterial {
+                id: 1,
+                category: "wall".into(),
+                texture_path: String::new(),
+                texture_index: Some(0),
+                alpha_reference: None,
+                blended: false,
+            },
+        );
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: gpu_texture_filtering_matches_the_software_texture skipped");
+            return;
+        };
+        let view = crate::render3d::test_view([-4.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        let (sw_fb, sw_zb) = crate::render3d::test_software_static(&scene, view);
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let mut fb = vec![0u32; w * h];
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
+        let row = (h / 2) * w;
+        let covered: Vec<usize> = (row..row + w).filter(|&i| sw_zb[i].is_finite()).collect();
+        assert!(covered.len() > 20, "the quad must cover the middle row");
+        let distinct: std::collections::BTreeSet<u32> =
+            covered.iter().map(|&i| sw_fb[i] & 0xff).collect();
+        assert!(
+            distinct.len() > 20,
+            "software must blend, not step: {distinct:?}"
+        );
         let close = covered
             .iter()
             .filter(|&&i| {

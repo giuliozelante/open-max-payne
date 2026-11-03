@@ -1996,6 +1996,32 @@ fn sample_lightmap(lm: &DecodedLightmap, u: f32, v: f32) -> u32 {
     channel(16) | channel(8) | channel(0)
 }
 
+/// Bilinear diffuse texel at `(u, v)` with repeat addressing, all four channels (alpha is
+/// filtered before the alpha test, as in D3D). Retail offers bilinear, trilinear and anisotropic
+/// filtering (`FilteringMode`); the software renderer has no mipmaps.
+fn sample_texture(t: &crate::scene::DecodedTexture, u: f32, v: f32) -> u32 {
+    let (w, h) = (t.width.max(1), t.height.max(1));
+    let x = (u * w as f32 - 0.5).rem_euclid(w as f32);
+    let y = (v * h as f32 - 0.5).rem_euclid(h as f32);
+    let (x0, y0) = ((x as u32).min(w - 1), (y as u32).min(h - 1));
+    let (x1, y1) = ((x0 + 1) % w, (y0 + 1) % h);
+    let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+    let texel = |tx: u32, ty: u32| {
+        t.pixels
+            .get((ty * w + tx) as usize)
+            .copied()
+            .unwrap_or(0x0099_9999)
+    };
+    let (c00, c10, c01, c11) = (texel(x0, y0), texel(x1, y0), texel(x0, y1), texel(x1, y1));
+    let channel = |shift: u32| {
+        let c = |p: u32| ((p >> shift) & 0xff) as f32;
+        let top = c(c00) + (c(c10) - c(c00)) * fx;
+        let bottom = c(c01) + (c(c11) - c(c01)) * fx;
+        ((top + (bottom - top) * fy).round() as u32) << shift
+    };
+    channel(24) | channel(16) | channel(8) | channel(0)
+}
+
 fn lightmap_modulate(texture: u32, lightmap: u32) -> u32 {
     let channel =
         |shift: u32| (((texture >> shift) & 0xff) * ((lightmap >> shift) & 0xff) / 255) << shift;
@@ -2687,12 +2713,7 @@ fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usi
             let v = (w0 * p0.v_over_z + w1 * p1.v_over_z + w2 * p2.v_over_z) * z;
 
             let base_rgb = if let Some(t) = tex {
-                let tx = (u.rem_euclid(1.0) * t.width as f32) as u32 % t.width.max(1);
-                let ty = (v.rem_euclid(1.0) * t.height as f32) as u32 % t.height.max(1);
-                t.pixels
-                    .get((ty * t.width + tx) as usize)
-                    .copied()
-                    .unwrap_or(0x00999999)
+                sample_texture(t, u, v)
             } else {
                 0x008899aa
             };
@@ -3374,6 +3395,24 @@ mod tests {
         assert_eq!(sample_lightmap(&lm, 0.75, 0.5), 0x00ff_ffff);
         assert_eq!(sample_lightmap(&lm, 0.5, 0.5), 0x0080_8080);
         assert_eq!(sample_lightmap(&lm, 1.0, 0.5), 0x00ff_ffff);
+    }
+
+    #[test]
+    fn textures_are_sampled_bilinearly_and_wrap() {
+        // Retail draws filtered textures (FilteringBilinear/Trilinear); nearest looked pixelated.
+        let tex = crate::scene::DecodedTexture {
+            path: String::new(),
+            flag: 0,
+            width: 2,
+            height: 1,
+            pixels: vec![0x0000_0000, 0xffff_ffff],
+        };
+        assert_eq!(sample_texture(&tex, 0.25, 0.5), 0x0000_0000);
+        assert_eq!(sample_texture(&tex, 0.75, 0.5), 0xffff_ffff);
+        assert_eq!(sample_texture(&tex, 0.5, 0.5), 0x8080_8080);
+        // Repeat addressing: u = 0 sits between the last and the first texel.
+        assert_eq!(sample_texture(&tex, 0.0, 0.5), 0x8080_8080);
+        assert_eq!(sample_texture(&tex, 1.25, 0.5), 0x0000_0000);
     }
 
     #[test]
