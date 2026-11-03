@@ -2612,6 +2612,27 @@ pub fn music_win_path(music_txt: &str, cue: &str) -> Option<String> {
     ))
 }
 
+/// `camerapaths.txt` `[block]`: archive path of its first `[Animation]` `Filename` (a KF2 camera path).
+pub fn camera_path_file(camerapaths_txt: &str, block: &str) -> Option<String> {
+    let header = format!("[{}]", block.trim());
+    let mut lines = camerapaths_txt.lines().skip_while(|line| {
+        let head = line.split("//").next().unwrap_or("").trim();
+        !head.eq_ignore_ascii_case(&header)
+    });
+    lines.next()?;
+    // Nested sections are indented; the next block header starts at column 0.
+    let file = lines
+        .take_while(|line| !line.starts_with('['))
+        .filter_map(assign_pair)
+        .find(|(key, value)| key.eq_ignore_ascii_case("filename") && !value.is_empty())?
+        .1
+        .replace('/', "\\");
+    Some(format!(
+        "\\data\\database\\camerapaths\\{}",
+        file.trim_start_matches('\\')
+    ))
+}
+
 /// `Looping = YES` inside `[cue]` (siren and engine loops in `sounds/dynamic.txt`).
 pub fn sound_cue_looping(text: &str, cue: &str) -> bool {
     sound_cue_value(text, cue, "looping")
@@ -3891,6 +3912,25 @@ mod tests {
         let mut frame = vec![0u32; 2];
         bgra_to_frame(&bytes, &mut frame);
         assert_eq!(frame, vec![0x0030_2010, 0x0003_0201]);
+    }
+
+    #[test]
+    fn camera_path_file_reads_the_first_animation_of_the_block() {
+        let text = "#define HUD_FADEOUT_TIME 0.25\r\n[shake_quick]\r\n{\r\n\t[Attributes]\r\n\tAbortable \t= FALSE;\r\n\r\n\t[Animationset]\r\n\t{\r\n\t\t[Animation]\r\n\t\tIndex = 0;\r\n\t\tFilename = \"effects\\explosion.kf2\";\r\n\t}\r\n\t[Exit]\r\n\t{\r\n\t}\r\n}\r\n\r\n[shake_normal]\r\n{\r\n\t[Animationset]\r\n\t{\r\n\t\t[Animation]\r\n\t\tFilename = \"effects\\shake_quick.kf2\";\r\n\t}\r\n}\r\n[no_file]\r\n{\r\n}\r\n[Death_01]\t\t// 3 second circle\r\n{\r\n\t[Animationset]\r\n\t{\r\n\t\t[Animation]\r\n\t\tFilename = \"cinematic\\death_01.KF2\";\r\n\t}\r\n}\r\n";
+        assert_eq!(
+            camera_path_file(text, "Shake_Normal").as_deref(),
+            Some("\\data\\database\\camerapaths\\effects\\shake_quick.kf2")
+        );
+        assert_eq!(
+            camera_path_file(text, "shake_quick").as_deref(),
+            Some("\\data\\database\\camerapaths\\effects\\explosion.kf2")
+        );
+        assert_eq!(
+            camera_path_file(text, "death_01").as_deref(),
+            Some("\\data\\database\\camerapaths\\cinematic\\death_01.KF2")
+        );
+        assert_eq!(camera_path_file(text, "no_file"), None);
+        assert_eq!(camera_path_file(text, "missing"), None);
     }
 
     #[test]

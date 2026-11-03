@@ -640,6 +640,8 @@ pub struct LdbScene {
     pub sound_queue: Vec<QueuedSound>,
     /// Emitters whose sounds `A_StopAll3DSounds` stopped since the last frame.
     pub sound_stops: Vec<String>,
+    /// `camerapaths.txt` blocks `player->CAM_AnimateInPlace` asked for, oldest first.
+    pub camera_shakes: Vec<String>,
     /// Dynamic mesh the view is attached to by `CAM_AttachToDO`, if any.
     pub attached_camera: Option<usize>,
     /// Cleared by `GM_SetPlayerControls(false)` during cutscenes.
@@ -858,6 +860,15 @@ impl LdbScene {
             }
             "fsm_randomize" => self.fsm_randomize(msg.receiver),
             "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
+            // Retail sends it to `player` only (313 of 313 calls in the shipped levels).
+            "cam_animateinplace" => {
+                let Some(block) = msg.args.first().map(|a| a.trim()).filter(|a| !a.is_empty())
+                else {
+                    return false;
+                };
+                self.camera_shakes.push(block.to_string());
+                true
+            }
             "a_stopall3dsounds" => match self.sound_emitter(context_name, msg.receiver) {
                 Some(emitter) => {
                     self.sound_stops.push(emitter);
@@ -2551,6 +2562,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         sound_catalogs: BTreeMap::new(),
         sound_queue: Vec::new(),
         sound_stops: Vec::new(),
+        camera_shakes: Vec::new(),
         attached_camera: None,
         player_controls: true,
         screen_fade: None,
@@ -2655,6 +2667,7 @@ mod tests {
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
             sound_stops: Vec::new(),
+            camera_shakes: Vec::new(),
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
@@ -3344,6 +3357,17 @@ mod tests {
             scene.sound_stops,
             vec!["::startroom::car::siren".to_string()]
         );
+    }
+
+    #[test]
+    fn cam_animate_in_place_queues_the_camera_path_block() {
+        let mut scene = door_fsm_scene();
+        assert!(scene.dispatch_message(
+            "::startroom::door",
+            "player->CAM_AnimateInPlace(shake_quick);"
+        ));
+        assert!(!scene.dispatch_message("::startroom::door", "player->cam_animateinplace();"));
+        assert_eq!(scene.camera_shakes, ["shake_quick".to_string()]);
     }
 
     #[test]

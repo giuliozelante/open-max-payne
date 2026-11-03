@@ -46,6 +46,33 @@ colours are `0xRRGGBBAA` (`0x0` → `0x000000ff` = fade to black). The engine ho
 the fade once a fade to alpha 0 ends. HYPOTHESIS from the argument patterns (all 189 occurrences in the retail `.ldb` files, FSM and track lists, fit); the
 handler has not been read. `MPHM_FlashToColor` (4 args, 101 uses) is not handled.
 
+## `CAM_AnimateInPlace` (camera paths)
+
+`data\database\camerapaths\camerapaths.txt` names blocks. Each block has `[Attributes]` (FadeInTime,
+FadeOutTime, Abortable), an `[Animationset]` of `[Animation]` entries (`Index`, `Filename`) and an `[Exit]` list.
+`Filename` is relative to `data\database\camerapaths\`. The name does not always match the file: `shake_quick`
+plays `effects\explosion.kf2` and `shake_normal` plays `effects\shake_quick.kf2` (VERIFIED, retail text).
+
+Each file is an ordinary skeletal KF2 with one `0x00010012` v5 channel, `Camera01`, at 30 fps. The shakes are
+small jitters (centimetres, a few degrees) whose first and last keys are equal and whose first rotation is
+identity. `death_01` starts 1.9 m in front of the target and turns 180° to look back at it (VERIFIED, parsed
+keys).
+
+All 313 `CAM_AnimateInPlace` calls in the shipped levels go to `player`: `shake_quick` 269, `shake_normal` 26,
+`shake_slow` 11, `rumble_medium` 4, `rumble_low` 2, `shake_subway` 1.
+
+The handler `0x672c10` first checks three camera vcalls (`+0x8`, `+0xc` and `+0x10`) and returns if any of
+them is true. It then looks the block up by name (`0x54a470`). How the path is composed each frame has not been
+read.
+
+**Engine (HYPOTHESIS, from the tutorial's "relative to the current player camera"):** the path is applied in
+camera space on top of the player view. The offset is measured from the first key, with x right, y up and
+z forward (the `CAM_AttachToDO` axes). A new block replaces a running one. The path runs in game time and ends
+with its duration. An attached DO camera takes precedence.
+
+`CAM_AnimateParented` (64 calls, all enemy death cams `Death_01..03` and `special_killed`) still waits on the
+characters' death scripts, which the engine does not decode yet.
+
 ## Open
 
 - The view pose has been checked only in offline engine frames, not against a retail frame.
@@ -56,4 +83,4 @@ handler has not been read. `MPHM_FlashToColor` (4 args, 101 uses) is not handled
   `x_modeswitch->s_modeswitch(graphicnovel)`, which closes the intro. The old flyover covered only the last shot.
 - `::street02::camera1` and P3L6 `altitude::camera1` along +z once their tracks run.
 - Blend between weights (does 50 mix the views?), arg 1, field of view (`GM_ChangeFOV`).
-- `CAM_AnimateInPlace` (184) and `CAM_AnimateParented` (64).
+- `CAM_AnimateParented` (64): death cams; needs character death scripts. Camera path fades and `Abortable`.

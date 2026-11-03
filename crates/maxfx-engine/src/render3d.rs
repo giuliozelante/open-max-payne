@@ -258,6 +258,13 @@ pub fn run_3d_walkthrough(
         }
     );
     let mut sounds = SoundChannels::default();
+    let camerapaths_txt = crate::read_game_bytes(
+        &catalog_root(level_path),
+        r"\data\database\camerapaths\camerapaths.txt",
+    )
+    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    .unwrap_or_default();
+    let mut camera_shake: Option<CameraShake> = None;
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
@@ -538,6 +545,15 @@ pub fn run_3d_walkthrough(
         scene.step_screen_fade(base_dt);
         // Scripted sounds (sirens, the chopper) start and stop with the scripts.
         play_queued_sounds(&mut scene, &catalog_root(level_path), &mut sounds);
+        start_camera_shakes(
+            &mut scene,
+            &catalog_root(level_path),
+            &camerapaths_txt,
+            &mut camera_shake,
+        );
+        if let Some(shake) = camera_shake.as_mut() {
+            shake.time += world_dt;
+        }
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
 
@@ -560,6 +576,9 @@ pub fn run_3d_walkthrough(
         };
         if let Some((pos, right, up, fwd)) = attached_view(&scene, &room_origins) {
             (cam_pos, cam_right, cam_up, cam_fwd) = (pos, right, up, fwd);
+        } else if let Some(delta) = camera_shake.as_ref().and_then(CameraShake::delta) {
+            (cam_pos, cam_right, cam_up, cam_fwd) =
+                shaken_view((cam_pos, cam_right, cam_up, cam_fwd), delta);
         }
 
         let fov_scale = (H as f32) * 0.85;
@@ -1199,6 +1218,66 @@ fn play_queued_sounds(scene: &mut LdbScene, game_dir: &Path, sounds: &mut SoundC
             sounds.playing.push((sound.emitter, child));
         }
     }
+}
+
+/// One `CAM_AnimateInPlace` path playing on the player camera.
+struct CameraShake {
+    anim: crate::kf2::Kf2Anim,
+    time: f32,
+}
+
+impl CameraShake {
+    /// Camera-local `(rotation, offset)` now, or `None` once the path is over.
+    fn delta(&self) -> Option<([f32; 9], [f32; 3])> {
+        let bone = self.anim.bones.first()?;
+        let first = bone.keys.first()?;
+        if self.time * 30.0 >= bone.duration as f32 {
+            return None;
+        }
+        let (mat, pos) = crate::kf2::sample_locals(&self.anim, self.time)
+            .remove(&bone.name.to_ascii_lowercase())?;
+        // Offset from the first key, so the path starts on the player camera. Every retail shake
+        // starts with an identity rotation, so the key rotation is used as is.
+        Some((mat, [0, 1, 2].map(|k| pos[k] - first.pos[k])))
+    }
+}
+
+/// Start the path of the last `CAM_AnimateInPlace` block; it replaces a running one.
+fn start_camera_shakes(
+    scene: &mut LdbScene,
+    game_dir: &Path,
+    camerapaths_txt: &str,
+    shake: &mut Option<CameraShake>,
+) {
+    for block in std::mem::take(&mut scene.camera_shakes) {
+        let anim = crate::camera_path_file(camerapaths_txt, &block)
+            .and_then(|path| crate::read_game_bytes(game_dir, &path))
+            .and_then(|bytes| crate::kf2::parse_kf2_anim(&bytes));
+        if let Some(anim) = anim {
+            *shake = Some(CameraShake { anim, time: 0.0 });
+        }
+    }
+}
+
+/// The view moved by a camera-local `(rotation, offset)`: x along right, y up, z forward.
+fn shaken_view(view: View, delta: ([f32; 9], [f32; 3])) -> View {
+    let (pos, right, up, fwd) = view;
+    let world = |v: [f32; 3]| [0, 1, 2].map(|k| right[k] * v[0] + up[k] * v[1] + fwd[k] * v[2]);
+    let (mat, offset) = delta;
+    let moved = world(offset);
+    let new_fwd = world(xform_dir(mat, [0.0, 0.0, 1.0]));
+    let new_up = world(xform_dir(mat, [0.0, 1.0, 0.0]));
+    let new_right = [
+        new_up[1] * new_fwd[2] - new_up[2] * new_fwd[1],
+        new_up[2] * new_fwd[0] - new_up[0] * new_fwd[2],
+        new_up[0] * new_fwd[1] - new_up[1] * new_fwd[0],
+    ];
+    (
+        [0, 1, 2].map(|k| pos[k] + moved[k]),
+        new_right,
+        new_up,
+        new_fwd,
+    )
 }
 
 fn catalog_root(path: &Path) -> PathBuf {
@@ -2339,6 +2418,82 @@ mod tests {
     use super::*;
     use crate::scene::{SceneDynamicMesh, SceneMaterial, ScenePoly, SceneVertex};
 
+    fn shake(keys: &[(u32, [f32; 3])], duration: u32) -> CameraShake {
+        let ident = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        CameraShake {
+            anim: crate::kf2::Kf2Anim {
+                bones: vec![crate::kf2::AnimBone {
+                    name: "Camera01".into(),
+                    parent: None,
+                    duration,
+                    keys: keys
+                        .iter()
+                        .map(|&(frame, pos)| crate::kf2::AnimKeyframe {
+                            frame,
+                            mat: ident,
+                            pos,
+                        })
+                        .collect(),
+                }],
+            },
+            time: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_camera_shake_offsets_from_its_first_key_and_ends_with_the_path() {
+        let mut path = shake(&[(0, [0.5, 0.0, 0.0]), (30, [0.5, 0.3, 0.0])], 31);
+        assert_eq!(path.delta().map(|d| d.1), Some([0.0, 0.0, 0.0]));
+        path.time = 0.5;
+        let (_, offset) = path.delta().expect("still playing");
+        assert!((offset[1] - 0.15).abs() < 1e-6, "offset={offset:?}");
+        path.time = 31.0 / 30.0;
+        assert_eq!(path.delta(), None);
+    }
+
+    #[test]
+    fn retail_shake_quick_plays_the_explosion_path_and_ends() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        let Some(text) =
+            crate::read_game_bytes(&game, r"\data\database\camerapaths\camerapaths.txt")
+        else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&text).into_owned();
+        let mut scene = LdbScene::default();
+        assert!(scene.dispatch_message("::x", "player->cam_animateinplace(shake_quick);"));
+        let mut shake = None;
+        start_camera_shakes(&mut scene, &game, &text, &mut shake);
+        let mut shake = shake.expect("shake_quick loads effects\\explosion.kf2");
+        let mut largest = 0.0f32;
+        let mut frames = 0;
+        while let Some((_, offset)) = shake.delta() {
+            largest = offset.iter().fold(largest, |m, c| m.max(c.abs()));
+            shake.time += 1.0 / 60.0;
+            frames += 1;
+            assert!(frames < 6000, "the path must end");
+        }
+        assert!(largest > 0.0 && largest < 0.5, "largest offset {largest} m");
+    }
+
+    #[test]
+    fn shaken_view_moves_and_turns_the_eye_in_camera_space() {
+        let view = (
+            [1.0, 2.0, 3.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        );
+        let ident = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        assert_eq!(shaken_view(view, (ident, [0.0; 3])), view);
+        let (pos, right, up, fwd) = shaken_view(view, (ident, [1.0, 0.5, 2.0]));
+        assert_eq!(pos, [3.0, 2.5, 2.0]);
+        assert_eq!((right, up, fwd), (view.1, view.2, view.3));
+    }
+
     fn light(pos: [f32; 3], rgb: f32, radius: f32, intensity: f32) -> ScenePointLight {
         ScenePointLight {
             id: 0,
@@ -2519,6 +2674,7 @@ mod tests {
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
             sound_stops: Vec::new(),
+            camera_shakes: Vec::new(),
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
