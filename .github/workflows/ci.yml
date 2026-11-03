@@ -12,7 +12,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # RUSTFLAGS replaces the linker-thread limit from .cargo/config.toml.
   RUSTFLAGS: -Dwarnings
+  # .cargo/config.toml limits local builds to one job; CI runs at full speed.
+  CARGO_BUILD_JOBS: default
 
 jobs:
   lint:
