@@ -1530,7 +1530,7 @@ impl CameraShake {
     /// The path's `(rotation, position)` now, or `None` once the path is over.
     fn pose(&self) -> Option<([f32; 9], [f32; 3])> {
         let bone = self.anim.bones.first()?;
-        if self.time * 30.0 >= bone.duration as f32 {
+        if self.time * bone.fps >= bone.duration as f32 {
             return None;
         }
         crate::kf2::sample_locals(&self.anim, self.time).remove(&bone.name.to_ascii_lowercase())
@@ -2908,6 +2908,7 @@ mod tests {
                     name: "Camera01".into(),
                     parent: None,
                     duration,
+                    fps: 30.0,
                     keys: keys
                         .iter()
                         .map(|&(frame, pos)| crate::kf2::AnimKeyframe {

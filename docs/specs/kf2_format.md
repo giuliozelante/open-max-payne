@@ -63,6 +63,28 @@ TaggedString := 0x0D 0x14 <u8 len> <latin1[len]>
 Exact `createChunk` size words still TBD (REA). Vertex buffers likely follow material
 string chunks; skeletal tracks live under `0C 12` / `0C 13`.
 
+## Clip frame rate (VERIFIED, retail `default_skeleton\anim`, 2026-11-03)
+
+Each skeletal bone channel (`0x00010012` v5) opens with a `0x00010013` name chunk:
+`0D 14 <len> <name>`, then a tagged integer, then `0E <flag>`. The integer is the clip's
+frames per second; keyframe numbers and the channel duration count frames at that rate.
+
+| Clip | Duration (frames) | Rate | Length |
+|---|---|---|---|
+| `GetHit_1000ms` | 121 | 120 | 1.0 s |
+| `GetHit_1500ms` | 181 | 120 | 1.5 s |
+| `2_GetHit_1000ms` | 76 | 75 | 1.0 s |
+| `gethit_crouched_0750ms` | 61 | 80 | 0.76 s |
+| `Stand` | 220 | 15 | 14.7 s |
+| `Run` | 40 | 50 | 0.8 s |
+| `Walk` | 40 | 32 | 1.25 s |
+
+The `_XXXXms` file names match the computed length, which fixes the field's meaning. Rates
+in the retail set include 12, 15, 30, 50, 120 and 240 (`0x13` u16 tag for 240). The `0E` flag
+after the rate is UNKNOWN (1 on the looping Stand/Run/Walk clips and on DodgeLeft, 0 on
+the GetHit clips). The engine previously assumed 30 fps for every clip, so Stand played
+twice as fast.
+
 ## Implementation plan
 
 1. `tools/blender_io_kf2` — Blender 4.x addon (stub registered); import strings + bones first.

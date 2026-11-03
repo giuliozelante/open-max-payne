@@ -72,6 +72,8 @@ pub struct AnimBone {
     pub name: String,
     pub parent: Option<String>,
     pub duration: u32,
+    /// Frames per second, stored after the bone name (`Stand.kf2` 15, `Run.kf2` 50).
+    pub fps: f32,
     pub keys: Vec<AnimKeyframe>,
 }
 
@@ -486,6 +488,10 @@ fn read_0x1a(data: &[u8], i: &mut usize) -> Option<([f32; 9], [f32; 3])> {
     Some((mat, pos))
 }
 
+/// Frame rate for a channel whose name chunk carries none (synthetic data only; retail clips all
+/// store one).
+const DEFAULT_KF2_FPS: f32 = 30.0;
+
 /// Parse a skeletal KF2 (`0x00010012` ver 5 channels).
 pub fn parse_kf2_anim(data: &[u8]) -> Option<Kf2Anim> {
     if data.len() < 13 || data[0] != 0x0c {
@@ -503,11 +509,15 @@ pub fn parse_kf2_anim(data: &[u8]) -> Option<Kf2Anim> {
             let payload = &data[off + 13..off + sz];
             let mut i = 0usize;
             let mut name = String::new();
+            let mut fps = DEFAULT_KF2_FPS;
             if payload.first() == Some(&0x0c) && payload.len() >= 13 {
                 let ssz = u32::from_le_bytes(payload[9..13].try_into().ok()?) as usize;
                 if ssz >= 13 && ssz <= payload.len() {
                     let mut p = 13usize;
                     name = read_str(&payload[..ssz], &mut p).unwrap_or_default();
+                    if let Some(rate) = read_i32(&payload[..ssz], &mut p).filter(|&r| r > 0) {
+                        fps = rate as f32;
+                    }
                     i = ssz;
                 }
             }
@@ -533,6 +543,7 @@ pub fn parse_kf2_anim(data: &[u8]) -> Option<Kf2Anim> {
                     name,
                     parent,
                     duration,
+                    fps,
                     keys,
                 });
             }
@@ -671,7 +682,7 @@ fn invert_rt(r: [f32; 9], t: [f32; 3]) -> ([f32; 9], [f32; 3]) {
     (rt, tinv)
 }
 
-/// Sample parent-relative locals at `time_s` (30 fps, loops on each bone's duration).
+/// Sample parent-relative locals at `time_s` (each bone's own frame rate, looping on its duration).
 pub fn sample_locals(anim: &Kf2Anim, time_s: f32) -> BTreeMap<String, ([f32; 9], [f32; 3])> {
     let mut out = BTreeMap::new();
     for bone in &anim.bones {
@@ -679,7 +690,7 @@ pub fn sample_locals(anim: &Kf2Anim, time_s: f32) -> BTreeMap<String, ([f32; 9],
             continue;
         }
         let dur = bone.duration.max(1) as f32;
-        let frame = (time_s.max(0.0) * 30.0) % dur;
+        let frame = (time_s.max(0.0) * bone.fps) % dur;
         let mut i = 0usize;
         while i + 1 < bone.keys.len() && bone.keys[i + 1].frame as f32 <= frame {
             i += 1;
@@ -1366,6 +1377,7 @@ mod tests {
                 name: "Pelvis".into(),
                 parent: None,
                 duration: 10,
+                fps: 30.0,
                 keys: vec![
                     AnimKeyframe {
                         frame: 0,
@@ -1386,6 +1398,36 @@ mod tests {
             assert!((got - want).abs() < 1e-5, "{mat:?}");
         }
         assert!((pos[0] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn clips_play_at_the_frame_rate_stored_in_their_name_chunk() {
+        // Retail Stand.kf2: `0d 14 06 "Pelvis" 14 0f 0e 01`, i.e. 15 frames per second.
+        let mut name_pl = Vec::new();
+        push_str(&mut name_pl, "Pelvis");
+        push_u8(&mut name_pl, 15);
+        name_pl.extend_from_slice(&[0x0e, 0x01]);
+        let mut ch = Vec::new();
+        push_chunk(&mut ch, 0x0001_0013, 0, &name_pl);
+        push_str(&mut ch, "");
+        ch.extend_from_slice(&[0x0e, 0x01]);
+        push_u8(&mut ch, 31); // duration
+        push_u8(&mut ch, 2); // nkeys
+        for (frame, x) in [(0u8, 0.0f32), (30, 30.0)] {
+            push_u8(&mut ch, frame);
+            ch.push(0x1a);
+            for v in identity_mat() {
+                ch.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in [x, 0.0, 0.0] {
+                ch.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let mut buf = Vec::new();
+        push_chunk(&mut buf, 0x0001_0012, 5, &ch);
+        let anim = parse_kf2_anim(&buf).expect("anim");
+        let (_, pos) = sample_locals(&anim, 1.0)["pelvis"];
+        assert!((pos[0] - 15.0).abs() < 1e-4, "{pos:?}");
     }
 
     #[test]
