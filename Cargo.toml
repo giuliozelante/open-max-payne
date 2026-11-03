@@ -19,3 +19,12 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# Unoptimised debug builds took ~1.3 s to load a level (0.2 s in release).
+# opt-level 1 for workspace crates (archive decoding, .ldb parsing) and 2 for
+# dependencies bring dev builds to release speed; debug info and assertions stay on.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
