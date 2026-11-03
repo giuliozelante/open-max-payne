@@ -623,15 +623,7 @@ pub fn run_3d_walkthrough(
         let mut cam_up = [-sy * sp, cp, -cy * sp];
         let mut cam_fwd = [sy * cp, sp, cy * cp];
         let mut cam_pos = if third_person && !fly_mode {
-            let mut dist = CHASE_BACK;
-            while dist > 0.45 {
-                let cand = chase_eye(player_pos, cam_fwd, dist);
-                if !hits_wall(&scene, &room_origins, cand[0], cand[1], cand[2]) {
-                    break;
-                }
-                dist -= 0.25;
-            }
-            chase_eye(player_pos, cam_fwd, dist)
+            chase_camera(&scene, player_pos, cam_fwd)
         } else {
             player_pos
         };
@@ -1122,6 +1114,95 @@ fn chase_eye(player: [f32; 3], cam_fwd: [f32; 3], dist: f32) -> [f32; 3] {
         player[1] - cam_fwd[1] * dist + CHASE_UP,
         player[2] - cam_fwd[2] * dist,
     ]
+}
+
+/// How far the chase camera stays off what it hits: `globalconfig.txt` `[camera]`
+/// `SphereRadius` (0.1) plus the near plane, so the wall itself is not clipped.
+const CAMERA_CLEARANCE: f32 = 0.1 + NEAR_Z;
+
+/// Third-person eye: cast from the player toward the follow position and stop before the first
+/// level polygon in the way (retail casts the camera "from its startpoint" toward the follow
+/// distance). `CameraCollision` polygons count: they exist for this.
+fn chase_camera(scene: &LdbScene, player: [f32; 3], cam_fwd: [f32; 3]) -> [f32; 3] {
+    let want = chase_eye(player, cam_fwd, CHASE_BACK);
+    let d = [
+        want[0] - player[0],
+        want[1] - player[1],
+        want[2] - player[2],
+    ];
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    let Some(t) = segment_hit(scene, player, d) else {
+        return want;
+    };
+    let k = (t * len - CAMERA_CLEARANCE).max(0.0) / len;
+    [
+        player[0] + d[0] * k,
+        player[1] + d[1] * k,
+        player[2] + d[2] * k,
+    ]
+}
+
+/// Drawn solid surfaces and `CameraCollision`; not the sky, decals or script helpers.
+fn blocks_camera(scene: &LdbScene, material_id: i32) -> bool {
+    let camera_only = scene
+        .materials
+        .get(&material_id)
+        .is_some_and(|m| m.category.eq_ignore_ascii_case("cameracollision"));
+    let policy = poly_policy(scene, material_id);
+    camera_only || (policy.draw && policy.writes_z && !policy.skybox)
+}
+
+/// Smallest `t` in `0..=1` where `from + t * d` crosses a static polygon.
+fn segment_hit(scene: &LdbScene, from: [f32; 3], d: [f32; 3]) -> Option<f32> {
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let cross = |a: [f32; 3], b: [f32; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let mut best: Option<f32> = None;
+    for sm in &scene.static_meshes {
+        let o = sm.world_origin;
+        for poly in sm
+            .polys
+            .iter()
+            .filter(|p| p.vertices.len() >= 3 && blocks_camera(scene, p.material_id))
+        {
+            let n = poly.normal;
+            let denom = dot(n, d);
+            if denom.abs() < 1e-6 {
+                continue;
+            }
+            let world: Vec<[f32; 3]> = poly
+                .vertices
+                .iter()
+                .map(|v| [v.pos[0] + o[0], v.pos[1] + o[1], v.pos[2] + o[2]])
+                .collect();
+            let t = dot(n, sub(world[0], from)) / denom;
+            if !(0.0..=1.0).contains(&t) || best.is_some_and(|b| t >= b) {
+                continue;
+            }
+            let hit = [from[0] + d[0] * t, from[1] + d[1] * t, from[2] + d[2] * t];
+            // Inside a convex polygon: the hit is on the same side of every edge.
+            let sides = (0..world.len()).map(|i| {
+                let a = world[i];
+                let b = world[(i + 1) % world.len()];
+                dot(cross(sub(b, a), sub(hit, a)), n)
+            });
+            let (mut pos, mut neg) = (false, false);
+            for side in sides {
+                pos |= side > 1e-6;
+                neg |= side < -1e-6;
+            }
+            if !(pos && neg) {
+                best = Some(t);
+            }
+        }
+    }
+    best
 }
 
 /// Visible and not a script helper (`_Tip_`, `Start_FSM.DO`).
@@ -3188,6 +3269,53 @@ mod tests {
         assert_eq!(lightmap_modulate(0x0080_8080, 0x0080_8080), 0x0040_4040);
         assert_eq!(lightmap_modulate(0x0020_4060, 0x00ff_ffff), 0x0020_4060);
         assert_eq!(lightmap_modulate(0x00ff_ffff, 0x0000_0000), 0x0000_0000);
+    }
+
+    #[test]
+    fn chase_camera_stops_in_front_of_a_wall_behind_the_player() {
+        // Backing Max against a wall pushed the camera through it: the whole house showed.
+        let mut scene = empty_scene();
+        let v = |x: f32, y: f32| SceneVertex {
+            pos: [x, y, -1.0],
+            uv: [0.0; 2],
+            luv: [0.0; 2],
+        };
+        scene.static_meshes.push(crate::scene::SceneStaticMesh {
+            mesh_id: 0,
+            room_id: None,
+            world_origin: [0.0; 3],
+            polys: vec![ScenePoly {
+                vertices: vec![v(-5.0, -5.0), v(5.0, -5.0), v(5.0, 5.0), v(-5.0, 5.0)],
+                normal: [0.0, 0.0, 1.0],
+                material_id: 0,
+                lightmap_id: -1,
+            }],
+        });
+        let player = [0.0, 1.6, 0.0];
+        let fwd = [0.0, 0.0, 1.0];
+        let eye = chase_camera(&scene, player, fwd);
+        assert!(eye[2] > -1.0 && eye[2] < -0.5, "{eye:?}");
+        // Nothing in the way: the full follow distance.
+        assert_eq!(
+            chase_camera(&empty_scene(), player, fwd),
+            chase_eye(player, fwd, CHASE_BACK)
+        );
+        // A skybox wall does not stop the camera.
+        scene.materials.insert(
+            0,
+            crate::scene::SceneMaterial {
+                id: 0,
+                category: "Skybox".into(),
+                texture_path: String::new(),
+                texture_index: None,
+                alpha_reference: None,
+                blended: false,
+            },
+        );
+        assert_eq!(
+            chase_camera(&scene, player, fwd),
+            chase_eye(player, fwd, CHASE_BACK)
+        );
     }
 
     #[test]
