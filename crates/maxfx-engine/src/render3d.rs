@@ -281,9 +281,12 @@ pub fn run_3d_walkthrough(
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
     let mut background = vec![0u32; W * H];
-    let base_dt = 1.0 / 60.0f32;
+    let mut last_frame = std::time::Instant::now();
 
     loop {
+        let now = std::time::Instant::now();
+        let base_dt = frame_dt(now - last_frame);
+        last_frame = now;
         screen.pump();
         let window: &dyn crate::frontend::Frontend = &*screen;
         if !window.is_open() || window.is_key_down(Key::Escape) {
@@ -873,6 +876,14 @@ pub fn run_3d_walkthrough(
     }
     screen.put_gpu(gpu);
     Ok(())
+}
+
+/// Longest step one frame may take (a loading stall or a window drag).
+const MAX_FRAME_DT: f32 = 0.1;
+
+/// Game time for one frame: the wall time since the previous frame, capped at `MAX_FRAME_DT`.
+fn frame_dt(elapsed: std::time::Duration) -> f32 {
+    elapsed.as_secs_f32().min(MAX_FRAME_DT)
 }
 
 fn toggle_nearest_dynamic_mesh(
@@ -3306,6 +3317,14 @@ mod tests {
         assert!(close(fwd, [1.0, 0.0, 0.0]), "{fwd:?}");
         assert!(close(up, [0.0, 1.0, 0.0]), "{up:?}");
         assert!(close(right, [0.0, 0.0, -1.0]), "{right:?}");
+    }
+
+    #[test]
+    fn frame_step_follows_the_real_clock_with_a_cap() {
+        // Scripts, fades and animations follow wall time, so a slow frame does not slow the
+        // cutscene against its real-time speech; a loading stall is capped instead of skipping.
+        assert_eq!(frame_dt(std::time::Duration::from_millis(33)), 0.033);
+        assert_eq!(frame_dt(std::time::Duration::from_secs(2)), MAX_FRAME_DT);
     }
 
     #[test]
