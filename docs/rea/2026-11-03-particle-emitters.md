@@ -75,3 +75,31 @@ particle maximum, since the editor shows "Particle Maximum" and "Particle Count"
   `CParticleEmitterFormView` / `CParticleFormView` dialog control bindings (DDX) in `ParticleFX.exe`.
 - How the game's reader (`PS_ParticleSystem` in the runtime) interprets "60m cube": the box size field.
 - Additive or alpha blending per particle texture (`PSCombination%02dAlpha.tga` hints at alpha variants).
+
+## Parser `openpfx::effect` (2026-11-03)
+
+`rps_effect` reads each particle (`0x30`/4) and the emission that follows it (`0x40`/2 → `0x21`/5).
+It validates on all 282 retail `.rps` files: 753 emitters, as many as the `0x40` blocks, with no parse
+failure. Every emitter has bitmaps, and 233 are additive.
+
+**After the four particle graphs (STRONGLY SUPPORTED):** an int, then the **additive** flag, then the
+number of bitmap sequences, then for each sequence a frame count and its frames.
+- Additive particles have one file per frame (`gasexplo*.TGA`, `fire\reelflames\flames-additive\*.JPG`).
+- Alpha-blended particles have a colour file and an alpha file per frame (snow: `snow00NN.TGA` +
+  `snow00NN.PCX`; ring smoke: JPEG + mask).
+- That the flag means additive blending is a HYPOTHESIS, from the folder name and the missing alpha files.
+  A particle with several sequences (gas explosion: 6) presumably picks one per element.
+
+**Particle parameter block (HYPOTHESIS, tutorial order):** gravity multiplier, air resistance (velocity
+term, size term, constant), animation type, animation FPS, random first frame, randomize rotation
+direction, random rotation from/to, mirroring flags. Snow: gravity 0.8, 20 fps, rotation −180..180.
+
+**Emission (HYPOTHESIS labels):**
+- relative position `(0, −3, 12)`;
+- direction spread `(2, 2, 2)`;
+- an unlabelled vec3;
+- cycle length `5`;
+- three ints (the volume type?), an up vector;
+- five floats, sphere hotspot and falloff among them (`3`, `6`);
+- box max/min `(30, 10, 30)` / `(−30, −10, −30)`;
+- the size and rotation multiplier graphs, then the light block.
