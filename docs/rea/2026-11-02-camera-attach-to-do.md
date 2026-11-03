@@ -49,8 +49,11 @@ handler has not been read. `MPHM_FlashToColor` (4 args, 101 uses) is not handled
 ## Open
 
 - The view pose has been checked only in offline engine frames, not against a retail frame.
-- The startup flyover (`camera_flyover`) also uses +z; it still ignores the rotation of its two `cam_rotator`
-  ancestors.
+- ~~Startup flyover~~: the special-case `camera_flyover` is gone. `Startup_level` now runs on its own scripts:
+  the startup `Start_FSM.DO->DO_Animate(1)` sends `FSM_Send(start)` to each camera rig, which attaches its
+  camera (`CAM_AttachToDO`) and animates the rig. Five shots (`C1_PAN::C3`, `cam_mover::camera1`,
+  `car_closeup…cam4`, `chopper…cam_00`, `cam_rotator…altitude::camera`) run for 75.6 s and end with
+  `x_modeswitch->s_modeswitch(graphicnovel)`, which closes the intro. The old flyover covered only the last shot.
 - `::street02::camera1` and P3L6 `altitude::camera1` along +z once their tracks run.
 - Blend between weights (does 50 mix the views?), arg 1, field of view (`GM_ChangeFOV`).
 - `CAM_AnimateInPlace` (184) and `CAM_AnimateParented` (64).

@@ -10,7 +10,7 @@
 
 use crate::kf2::{load_character_rigs, load_skin_body, pose_mesh, CharacterRig, KfsFace};
 use crate::scene::{
-    decode_texture_blob, material_policy, CameraFlyover, DecodedLightmap, DecodedTexture, LdbScene,
+    decode_texture_blob, material_policy, DecodedLightmap, DecodedTexture, LdbScene,
     MaterialPolicy, ScenePointLight, ScenePoly, SceneVertex,
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
@@ -90,7 +90,7 @@ pub fn run_3d_walkthrough(
     player_start: Option<&str>,
     player_skin: Option<&str>,
     world_sphere: Option<&str>,
-    shot: Option<CameraFlyover>,
+    cinematic: bool,
 ) -> Result<(), String> {
     // Hardware: a resizable winit window with a wgpu swapchain. Software (or no GPU): minifb.
     let mut winit_window = if hardware_renderer() {
@@ -236,7 +236,6 @@ pub fn run_3d_walkthrough(
     let mut wireframe = false;
     let mut last_mouse: Option<(f32, f32)> = None;
     let mut anim_clock = 0.0f32;
-    let mut shot_clock = 0.0f32;
     println!(
         "  3D Engine: Spawned ({} actors, {} skins, player={}, sky={}) | WASD move, Mouse/Arrows look, F/Ctrl shoot, B/RightClick Bullet-Time, E interact, V 3rd/1st person, Tab next spawn, G fly/walk",
         enemies.len(),
@@ -258,6 +257,12 @@ pub fn run_3d_walkthrough(
     scene.apply_startup_hides();
     scene.apply_startup_enables();
     scene.apply_startup_sends();
+    scene.apply_startup_animates();
+    if cinematic {
+        // The scripts own the camera; the player body stays where the level puts it (Max with the
+        // sniper rifle on the rooftop in the startup intro).
+        scene.player_controls = false;
+    }
     // Built after the material surfaces, so batches follow the draw policies.
     let mut gpu = winit_window
         .as_ref()
@@ -296,10 +301,12 @@ pub fn run_3d_walkthrough(
         if !window.is_open() || window.is_key_down(Key::Escape) {
             break;
         }
-        if let Some(shot) = shot.as_ref() {
-            if shot_clock >= shot.duration || window.is_key_pressed(Key::Space, KeyRepeat::No) {
-                break;
-            }
+        // A cinematic level (the startup intro) runs on its own scripts and ends when they ask
+        // for the graphic novel (`S_ModeSwitch`); Space skips it.
+        if cinematic
+            && (scene.mode_switch.is_some() || window.is_key_pressed(Key::Space, KeyRepeat::No))
+        {
+            break;
         }
         if window.is_key_pressed(Key::V, KeyRepeat::No) {
             third_person = !third_person;
@@ -558,15 +565,6 @@ pub fn run_3d_walkthrough(
             }
         }
 
-        if let Some(shot) = shot.as_ref() {
-            let (pos, fwd) = shot.pose(shot_clock);
-            player_pos = pos;
-            let horiz = (fwd[0] * fwd[0] + fwd[2] * fwd[2]).sqrt().max(0.001);
-            pitch = fwd[1].atan2(horiz);
-            yaw = fwd[0].atan2(fwd[2]);
-            third_person = false;
-            shot_clock += base_dt;
-        }
         scene.step_dynamic_anims(base_dt);
         scene.step_screen_fade(base_dt);
         let (sy, cy) = yaw.sin_cos();
@@ -788,7 +786,7 @@ pub fn run_3d_walkthrough(
         };
         let cx = W / 2;
         let cy_scr = H / 2;
-        for d in -4i32..=4 {
+        for d in (-4i32..=4).filter(|_| crosshair_visible(&scene)) {
             fb[cy_scr * W + (cx as i32 + d) as usize] = cross_col;
             fb[(cy_scr as i32 + d) as usize * W + cx] = cross_col;
         }
@@ -1281,6 +1279,11 @@ pub fn write_ppm(path: &Path, w: usize, h: usize, fb: &[u32]) -> std::io::Result
         out.extend_from_slice(&[(px >> 16) as u8, (px >> 8) as u8, *px as u8]);
     }
     std::fs::write(path, out)
+}
+
+/// The HUD crosshair is hidden while a cutscene camera owns the view.
+fn crosshair_visible(scene: &LdbScene) -> bool {
+    scene.attached_camera.is_none()
 }
 
 /// Eye position, right, up, forward.
@@ -2436,6 +2439,7 @@ mod tests {
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
+            mode_switch: None,
         }
     }
 
@@ -2648,6 +2652,15 @@ mod tests {
                 .all(|(a, b)| a.to_bits() == b.to_bits()),
             "depth differs between serial and parallel"
         );
+    }
+
+    #[test]
+    fn crosshair_is_hidden_while_a_cutscene_camera_is_attached() {
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(glass_quad(false));
+        assert!(crosshair_visible(&scene));
+        scene.attached_camera = Some(0);
+        assert!(!crosshair_visible(&scene));
     }
 
     #[test]
