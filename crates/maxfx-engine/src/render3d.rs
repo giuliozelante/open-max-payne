@@ -224,7 +224,7 @@ pub fn run_3d_walkthrough(
     let mut jp_idx = scene.spawn_jumppoint_index(player_start);
 
     let mut player_pos = spawn_pos(&scene, &room_origins, jp_idx);
-    let mut yaw: f32 = std::f32::consts::PI; // face -Z toward van & door in StartRoom
+    let mut yaw: f32 = scene.jumppoints.get(jp_idx).map_or(0.0, |jp| jp.yaw());
     let mut pitch: f32 = -0.08;
     let mut vel_y: f32 = 0.0;
     let mut walk_phase: f32 = 0.0;
@@ -323,6 +323,7 @@ pub fn run_3d_walkthrough(
         if window.is_key_pressed(Key::Tab, KeyRepeat::No) && !scene.jumppoints.is_empty() {
             jp_idx = (jp_idx + 1) % scene.jumppoints.len();
             player_pos = spawn_pos(&scene, &room_origins, jp_idx);
+            yaw = scene.jumppoints[jp_idx].yaw();
             vel_y = 0.0;
             if let Some(jp) = scene.jumppoints.get(jp_idx) {
                 println!(
