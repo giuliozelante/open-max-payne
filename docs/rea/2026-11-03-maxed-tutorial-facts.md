@@ -55,7 +55,7 @@ forum posts are **HYPOTHESIS**. Each entry names the engine or REA note it confi
 - `CAM_AnimatePlayerParented(block)`: parented to the player. FadeIn / FadeOut only work here.
 
 These are the open `CAM_AnimateInPlace` (184 uses) and `CAM_AnimateParented` (64) items in the camera
-note. Next step: parse `camerapaths.txt` and confirm the handlers (`0x672c10`, `0x672b00`).
+note. `camerapaths.txt` and `CAM_AnimateInPlace` are now in `2026-11-02-camera-attach-to-do.md`.
 
 ## Particles
 

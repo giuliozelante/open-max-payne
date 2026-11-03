@@ -142,6 +142,7 @@ impl Music {
             .args(crate::render3d::sound_player_args(
                 &path,
                 crate::sound_cue_looping(&music_txt, cue),
+                100,
             ))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
