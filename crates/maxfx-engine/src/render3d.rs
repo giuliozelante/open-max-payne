@@ -1792,8 +1792,8 @@ impl ParticleSprites {
     }
 }
 
-/// World position and rotation (columns) of a particle emitter: a dynamic mesh's frame, or the
-/// position of a trigger, FSM or character with no rotation.
+/// World position and rotation (columns) of a particle emitter: a dynamic mesh's frame, an FSM
+/// carried by its parent mesh, or a trigger's or character's position.
 fn emitter_frame(
     scene: &LdbScene,
     rooms: &BTreeMap<i32, [f32; 3]>,
@@ -1807,15 +1807,12 @@ fn emitter_frame(
         let (mat, pos) = dynamic_world(scene, idx, rooms);
         return Some((pos, mat));
     }
-    let pos = scene.emitter_world_pos(emitter)?;
+    let (rot, pos) = scene.emitter_world_pose(emitter)?;
     let origin = rooms
         .get(&emitter_room(scene, emitter))
         .copied()
         .unwrap_or([0.0; 3]);
-    Some((
-        [0, 1, 2].map(|k| pos[k] + origin[k]),
-        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-    ))
+    Some(([0, 1, 2].map(|k| pos[k] + origin[k]), rot))
 }
 
 /// Point lights of running particle effects (ParticleFX emitter "Use Light").

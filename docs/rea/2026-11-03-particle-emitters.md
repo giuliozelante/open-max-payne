@@ -103,3 +103,14 @@ direction, random rotation from/to, mirroring flags. Snow: gravity 0.8, 20 fps, 
 - five floats, sphere hotspot and falloff among them (`3`, `6`);
 - box max/min `(30, 10, 30)` / `(−30, −10, −30)`;
 - the size and rotation multiplier graphs, then the light block.
+
+## Engine corrections after the first in-game comparison (2026-11-04)
+
+- **Velocity (HYPOTHESIS, data-led):** the emission direction is not normalised. Its length scales the
+  "Velocity m/s" value. `snowstorm_60m` stores direction `(0, −3, 30)` and velocity 0.25..0.5. Normalised,
+  the flakes hung almost still as sparse dots next to the retail screenshots. Scaled, the storm blows at
+  7.5–15 m/s and falls at about 1 m/s across the 0.2–1 s lifetimes.
+- **Emitter frame:** every intro emitter is an FSM nested under a moving DO, for example
+  `::startroom::cam_mover::camera1::snow` under `camera1.DO` and `::start::…::C1_PAN::f1` under `C1_PAN.DO`.
+  These emitters already followed their parent's position; they now take its rotation too
+  (`LdbScene::emitter_world_pose`), so the spawn box and the wind turn with the camera rig.
