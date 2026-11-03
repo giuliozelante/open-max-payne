@@ -1743,6 +1743,7 @@ mod tests {
                 [0.0; 3],
                 hit_flash,
                 &[],
+                [0.0; 3],
             );
             let character = GpuCharacter {
                 mesh: &rig.mesh,

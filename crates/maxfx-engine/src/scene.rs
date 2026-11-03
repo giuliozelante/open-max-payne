@@ -641,6 +641,8 @@ pub struct LdbScene {
     pub player_controls: bool,
     /// Full-screen colour from `MPHM_FadeToColor`, if any.
     pub screen_fade: Option<ScreenFade>,
+    /// `levels.txt` `AmbientColor` (0..255 RGB): ambient light on characters. Black until set.
+    pub ambient: [f32; 3],
 }
 
 /// `MPHM_FadeToColor(from, to, seconds)`: colours are `0xRRGGBBAA`.
@@ -2482,6 +2484,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         attached_camera: None,
         player_controls: true,
         screen_fade: None,
+        ambient: [0.0; 3],
     })
 }
 
@@ -2734,6 +2737,7 @@ mod tests {
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
+            ambient: [0.0; 3],
         }
     }
 
