@@ -2,6 +2,7 @@
 //! Spec: docs/specs/rps_format.md
 
 pub mod curve_sample;
+pub mod light;
 pub mod memory_file;
 pub mod rps;
 

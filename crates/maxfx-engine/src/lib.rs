@@ -2612,6 +2612,20 @@ pub fn music_win_path(music_txt: &str, cue: &str) -> Option<String> {
     ))
 }
 
+/// `particles.txt` `[effect]`: the `.rps` archive path from `[Default] filename` and the
+/// `[Properties] Looping` flag.
+pub fn particle_effect_file(particles_txt: &str, effect: &str) -> Option<(String, bool)> {
+    let file = sound_cue_value(particles_txt, effect, "filename")?;
+    let file = file.trim_matches('"').replace('/', "\\");
+    Some((
+        format!(
+            "\\data\\database\\particles\\{}",
+            file.trim_start_matches('\\')
+        ),
+        sound_cue_looping(particles_txt, effect),
+    ))
+}
+
 /// `Looping = YES` inside `[cue]` (siren and engine loops in `sounds/dynamic.txt`).
 pub fn sound_cue_looping(text: &str, cue: &str) -> bool {
     sound_cue_value(text, cue, "looping")
@@ -3891,6 +3905,26 @@ mod tests {
         let mut frame = vec![0u32; 2];
         bgra_to_frame(&bytes, &mut frame);
         assert_eq!(frame, vec![0x0030_2010, 0x0003_0201]);
+    }
+
+    #[test]
+    fn particle_effect_file_reads_the_default_filename_and_looping() {
+        let text = "#define PS_TIMEOUT 0.2\n[light_policecar]\t\t// Policecar lights\n{\n\t[Properties]\n\tLooping = true;\n\tInvisibleTimeout = PS_TIMEOUT ;\n\n\t[Default] \n\tfilename = lights\\light_policecar.rps;\n\tItemsToCache = 1;\n}\n[muzzle_beretta]\n{\n\t[Properties]\n\tLooping = false;\n\t[Default]\n\tfilename = weapons\\beretta.rps;\n}\n";
+        assert_eq!(
+            particle_effect_file(text, "Light_PoliceCar"),
+            Some((
+                "\\data\\database\\particles\\lights\\light_policecar.rps".to_string(),
+                true
+            ))
+        );
+        assert_eq!(
+            particle_effect_file(text, "muzzle_beretta"),
+            Some((
+                "\\data\\database\\particles\\weapons\\beretta.rps".to_string(),
+                false
+            ))
+        );
+        assert_eq!(particle_effect_file(text, "missing"), None);
     }
 
     #[test]

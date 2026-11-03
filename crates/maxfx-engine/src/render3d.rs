@@ -258,6 +258,12 @@ pub fn run_3d_walkthrough(
         }
     );
     let mut sounds = SoundChannels::default();
+    let game_root = catalog_root(level_path);
+    let particles_txt =
+        crate::read_game_bytes(&game_root, r"\data\database\particles\particles.txt")
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+    let mut particle_lights = ParticleLights::default();
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
@@ -538,6 +544,13 @@ pub fn run_3d_walkthrough(
         scene.step_screen_fade(base_dt);
         // Scripted sounds (sirens, the chopper) start and stop with the scripts.
         play_queued_sounds(&mut scene, &catalog_root(level_path), &mut sounds);
+        start_queued_effects(&mut scene, &game_root, &particles_txt, &mut particle_lights);
+        particle_lights.step(base_dt);
+        let frame_lights: Vec<ScenePointLight> = world_lights
+            .iter()
+            .cloned()
+            .chain(particle_lights.point_lights(&scene, &room_origins))
+            .collect();
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
 
@@ -599,7 +612,7 @@ pub fn run_3d_walkthrough(
                         &verts,
                         en.world_pos,
                         en.hit_flash > 0.0,
-                        &world_lights,
+                        &frame_lights,
                         scene.ambient,
                     );
                     characters.push(crate::gpu::GpuCharacter {
@@ -628,7 +641,7 @@ pub fn run_3d_walkthrough(
                     &verts,
                     player_feet,
                     false,
-                    &world_lights,
+                    &frame_lights,
                     scene.ambient,
                 );
                 characters.push(crate::gpu::GpuCharacter {
@@ -696,7 +709,7 @@ pub fn run_3d_walkthrough(
                     en.walk_phase > 0.0,
                     en.health <= 0,
                     en.hit_flash > 0.0,
-                    &world_lights,
+                    &frame_lights,
                     scene.ambient,
                     cam_pos,
                     cam_right,
@@ -725,7 +738,7 @@ pub fn run_3d_walkthrough(
                     player_moving,
                     false,
                     false,
-                    &world_lights,
+                    &frame_lights,
                     scene.ambient,
                     cam_pos,
                     cam_right,
@@ -1199,6 +1212,111 @@ fn play_queued_sounds(scene: &mut LdbScene, game_dir: &Path, sounds: &mut SoundC
             sounds.playing.push((sound.emitter, child));
         }
     }
+}
+
+/// Stop what `PS_StopAllEmissions` asked for, then start the lights of queued `PS_StartEffect`s.
+fn start_queued_effects(
+    scene: &mut LdbScene,
+    game_dir: &Path,
+    particles_txt: &str,
+    lights: &mut ParticleLights,
+) {
+    for emitter in std::mem::take(&mut scene.effect_stops) {
+        lights.stop(&emitter);
+    }
+    for effect in std::mem::take(&mut scene.effect_queue) {
+        let Some((win_path, looping)) = crate::particle_effect_file(particles_txt, &effect.effect)
+        else {
+            continue;
+        };
+        let rps = lights
+            .files
+            .entry(win_path.to_ascii_lowercase())
+            .or_insert_with(|| {
+                crate::read_game_bytes(game_dir, &win_path)
+                    .map(|bytes| openpfx::light::rps_lights(&bytes))
+                    .unwrap_or_default()
+            })
+            .clone();
+        lights.start(effect.emitter, rps, looping);
+    }
+}
+
+/// Point lights of running particle effects (ParticleFX emitter "Use Light").
+#[derive(Default)]
+struct ParticleLights {
+    /// Lights per `.rps` archive path (lower case), read once.
+    files: BTreeMap<String, Vec<openpfx::light::RpsLight>>,
+    /// `(emitter, lights, looping, seconds since start)`.
+    active: Vec<(String, Vec<openpfx::light::RpsLight>, bool, f32)>,
+}
+
+impl ParticleLights {
+    fn start(&mut self, emitter: String, lights: Vec<openpfx::light::RpsLight>, looping: bool) {
+        if !lights.is_empty() {
+            self.active.push((emitter, lights, looping, 0.0));
+        }
+    }
+
+    fn stop(&mut self, emitter: &str) {
+        self.active
+            .retain(|(owner, ..)| !owner.eq_ignore_ascii_case(emitter));
+    }
+
+    /// Age every effect; a one-shot effect ends with its longest cycle.
+    fn step(&mut self, dt: f32) {
+        for (_, _, _, age) in &mut self.active {
+            *age += dt;
+        }
+        self.active.retain(|(_, lights, looping, age)| {
+            *looping || lights.iter().any(|light| *age < light.cycle_length)
+        });
+    }
+
+    fn point_lights(
+        &self,
+        scene: &LdbScene,
+        rooms: &BTreeMap<i32, [f32; 3]>,
+    ) -> Vec<ScenePointLight> {
+        let mut out = Vec::new();
+        for (emitter, lights, looping, age) in &self.active {
+            let Some(pos) = scene.emitter_world_pos(emitter) else {
+                continue;
+            };
+            let room = emitter_room(scene, emitter);
+            let origin = rooms.get(&room).copied().unwrap_or([0.0; 3]);
+            for light in lights {
+                let t = if *looping && light.cycle_length > 0.0 {
+                    age % light.cycle_length
+                } else {
+                    *age
+                };
+                let (rgb, radius) = light.sample(t);
+                out.push(ScenePointLight {
+                    id: -1,
+                    room_id: room,
+                    pos: [0, 1, 2].map(|k| origin[k] + pos[k] + light.offset[k]),
+                    color: [rgb[0], rgb[1], rgb[2], 255.0],
+                    radius,
+                    // ParticleFX "Brightness" has no effect; the colour graph sets the strength.
+                    intensity: 1.0,
+                });
+            }
+        }
+        out
+    }
+}
+
+/// Room of the mesh, trigger or FSM named `emitter` (0 when none matches).
+fn emitter_room(scene: &LdbScene, emitter: &str) -> i32 {
+    scene
+        .dynamic_meshes
+        .iter()
+        .map(|mesh| (&mesh.name, mesh.room_id))
+        .chain(scene.triggers.iter().map(|t| (&t.name, t.room_id)))
+        .chain(scene.fsms.iter().map(|fsm| (&fsm.name, fsm.room_id)))
+        .find(|(name, _)| name.eq_ignore_ascii_case(emitter))
+        .map_or(0, |(_, room)| room)
 }
 
 fn catalog_root(path: &Path) -> PathBuf {
@@ -2339,6 +2457,97 @@ mod tests {
     use super::*;
     use crate::scene::{SceneDynamicMesh, SceneMaterial, ScenePoly, SceneVertex};
 
+    fn flash(cycle_length: f32) -> openpfx::light::RpsLight {
+        openpfx::light::RpsLight {
+            cycle_length,
+            color: vec![[255.0, 0.0, 0.0], [0.0, 0.0, 255.0]],
+            falloff: vec![4.0, 8.0],
+            offset: [0.0, 1.0, 0.0],
+        }
+    }
+
+    fn siren_scene() -> LdbScene {
+        let mut scene = LdbScene::default();
+        let mut car = glass_quad(false);
+        car.name = "::startroom::car.DO".into();
+        car.room_id = 3;
+        car.world_pos = [2.0, 0.0, 0.0];
+        car.local_start_pos = [0.0; 3];
+        scene.dynamic_meshes.push(car);
+        scene
+    }
+
+    #[test]
+    fn a_particle_light_sits_on_its_emitter_with_the_sampled_colour_and_radius() {
+        let scene = siren_scene();
+        let rooms = BTreeMap::from([(3, [10.0, 0.0, 0.0])]);
+        let mut lights = ParticleLights::default();
+        lights.start("::startroom::car.DO".into(), vec![flash(2.0)], true);
+        lights.step(1.0);
+        let out = lights.point_lights(&scene, &rooms);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].pos, [12.0, 1.0, 0.0]);
+        assert_eq!(out[0].color, [127.5, 0.0, 127.5, 255.0]);
+        assert_eq!(out[0].radius, 6.0);
+        assert_eq!(out[0].intensity, 1.0);
+    }
+
+    #[test]
+    fn retail_police_car_light_flashes_red_and_blue() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        let Some(particles) =
+            crate::read_game_bytes(&game, r"\data\database\particles\particles.txt")
+        else {
+            return;
+        };
+        let particles = String::from_utf8_lossy(&particles).into_owned();
+        let mut scene = siren_scene();
+        assert!(scene.dispatch_message(
+            "::startroom",
+            "::startroom::car.DO->ps_starteffect(light_policecar, \"\");"
+        ));
+        let mut lights = ParticleLights::default();
+        start_queued_effects(&mut scene, &game, &particles, &mut lights);
+        let rooms = BTreeMap::new();
+        let (mut red, mut blue) = (false, false);
+        for _ in 0..100 {
+            lights.step(0.05);
+            let out = lights.point_lights(&scene, &rooms);
+            assert_eq!(out.len(), 1, "looping light must stay on");
+            assert!(
+                (out[0].radius - 4.78).abs() < 0.01,
+                "radius={}",
+                out[0].radius
+            );
+            let [r, _, b, _] = out[0].color;
+            red |= r > 200.0 && b < 50.0;
+            blue |= b > 200.0 && r < 50.0;
+        }
+        assert!(red && blue, "red={red} blue={blue}");
+    }
+
+    #[test]
+    fn particle_lights_loop_end_and_stop_with_their_effect() {
+        let scene = siren_scene();
+        let rooms = BTreeMap::new();
+        let mut lights = ParticleLights::default();
+        lights.start("::startroom::car.DO".into(), vec![flash(2.0)], true);
+        lights.step(3.0);
+        // Looping: 3 s into a 2 s cycle samples at 1 s.
+        assert_eq!(lights.point_lights(&scene, &rooms)[0].radius, 6.0);
+        lights.stop("::STARTROOM::car.DO");
+        assert!(lights.point_lights(&scene, &rooms).is_empty());
+
+        lights.start("::startroom::car.DO".into(), vec![flash(2.0)], false);
+        lights.step(1.5);
+        assert_eq!(lights.point_lights(&scene, &rooms).len(), 1);
+        lights.step(1.0);
+        assert!(lights.point_lights(&scene, &rooms).is_empty());
+    }
+
     fn light(pos: [f32; 3], rgb: f32, radius: f32, intensity: f32) -> ScenePointLight {
         ScenePointLight {
             id: 0,
@@ -2519,6 +2728,8 @@ mod tests {
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
             sound_stops: Vec::new(),
+            effect_queue: Vec::new(),
+            effect_stops: Vec::new(),
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
