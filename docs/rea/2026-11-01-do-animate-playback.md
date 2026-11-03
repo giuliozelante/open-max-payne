@@ -239,11 +239,86 @@ Note: KF `VertexAnimation` / LODs also have slots at `+0xb8` (different vts) —
 See `docs/rea/2026-11-01-kf2-vertex-animation.md` — `KF_VertexAnimation` apply `0x57c860` (matrix×verts).  
 `KF_ObjectKeyframeAnimationCallback` still list/dtor-heavy.
 
+## Animation control messages (2026-11-02, static)
+
+**Handler table (VERIFIED).** `0x6f4a20`… registers one `(handler, registrar)` pair per message. Each registrar
+(`0x6f60b0` + n·`0x820`) references the message's RTTI type descriptor, which names it:
+
+| Handler | Message class (`X_LevelRuntimeDynamicObjectMessage_…`) |
+|---------|--------------------------------------------------------|
+| `0x6f3d20` | `Animate` |
+| `0x6f40e0` | `InvertAnimation` |
+| `0x6f4100` | `PauseAnimation` |
+| `0x6f4120` | `StopAnimation` |
+| `0x6f4150` | `ResumeAnimation` |
+| `0x6f4180` | `Hide` |
+| `0x6f4300` | `EnableCollisions` |
+| `0x6f4320` | `EnableContinuousUpdate` |
+| `0x6f4340` | `SetHitpoints` |
+| `0x6f4360` / `0x6f43d0` | `X_CameraMessage_AttachToDO` / `X_CameraMessage_AnimateInPlace` |
+
+The vt `+0xb8`/`+0xbc` slots (`0x6f3b70`/`0x6f3b90`) are **not** these messages. They snapshot the playhead
+into `+0x4c8` around FSM pause/resume (`0x6e2520`/`0x6e2680`).
+
+**Handler bodies (VERIFIED).** All act only while a curve is active (`+0x483 != 0`), except Resume:
+
+- **Invert** `0x6f40e0`: `+0x4a7 = !+0x4a7`.
+- **Pause(t)** `0x6f4100`: hold `+0x4a3` = float arg 0 (`0x74d340`).
+- **Stop** `0x6f4120`: `+0x487 = +0x483`, `+0x49f = +0x49b`, `+0x483 = 0`. The pose at `+0x259` is not touched.
+- **Resume** `0x6f4150`: if `+0x487` is set, `+0x483 = +0x487`, `+0x49b = +0x49f`, `+0x4a3 = 0`, `+0x487 = 0`.
+
+**Tick `0x6f34c0` (VERIFIED).** `0x7cb8b0` is `0.0f`; duration is DMA `+0x84` (`0x5ff0f0`).
+
+1. `hold == 0`: playhead `+0x49b` ± dt (− when reversed).
+2. `hold > 0`: `hold -= dt`. If it goes negative, the overshoot moves the playhead (same direction rule) and hold = 0.
+3. `hold < 0`: no advance (`PauseAnimation(10000)` and negative values freeze).
+4. Sample at the playhead → `+0x259`.
+5. `duration <= playhead`: sample at `duration`, clear hold/playhead/curve/reverse, send runtime-anim list `+0x29`
+   (`0x751d90`) lagged by the overshoot.
+6. Else `playhead < 0`: sample at 0, clear the same fields, send list `+0x19` (`0x751d80`) lagged by `-playhead`.
+
+Animate apply zeroes `+0x49b`/`+0x4a3`/`+0x4c8` and sends list `+0x9` (`0x751d70`, at `0x6f40aa`). It does **not**
+clear reverse `+0x4a7`.
+
+**Message lists (VERIFIED).** The runtime anim (`0x751aa0`, vt `0x7d9800`) holds three vectors. Its compile
+method `0x751d10` fills them from the DMA: `+0x9` ← DMA `+0x8c` (`0x5ff400`), `+0x19` ← `+0x9c` (`0x73af50`),
+`+0x29` ← `+0xac` (`0x5ff410`). The DMA reader `0x5ff420` reads duration `+0x84`, two transforms, then three tag-`0x1c`
+string lists into `+0x8c`, `+0x9c`, `+0xac`. So in the `.ldb`, list 1 = **start**, list 2 = **reverse end**, list 3 =
+**end**.
+
+Data check (STRONGLY SUPPORTED, 21 retail levels, 5092 tracks): 1782 have a start list, 545 a reverse-end list,
+3792 an end list. Bunker door `open`: start plays `door_slide` and enables the exits; end chains `DO_Animate(delay)`;
+reverse end re-enables the trigger and disables the exits, which is what an inverted open (the door closing again)
+needs.
+
+Message use in the 25 retail `.ldb`: `DO_StopAnimation` 847, `DO_InvertAnimation` 368, `DO_EnableCollisions` 99,
+`DO_PauseAnimation` 39 (args `1`, `0.2`, `10000`), `DO_ResumeAnimation` 37 (case-insensitive counts).
+
+**Engine:** `scene.rs` `DoAnimState` + `SceneDynamicMesh::step_animation` follow the tick above. Start lists are
+queued and dispatched on the next `step_dynamic_anims`, which stands in for the lagged send.
+
 ## Open (next climb)
 
-- Prove RTTI of `LocalCharacterInput+0x1b5` receiver (dynamic or store-site cast).
-- If only those two `+0xb0` sites exist, confirm in-game that DO_Animate objects are advanced via that character cache (dynamic).
-- Wire Pause/Resume/Stop/Invert **messages** to `+0xb8`/`+0xbc`/`0x6f40e0` (message RTTI blocks at `0x6f7xxx` are type-name registration).
+- ~~Prove RTTI of `LocalCharacterInput+0x1b5` receiver~~ — moot: the DO tick caller is `0x6e1a00` via vt `+0x1c` (above).
+- ~~Wire Pause/Resume/Stop/Invert messages~~ — done above.
+- `DO_EnableCollisions(b)`: the bytes are read, the meaning is not (see below). `EnableContinuousUpdate` (`0x6f4320`) is unread.
+
+  VERIFIED, static: `0x6f4300` takes the bool (`0x74e5b0` = message `+0x30`) and `0x6f43f0` stores it at DO `+0x4ae`.
+  `0x6f4410` then rewrites three bytes from `+0x143` (base object), `+0x4ae` and `+0x4ad` (set at DO load, `0x6f2c9b`):
+
+  | `+0x143` | `+0x4ae` | `+0x4ad` | `+0x181` | `+0x182` | `+0x183` |
+  |:-:|:-:|:-:|:-:|:-:|:-:|
+  | 0 | – | – | 0 | ff | 0 |
+  | 1 | 1 | 1 | ff | 0 | ff |
+  | 1 | 0 | 1 | 0 | 0 | ff |
+  | 1 | 1 | 0 | ff | 0 | 0 |
+  | 1 | 0 | 0 | 0 | ff | 0 |
+
+  UNKNOWN: what `+0x181`/`+0x182`/`+0x183` gate. Writers at `0x6d8834`/`0x6d8850`/`0x6d896d` and a reader of `+0x183` at
+  `0x6d97bd` are the next leads. HYPOTHESIS, not used in code: one byte per collision class (characters, none,
+  projectiles). The engine leaves `DO_EnableCollisions` unhandled until this is read.
+- Lag semantics: the end/start lists go through `X_LaggedMessage` with the overshoot as delay (`0x6e2c00`). Exact
+  delivery frame is UNKNOWN.
 - Curve tag `0x71`; runtime channel counts.
 - Matrix IO thunk ↔ `M_Matrix4x3Template` at runtime.
 - KF2: who vcalls VA `+0x48` — see KF2 note (static exhausted → dynamic).

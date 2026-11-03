@@ -200,10 +200,30 @@ pub struct SceneDynamicAnim {
     pub start_pos: [f32; 3],
     pub end_mat: [f32; 9],
     pub end_pos: [f32; 3],
-    pub scripts: Vec<String>,
+    /// `.ldb` list 1 → DMA `+0x8c` → runtime anim `+0x9`: sent when `DO_Animate` starts (`0x6f40aa`).
+    pub start_scripts: Vec<String>,
+    /// `.ldb` list 2 → DMA `+0x9c` → runtime anim `+0x19`: sent when a reversed track reaches 0.
+    pub reverse_end_scripts: Vec<String>,
+    /// `.ldb` list 3 → DMA `+0xac` → runtime anim `+0x29`: sent when the track reaches its end.
+    pub end_scripts: Vec<String>,
     /// Two sample channels. Each sample is a tagged `f32` (`0x09`). One channel
     /// runs along the start→end distance; the other is a 0..1 clock.
     pub curves: [Vec<f32>; 2],
+}
+
+/// Retail DO playback fields beside the playhead (`X_LevelRuntimeDynamicObject`).
+#[derive(Debug, Clone, Default)]
+pub struct DoAnimState {
+    /// `+0x483 != 0`: a track is advancing.
+    pub playing: bool,
+    /// `+0x4a7`, toggled by `DO_InvertAnimation`.
+    pub reverse: bool,
+    /// `+0x4a3`, set by `DO_PauseAnimation(t)`: > 0 counts down, < 0 holds forever.
+    pub hold: f32,
+    /// `+0x487` / `+0x49f`: track and playhead saved by `DO_StopAnimation`.
+    pub saved: Option<(String, f32)>,
+    /// Start-list messages waiting for the next step (retail sends them lagged).
+    pub queued: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +245,7 @@ pub struct SceneDynamicMesh {
     pub active_track: Option<String>,
     pub track_time: f32,
     pub track_duration: f32,
+    pub anim_state: DoAnimState,
 }
 
 impl SceneDynamicMesh {
@@ -249,26 +270,101 @@ impl SceneDynamicMesh {
         else {
             return false;
         };
+        // Apply 0x6f3d20 zeroes playhead and hold; reverse (+0x4a7) is left as it was.
         self.track_duration = track.duration;
         self.track_time = 0.0;
         self.active_track = Some(track.name.clone());
+        let start = track.start_scripts.clone();
+        let state = &mut self.anim_state;
+        state.playing = true;
+        state.hold = 0.0;
+        state.queued.extend(start);
         true
     }
 
-    /// Advance the active track. Returns its scripts once, on the frame it ends.
+    /// One `0x6f34c0` tick. Returns the end list (`+0x29`, or `+0x19` when reversed)
+    /// on the frame the track runs out.
     pub fn step_animation(&mut self, dt: f32) -> Option<Vec<String>> {
-        let name = self.active_track.as_ref()?.clone();
-        if self.track_duration <= 0.0 || self.track_time >= self.track_duration {
+        let state = &mut self.anim_state;
+        if !state.playing {
             return None;
         }
-        self.track_time = (self.track_time + dt).min(self.track_duration);
-        if self.track_time < self.track_duration {
+        let dir = if state.reverse { -1.0 } else { 1.0 };
+        if state.hold == 0.0 {
+            self.track_time += dir * dt;
+        } else if state.hold > 0.0 {
+            state.hold -= dt;
+            if state.hold < 0.0 {
+                self.track_time -= dir * state.hold;
+                state.hold = 0.0;
+            }
+        }
+        let reached_end = self.track_duration <= self.track_time;
+        if !reached_end && self.track_time >= 0.0 {
             return None;
         }
-        self.anims
+        self.track_time = if reached_end {
+            self.track_duration
+        } else {
+            0.0
+        };
+        state.playing = false;
+        state.hold = 0.0;
+        state.reverse = false;
+        let name = self.active_track.as_ref()?;
+        let anim = self
+            .anims
             .iter()
-            .find(|anim| anim.name.eq_ignore_ascii_case(&name))
-            .map(|anim| anim.scripts.clone())
+            .find(|anim| anim.name.eq_ignore_ascii_case(name))?;
+        Some(if reached_end {
+            anim.end_scripts.clone()
+        } else {
+            anim.reverse_end_scripts.clone()
+        })
+    }
+
+    /// `DO_InvertAnimation` (`0x6f40e0`): flip direction while a track plays.
+    fn invert_animation(&mut self) {
+        if self.anim_state.playing {
+            self.anim_state.reverse = !self.anim_state.reverse;
+        }
+    }
+
+    /// `DO_PauseAnimation(t)` (`0x6f4100`): set the hold time while a track plays.
+    fn pause_animation(&mut self, hold: f32) {
+        if self.anim_state.playing {
+            self.anim_state.hold = hold;
+        }
+    }
+
+    /// `DO_StopAnimation` (`0x6f4120`): save track and playhead, stop advancing.
+    /// The pose stays where it was.
+    fn stop_animation(&mut self) {
+        if self.anim_state.playing {
+            if let Some(name) = self.active_track.clone() {
+                self.anim_state.saved = Some((name, self.track_time));
+            }
+            self.anim_state.playing = false;
+        }
+    }
+
+    /// `DO_ResumeAnimation` (`0x6f4150`): restore what Stop saved, with no hold.
+    fn resume_animation(&mut self) {
+        let Some((name, time)) = self.anim_state.saved.take() else {
+            return;
+        };
+        if let Some(duration) = self
+            .anims
+            .iter()
+            .find(|anim| anim.name == name)
+            .map(|anim| anim.duration)
+        {
+            self.track_duration = duration;
+        }
+        self.active_track = Some(name);
+        self.track_time = time;
+        self.anim_state.playing = true;
+        self.anim_state.hold = 0.0;
     }
 
     /// World pose ignoring the parent's motion: the track-local pose `L`
@@ -645,6 +741,28 @@ impl LdbScene {
                 self.resolve_mesh_mut(context_name, msg.receiver)
                     .is_some_and(|mesh| mesh.play_track(track_name))
             }
+            "do_invertanimation" | "do_stopanimation" | "do_resumeanimation" => {
+                let verb = msg.verb.to_ascii_lowercase();
+                self.resolve_mesh_mut(context_name, msg.receiver)
+                    .is_some_and(|mesh| {
+                        match verb.as_str() {
+                            "do_invertanimation" => mesh.invert_animation(),
+                            "do_stopanimation" => mesh.stop_animation(),
+                            _ => mesh.resume_animation(),
+                        }
+                        true
+                    })
+            }
+            "do_pauseanimation" => {
+                let Some(hold) = msg.args.first().and_then(|arg| arg.parse::<f32>().ok()) else {
+                    return false;
+                };
+                self.resolve_mesh_mut(context_name, msg.receiver)
+                    .is_some_and(|mesh| {
+                        mesh.pause_animation(hold);
+                        true
+                    })
+            }
             "t_enable" => {
                 let enabled = match msg.args.first().copied().unwrap_or("") {
                     "false" | "0" => false,
@@ -861,6 +979,22 @@ impl LdbScene {
     }
 
     pub fn step_dynamic_anims(&mut self, dt: f32) {
+        let queued: Vec<(String, Vec<String>)> = self
+            .dynamic_meshes
+            .iter_mut()
+            .filter(|mesh| !mesh.anim_state.queued.is_empty())
+            .map(|mesh| {
+                (
+                    mesh.name.clone(),
+                    std::mem::take(&mut mesh.anim_state.queued),
+                )
+            })
+            .collect();
+        for (name, scripts) in queued {
+            for script in &scripts {
+                self.dispatch_message(&name, script);
+            }
+        }
         let mut pending = Vec::new();
         for mesh in &mut self.dynamic_meshes {
             if let Some(scripts) = mesh.step_animation(dt) {
@@ -1859,9 +1993,10 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     let duration = read_f32_tag(data, &mut i)?;
                     let (start_mat, start_pos) = read_xform(data, &mut i)?;
                     let (end_mat, end_pos) = read_xform(data, &mut i)?;
-                    let mut scripts = read_str_list(data, &mut i, 0x1c)?;
-                    scripts.append(&mut read_str_list(data, &mut i, 0x1c)?);
-                    scripts.append(&mut read_str_list(data, &mut i, 0x1c)?);
+                    // DMA reader 0x5ff420: three 0x1c lists → +0x8c, +0x9c, +0xac.
+                    let start_scripts = read_str_list(data, &mut i, 0x1c)?;
+                    let reverse_end_scripts = read_str_list(data, &mut i, 0x1c)?;
+                    let end_scripts = read_str_list(data, &mut i, 0x1c)?;
                     let mut curves = [Vec::new(), Vec::new()];
                     for curve in &mut curves {
                         let _cty = read_i32(data, &mut i)?;
@@ -1878,7 +2013,9 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                         curves,
                         end_mat,
                         end_pos,
-                        scripts,
+                        start_scripts,
+                        reverse_end_scripts,
+                        end_scripts,
                     });
                 }
                 i += 12; // 6 bools (`0e u8`)
@@ -1903,6 +2040,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     active_track: None,
                     track_time: 0.0,
                     track_duration: 0.0,
+                    anim_state: Default::default(),
                 });
             }
         }
@@ -2252,10 +2390,14 @@ pub fn camera_flyover(scene: &LdbScene) -> Option<CameraFlyover> {
     let cam = scene.dynamic_meshes.iter().find(|m| {
         m.name.ends_with("altitude::camera.DO")
             && m.anims.iter().any(|a| {
-                a.scripts.iter().any(|s| {
-                    s.to_ascii_lowercase()
-                        .contains("s_modeswitch(graphicnovel)")
-                })
+                a.start_scripts
+                    .iter()
+                    .chain(&a.reverse_end_scripts)
+                    .chain(&a.end_scripts)
+                    .any(|s| {
+                        s.to_ascii_lowercase()
+                            .contains("s_modeswitch(graphicnovel)")
+                    })
             })
     })?;
     let mut chain = vec![cam];
@@ -2522,6 +2664,7 @@ mod tests {
             active_track: None,
             track_time: 0.0,
             track_duration: 0.0,
+            anim_state: DoAnimState::default(),
         }
     }
 
@@ -2533,7 +2676,9 @@ mod tests {
             start_pos: [0.0, 0.0, 0.0],
             end_mat: [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
             end_pos: end,
-            scripts: Vec::new(),
+            start_scripts: Vec::new(),
+            reverse_end_scripts: Vec::new(),
+            end_scripts: Vec::new(),
             curves: [Vec::new(), Vec::new()],
         }
     }
@@ -2749,7 +2894,8 @@ mod tests {
             track("open2", [0.0; 3]),
         ]);
         door.name = "::startroom::door_dummy::Door.DO".into();
-        door.anims[0].scripts = vec!["::startroom::door_dummy::Door.DO->DO_Animate(open2);".into()];
+        door.anims[0].end_scripts =
+            vec!["::startroom::door_dummy::Door.DO->DO_Animate(open2);".into()];
         scene.dynamic_meshes.push(door);
         let started = scene.dispatch_message(
             "::startroom::door_dummy::Door::t1.TRIGGER",
@@ -2765,6 +2911,68 @@ mod tests {
             scene.dynamic_meshes[0].active_track.as_deref(),
             Some("open2")
         );
+    }
+
+    /// One door playing `open` (1.3 s) in a scene, for the `0x6f34c0` tick tests.
+    fn playing_door() -> LdbScene {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene
+            .dynamic_meshes
+            .push(door_mesh(vec![track("open", [0.4, 0.0, 0.0])]));
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_Animate(open);"));
+        scene
+    }
+
+    #[test]
+    fn do_pause_animation_holds_then_carries_the_overshoot() {
+        // 0x6f4100 sets hold +0x4a3; 0x6f34c0 counts it down and adds the overshoot.
+        let mut scene = playing_door();
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_PauseAnimation(1);"));
+        scene.step_dynamic_anims(0.6);
+        assert_eq!(scene.dynamic_meshes[0].track_time, 0.0);
+        scene.step_dynamic_anims(0.6);
+        assert!((scene.dynamic_meshes[0].track_time - 0.2).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn do_invert_animation_runs_back_and_sends_the_reverse_end_list() {
+        // 0x6f40e0 toggles reverse; below 0 the tick sends anim +0x19 (.ldb list 2).
+        let mut scene = playing_door();
+        scene.dynamic_meshes[0].anims[0].reverse_end_scripts = vec!["this->DO_Hide(true);".into()];
+        scene.dynamic_meshes[0].anims[0].end_scripts = vec!["this->DO_SetHitpoints(7);".into()];
+        scene.step_dynamic_anims(0.5);
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_InvertAnimation();"));
+        scene.step_dynamic_anims(0.7);
+        let door = &scene.dynamic_meshes[0];
+        assert_eq!(door.track_time, 0.0);
+        assert!(door.hidden);
+        assert_eq!(door.hitpoints, None);
+    }
+
+    #[test]
+    fn do_stop_freezes_and_resume_continues_from_the_saved_playhead() {
+        // 0x6f4120 saves curve + playhead and clears the curve; 0x6f4150 restores them.
+        let mut scene = playing_door();
+        scene.step_dynamic_anims(0.4);
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_StopAnimation();"));
+        scene.step_dynamic_anims(0.5);
+        assert!((scene.dynamic_meshes[0].track_time - 0.4).abs() < 1.0e-5);
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_ResumeAnimation();"));
+        scene.step_dynamic_anims(0.3);
+        assert!((scene.dynamic_meshes[0].track_time - 0.7).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn do_animate_sends_the_start_list_on_the_next_step() {
+        // Apply 0x6f3d20 sends anim +0x9 (.ldb list 1) through the lagged queue.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let mut open = track("open", [0.4, 0.0, 0.0]);
+        open.start_scripts = vec!["this->DO_Hide(true);".into()];
+        scene.dynamic_meshes.push(door_mesh(vec![open]));
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_Animate(open);"));
+        assert!(!scene.dynamic_meshes[0].hidden);
+        scene.step_dynamic_anims(0.1);
+        assert!(scene.dynamic_meshes[0].hidden);
     }
 
     #[test]

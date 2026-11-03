@@ -703,7 +703,7 @@ fn toggle_nearest_dynamic_mesh(
                 "  3D Engine: DO_Animate {} ({}) -> {:?}",
                 dm.name,
                 anim.name,
-                anim.scripts.first().map(|s| s.as_str()).unwrap_or("ok")
+                anim.end_scripts.first().map(|s| s.as_str()).unwrap_or("ok")
             );
         }
     }
@@ -1987,6 +1987,7 @@ mod tests {
             active_track: None,
             track_time: 0.0,
             track_duration: 0.0,
+            anim_state: Default::default(),
         });
         let rooms = BTreeMap::new();
         assert!(hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
@@ -2062,7 +2063,9 @@ mod tests {
             start_pos: [0.0; 3],
             end_mat: drawer.local_start_mat,
             end_pos: [0.3, 0.0, 0.0],
-            scripts: Vec::new(),
+            start_scripts: Vec::new(),
+            reverse_end_scripts: Vec::new(),
+            end_scripts: Vec::new(),
             curves: [Vec::new(), Vec::new()],
         });
         scene.dynamic_meshes.push(drawer);
@@ -2102,6 +2105,7 @@ mod tests {
             active_track: None,
             track_time: 0.0,
             track_duration: 0.0,
+            anim_state: Default::default(),
         }
     }
 
