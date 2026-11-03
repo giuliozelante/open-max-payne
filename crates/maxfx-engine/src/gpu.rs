@@ -6,7 +6,7 @@
 
 use crate::kf2::KfsMesh;
 use crate::render3d::{
-    dynamic_mesh_drawn, dynamic_world, poly_policy, DETAIL_OFFSET_M, FAR_Z, FRAME_H, FRAME_W,
+    back_plane, dynamic_mesh_drawn, dynamic_world, poly_policy, DETAIL_OFFSET_M, FRAME_H, FRAME_W,
     NEAR_Z,
 };
 use crate::scene::LdbScene;
@@ -246,7 +246,7 @@ fn fullscreen_pipeline(
 /// `paint_sky_strip` per pixel: the view direction through the pixel centre, then
 /// `sky_strip_uv`. Without a sphere, the flat two-tone background of the software path.
 const SKY_SHADER: &str = r#"
-struct Camera { pos: vec4f, right: vec4f, up: vec4f, fwd: vec4f, params: vec4f, params2: vec4f };
+struct Camera { pos: vec4f, right: vec4f, up: vec4f, fwd: vec4f, params: vec4f, params2: vec4f, fog: vec4f, fog_range: vec4f };
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(1) @binding(0) var img: texture_2d<f32>;
 @group(1) @binding(1) var img_sampler: sampler;
@@ -454,6 +454,10 @@ struct CameraUniform {
     params: [f32; 4],
     /// x = near plane, y = has sky, z/w = frame width/height (sky directions).
     params2: [f32; 4],
+    /// Fog colour (0..1) in xyz, w = fog on; `render3d::apply_fog` in the fragment stage.
+    fog: [f32; 4],
+    /// x = fog start, y = fog end (view depth).
+    fog_range: [f32; 4],
 }
 
 #[repr(C)]
@@ -500,7 +504,7 @@ struct BatchUniform {
 }
 
 const SHADER: &str = r#"
-struct Camera { pos: vec4f, right: vec4f, up: vec4f, fwd: vec4f, params: vec4f, params2: vec4f };
+struct Camera { pos: vec4f, right: vec4f, up: vec4f, fwd: vec4f, params: vec4f, params2: vec4f, fog: vec4f, fog_range: vec4f };
 struct Batch { params: vec4f, params2: vec4f };
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(1) @binding(0) var<uniform> batch: Batch;
@@ -571,6 +575,12 @@ fn fs(i: Out) -> Frag {
     var rgb = base.rgb * i.shade;
     if batch.params.w > 0.5 && cam.params.z > 0.5 {
         rgb = base.rgb * textureSample(lmap, lmap_sampler, clamp(i.luv, vec2f(0.0), vec2f(1.0))).rgb;
+    }
+    if cam.fog.w > 0.5 {
+        // render3d::fog_amount: linear in view depth, a step when end <= start.
+        let span = cam.fog_range.y - cam.fog_range.x;
+        let k = select(step(cam.fog_range.y, i.vz), clamp((i.vz - cam.fog_range.x) / span, 0.0, 1.0), span > 0.0);
+        rgb = mix(rgb, cam.fog.rgb, k);
     }
     var f: Frag;
     // Blended batches (BlendedAlphaTest) hand the texel alpha to the blend stage.
@@ -1068,12 +1078,13 @@ impl GpuRenderer {
             self.depth_out.slice(..).get_mapped_range(),
         ) {
             let depths: &[f32] = bytemuck::cast_slice(&depths);
+            let far = back_plane(scene.fog);
             for (i, (rgba, &d)) in colors.as_chunks::<4>().0.iter().zip(depths).enumerate() {
                 if d >= 1.0 {
                     continue;
                 }
                 fb[i] = (u32::from(rgba[0]) << 16) | (u32::from(rgba[1]) << 8) | u32::from(rgba[2]);
-                zb[i] = d * FAR_Z;
+                zb[i] = d * far;
             }
         }
         self.color_out.unmap();
@@ -1125,9 +1136,20 @@ impl GpuRenderer {
                 fov_scale / (w * 0.5),
                 fov_scale / (h * 0.5),
                 if use_lightmaps { 1.0 } else { 0.0 },
-                FAR_Z,
+                back_plane(scene.fog),
             ],
             params2: [NEAR_Z, if self.sky.1 { 1.0 } else { 0.0 }, w, h],
+            fog: scene.fog.map_or([0.0; 4], |fog| {
+                [
+                    fog.color[0] / 255.0,
+                    fog.color[1] / 255.0,
+                    fog.color[2] / 255.0,
+                    1.0,
+                ]
+            }),
+            fog_range: scene
+                .fog
+                .map_or([0.0; 4], |fog| [fog.start, fog.end, 0.0, 0.0]),
         };
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&camera));
@@ -1930,6 +1952,37 @@ mod tests {
         gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
         let center = (h / 2) * w + w / 2;
         assert!(sw_fb[center] != 0, "the plate must draw");
+        let gap = (0..3)
+            .map(|k| ((fb[center] >> (8 * k)) & 0xff).abs_diff((sw_fb[center] >> (8 * k)) & 0xff))
+            .max()
+            .unwrap_or(0);
+        assert!(gap <= 1, "{:06x} vs {:06x}", fb[center], sw_fb[center]);
+    }
+
+    #[test]
+    fn gpu_fog_matches_the_software_fog() {
+        let mut scene = scene_with(vec![quad(7, -1)], [0.0; 3]);
+        scene.static_meshes[0].polys[0].normal = [-1.0, 0.0, 0.0];
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: gpu_fog_matches_the_software_fog skipped");
+            return;
+        };
+        let view = crate::render3d::test_view([-4.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        let (mut sw_fb, sw_zb) = crate::render3d::test_software_static(&scene, view);
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let center = (h / 2) * w + w / 2;
+        let clear = sw_fb[center];
+        // The quad is 4 m away: half way through a 0..8 m fog.
+        scene.fog = Some(crate::scene::LevelFog {
+            color: [200.0, 40.0, 40.0],
+            start: 0.0,
+            end: 8.0,
+        });
+        crate::render3d::apply_fog(&mut sw_fb, &sw_zb, scene.fog);
+        assert_ne!(sw_fb[center], clear, "the fog must tint the quad");
+        let mut fb = vec![0u32; w * h];
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
         let gap = (0..3)
             .map(|k| ((fb[center] >> (8 * k)) & 0xff).abs_diff((sw_fb[center] >> (8 * k)) & 0xff))
             .max()

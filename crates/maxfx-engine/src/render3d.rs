@@ -10,7 +10,7 @@
 
 use crate::kf2::{load_character_rigs, load_skin_body, pose_mesh, CharacterRig, KfsFace};
 use crate::scene::{
-    decode_texture_blob, material_policy, DecodedLightmap, DecodedTexture, LdbScene,
+    decode_texture_blob, material_policy, DecodedLightmap, DecodedTexture, LdbScene, LevelFog,
     MaterialPolicy, ScenePointLight, ScenePoly, SceneVertex,
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode};
@@ -37,7 +37,11 @@ pub(crate) fn hardware_renderer() -> bool {
 pub(crate) const FRAME_W: usize = W;
 pub(crate) const FRAME_H: usize = H;
 pub(crate) const NEAR_Z: f32 = 0.15;
-pub(crate) const FAR_Z: f32 = 220.0;
+/// Back plane without fog. HYPOTHESIS: retail's fog-less back plane is not read yet; 1000 m
+/// is past every room the shipped levels can show, where 220 m visibly cut the startup city.
+pub(crate) const FAR_Z: f32 = 1000.0;
+/// `globalconfig.txt` `[camera]` `MinimumBackPlaneDistance`.
+const MIN_BACK_PLANE: f32 = 10.0;
 const EYE_HEIGHT: f32 = 1.65;
 /// One `DetailOffset` step from `materials.txt`, in metres toward the camera.
 pub(crate) const DETAIL_OFFSET_M: f32 = 0.02;
@@ -573,6 +577,7 @@ pub fn run_3d_walkthrough(
 
         scene.step_dynamic_anims(base_dt);
         scene.step_screen_fade(base_dt);
+        scene.step_fog(base_dt);
         // Scripted sounds (sirens, the chopper) start and stop with the scripts.
         play_queued_sounds(
             &mut scene,
@@ -821,6 +826,10 @@ pub fn run_3d_walkthrough(
                     &mut zb,
                 );
             }
+        }
+
+        if gpu.is_none() && !wireframe {
+            apply_fog(&mut fb, &zb, scene.fog);
         }
 
         // Hardware: everything drawn so far (sky, wireframe geometry) is the background; the HUD
@@ -1726,6 +1735,7 @@ pub fn render_frame(
     draw_dynamic_meshes(
         scene, &rooms, pos, right, up, fwd, fov_scale, true, false, &mut fb, &mut zb,
     );
+    apply_fog(&mut fb, &zb, scene.fog);
     Ok((W, H, fb))
 }
 
@@ -1764,6 +1774,35 @@ fn camera_view(scene: &LdbScene, idx: usize, rooms: &BTreeMap<i32, [f32; 3]>) ->
         up[0] * fwd[1] - up[1] * fwd[0],
     ];
     (pos, right, up, fwd)
+}
+
+/// Back plane: the fog's end (nothing past it shows through full fog), else [`FAR_Z`].
+pub(crate) fn back_plane(fog: Option<LevelFog>) -> f32 {
+    fog.map_or(FAR_Z, |fog| fog.end.max(MIN_BACK_PLANE))
+}
+
+/// Linear fog amount at view depth `z`: 0 before `start`, 1 from `end` on.
+pub(crate) fn fog_amount(fog: &LevelFog, z: f32) -> f32 {
+    if fog.end <= fog.start {
+        return if z >= fog.end { 1.0 } else { 0.0 };
+    }
+    ((z - fog.start) / (fog.end - fog.start)).clamp(0.0, 1.0)
+}
+
+/// Software fog after rasterisation: each pixel with a depth mixes toward the fog colour by its
+/// view depth. Sky pixels (no depth) stay clear.
+pub(crate) fn apply_fog(fb: &mut [u32], zb: &[f32], fog: Option<LevelFog>) {
+    let Some(fog) = fog else {
+        return;
+    };
+    for (px, &z) in fb.iter_mut().zip(zb).filter(|(_, z)| z.is_finite()) {
+        let k = fog_amount(&fog, z);
+        let mix = |shift: u32, c: f32| {
+            let v = ((*px >> shift) & 0xff) as f32;
+            ((v + (c - v) * k).round() as u32) << shift
+        };
+        *px = mix(16, fog.color[0]) | mix(8, fog.color[1]) | mix(0, fog.color[2]);
+    }
 }
 
 /// Mix `rgba` over every `0x00RRGGBB` pixel by its alpha.
@@ -2281,7 +2320,7 @@ fn draw_poly<'a>(
         if cz >= NEAR_Z {
             all_behind = false;
         }
-        if cz <= FAR_Z {
+        if cz <= back_plane(scene.fog) {
             all_far = false;
         }
         cam_verts.push(CamVert {
@@ -3214,6 +3253,8 @@ mod tests {
             screen_fade: None,
             ambient: [0.0; 3],
             mode_switch: None,
+            fog: None,
+            fog_fade: None,
         }
     }
 
@@ -3325,6 +3366,34 @@ mod tests {
         // cutscene against its real-time speech; a loading stall is capped instead of skipping.
         assert_eq!(frame_dt(std::time::Duration::from_millis(33)), 0.033);
         assert_eq!(frame_dt(std::time::Duration::from_secs(2)), MAX_FRAME_DT);
+    }
+
+    #[test]
+    fn fog_end_is_the_back_plane_with_a_floor() {
+        // globalconfig.txt `[camera]` `MinimumBackPlaneDistance = 10.0`.
+        let fog = |end| {
+            Some(crate::scene::LevelFog {
+                color: [0.0; 3],
+                start: 0.0,
+                end,
+            })
+        };
+        assert_eq!(back_plane(None), FAR_Z);
+        assert_eq!(back_plane(fog(400.0)), 400.0);
+        assert_eq!(back_plane(fog(5.0)), 10.0);
+    }
+
+    #[test]
+    fn software_fog_mixes_by_view_depth_and_spares_the_sky() {
+        let fog = crate::scene::LevelFog {
+            color: [0.0, 0.0, 0.0],
+            start: 0.0,
+            end: 100.0,
+        };
+        let mut fb = vec![0x00ff_ffffu32; 3];
+        let zb = [50.0, 200.0, f32::INFINITY];
+        apply_fog(&mut fb, &zb, Some(fog));
+        assert_eq!(fb, vec![0x0080_8080, 0x0000_0000, 0x00ff_ffff]);
     }
 
     #[test]

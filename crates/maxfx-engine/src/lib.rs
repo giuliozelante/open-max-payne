@@ -1964,6 +1964,8 @@ pub struct LevelsTxtEntry {
     /// `AmbientColor` (0..255 RGB, `#define`s resolved). Retail copies it into the `P_Scene`
     /// ambient (`0x6805be`), which becomes `D3DRS_AMBIENT` for lit objects.
     pub ambient: Option<[f32; 3]>,
+    /// `FogColor` / `FogStart` / `FogEnd`, present only when `Fogging` is on.
+    pub fog: Option<crate::scene::LevelFog>,
 }
 
 impl LevelsTxtEntry {
@@ -2046,9 +2048,24 @@ pub fn parse_levels_txt(text: &str) -> Vec<LevelsTxtEntry> {
             player_skin: prop_value(body, "PlayerSkinName"),
             world_sphere: prop_value(body, "WorldSphere"),
             ambient: prop_value(body, "AmbientColor").and_then(|v| parse_color3(&v, &defines)),
+            fog: level_fog(body, &defines),
         });
     }
     out
+}
+
+/// `Fogging = TRUE` block fog. Values may carry a trailing `// comment` after the `;`.
+fn level_fog(body: &str, defines: &[(&str, &str)]) -> Option<crate::scene::LevelFog> {
+    let value =
+        |key| prop_value(body, key).map(|v| v.split(';').next().unwrap_or("").trim().to_string());
+    if !value("Fogging")?.eq_ignore_ascii_case("true") {
+        return None;
+    }
+    Some(crate::scene::LevelFog {
+        color: parse_color3(&value("FogColor")?, defines)?,
+        start: value("FogStart")?.parse().ok()?,
+        end: value("FogEnd")?.parse().ok()?,
+    })
 }
 
 /// `( r, g, b )` with each channel a number or a `#define` name.
@@ -3954,6 +3971,43 @@ mod tests {
         assert_eq!(entries[0].world_sphere, None);
         assert_eq!(entries[1].player_skin.as_deref(), Some("young_max_payne"));
         assert_eq!(entries[1].world_sphere.as_deref(), Some("sunset"));
+    }
+
+    #[test]
+    fn levels_txt_fog_is_read_only_when_fogging_is_on() {
+        // Retail: the startup intro fogs from 2000 to 5000, the house sets `Fogging = false`.
+        let txt = r#"
+[startup_level]
+{
+	[Properties]
+	Directory 		= front_end;
+	Level 			= startup_level.ldb;
+	Fogging			= TRUE;
+	FogColor		= ( 10, 10, 15 );
+	FogStart		= 2000.0; // Level adjusts on the fly
+	FogEnd			= 5000.0;
+}
+[part0_level1]
+{
+	[Properties]
+	Directory 		= part1;
+	Level 			= part0_level1.ldb;
+	Fogging	= false;
+	FogColor	= ( 19, 20, 21 );
+	FogStart	= -200.0;
+	FogEnd		= 500.0;
+}
+"#;
+        let entries = parse_levels_txt(txt);
+        assert_eq!(
+            entries[0].fog,
+            Some(crate::scene::LevelFog {
+                color: [10.0, 10.0, 15.0],
+                start: 2000.0,
+                end: 5000.0,
+            })
+        );
+        assert_eq!(entries[1].fog, None);
     }
 
     #[test]

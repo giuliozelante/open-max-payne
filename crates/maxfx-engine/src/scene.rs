@@ -662,6 +662,19 @@ pub struct LdbScene {
     pub ambient: [f32; 3],
     /// Last `S_ModeSwitch` request (`graphicnovel` ends the startup intro).
     pub mode_switch: Option<String>,
+    /// Distance fog now: `levels.txt` at load, then `GM_ChangeFog`. `None` = no fog.
+    pub fog: Option<LevelFog>,
+    /// `GM_ChangeFog` with a fade time: `(from, to, seconds, elapsed)`.
+    pub fog_fade: Option<(LevelFog, LevelFog, f32, f32)>,
+}
+
+/// Linear distance fog: `levels.txt` `FogColor` / `FogStart` / `FogEnd` (when `Fogging` is on)
+/// or `GM_ChangeFog(0xRRGGBB, front, back, seconds)`. Colour channels are 0..255.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LevelFog {
+    pub color: [f32; 3],
+    pub start: f32,
+    pub end: f32,
 }
 
 /// `MPHM_FadeToColor(from, to, seconds)`: colours are `0xRRGGBBAA`.
@@ -999,6 +1012,32 @@ impl LdbScene {
                 self.mode_switch = Some(mode.to_ascii_lowercase());
                 true
             }
+            "gm_changefog" => {
+                let arg = |i: usize| msg.args.get(i).map(|a| a.trim());
+                let colour = arg(0)
+                    .and_then(|a| a.strip_prefix("0x").or_else(|| a.strip_prefix("0X")))
+                    .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+                let number = |i| arg(i).and_then(|a| a.parse::<f32>().ok());
+                let (Some(rgb), Some(start), Some(end), Some(seconds)) =
+                    (colour, number(1), number(2), number(3))
+                else {
+                    return false;
+                };
+                let [_, r, g, b] = rgb.to_be_bytes();
+                let to = LevelFog {
+                    color: [f32::from(r), f32::from(g), f32::from(b)],
+                    start,
+                    end,
+                };
+                match self.fog {
+                    Some(from) if seconds > 0.0 => self.fog_fade = Some((from, to, seconds, 0.0)),
+                    _ => {
+                        self.fog = Some(to);
+                        self.fog_fade = None;
+                    }
+                }
+                true
+            }
             "gm_setplayercontrols" => {
                 let Some(controls) = script_bool(msg.args.first().copied()) else {
                     return false;
@@ -1221,6 +1260,24 @@ impl LdbScene {
         fade.elapsed += dt;
         if fade.elapsed >= fade.duration && fade.to[3] == 0 {
             self.screen_fade = None;
+        }
+    }
+
+    /// Advance a `GM_ChangeFog` fade: every fog value moves linearly from the old fog to the new.
+    pub fn step_fog(&mut self, dt: f32) {
+        let Some((from, to, seconds, elapsed)) = self.fog_fade.as_mut() else {
+            return;
+        };
+        *elapsed += dt;
+        let k = (*elapsed / *seconds).min(1.0);
+        let mix = |a: f32, b: f32| a + (b - a) * k;
+        self.fog = Some(LevelFog {
+            color: std::array::from_fn(|c| mix(from.color[c], to.color[c])),
+            start: mix(from.start, to.start),
+            end: mix(from.end, to.end),
+        });
+        if k >= 1.0 {
+            self.fog_fade = None;
         }
     }
 
@@ -2751,6 +2808,8 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         screen_fade: None,
         ambient: [0.0; 3],
         mode_switch: None,
+        fog: None,
+        fog_fade: None,
     })
 }
 
@@ -2860,6 +2919,8 @@ mod tests {
             screen_fade: None,
             ambient: [0.0; 3],
             mode_switch: None,
+            fog: None,
+            fog_fade: None,
         }
     }
 
@@ -3937,6 +3998,42 @@ mod tests {
         assert!(scene.dispatch_message("", "::startroom::door->FSM_Randomize();"));
         assert_eq!(scene.fsms[0].state, "open");
         assert!(scene.dynamic_meshes[0].hidden, "the open state script ran");
+    }
+
+    #[test]
+    fn gm_change_fog_sets_the_fog_and_fades_to_it() {
+        // Startup intro: `maxpayne_gamemode->gm_changefog(0x141414, -200, 400, 0);`.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        assert!(scene.dispatch_message(
+            "",
+            "maxpayne_gamemode->gm_changefog(0x141414, -200, 400, 0);"
+        ));
+        let near = LevelFog {
+            color: [20.0, 20.0, 20.0],
+            start: -200.0,
+            end: 400.0,
+        };
+        assert_eq!(scene.fog, Some(near));
+        // Part2_Level3: `gm_changefog(0x441616, 0, 80, 0)`; a 2 s fade is half way after 1 s.
+        assert!(scene.dispatch_message("", "MaxPayne_GameMode->GM_ChangeFog(0x441616, 0, 80, 2);"));
+        scene.step_fog(1.0);
+        assert_eq!(
+            scene.fog,
+            Some(LevelFog {
+                color: [44.0, 21.0, 21.0],
+                start: -100.0,
+                end: 240.0
+            })
+        );
+        scene.step_fog(1.5);
+        assert_eq!(
+            scene.fog,
+            Some(LevelFog {
+                color: [68.0, 22.0, 22.0],
+                start: 0.0,
+                end: 80.0
+            })
+        );
     }
 
     #[test]

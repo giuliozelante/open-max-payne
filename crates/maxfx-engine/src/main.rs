@@ -705,6 +705,7 @@ fn play_level(
     if let Some(ambient) = entry.as_ref().and_then(|entry| entry.ambient) {
         scene.ambient = ambient;
     }
+    scene.fog = entry.as_ref().and_then(|entry| entry.fog);
     let player_start = entry.as_ref().and_then(|entry| entry.player_start.clone());
     let player_skin = entry.as_ref().and_then(|entry| entry.player_skin.clone());
     let world_sphere = entry.as_ref().and_then(|entry| entry.world_sphere.clone());
