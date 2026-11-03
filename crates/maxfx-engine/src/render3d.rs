@@ -1132,14 +1132,79 @@ fn chase_camera(scene: &LdbScene, player: [f32; 3], cam_fwd: [f32; 3]) -> [f32; 
     ];
     let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
     let Some(t) = segment_hit(scene, player, d) else {
-        return want;
+        return keep_clear(scene, want);
     };
     let k = (t * len - CAMERA_CLEARANCE).max(0.0) / len;
-    [
-        player[0] + d[0] * k,
-        player[1] + d[1] * k,
-        player[2] + d[2] * k,
-    ]
+    keep_clear(
+        scene,
+        [
+            player[0] + d[0] * k,
+            player[1] + d[1] * k,
+            player[2] + d[2] * k,
+        ],
+    )
+}
+
+/// Push the eye out to `CAMERA_CLEARANCE` from every camera-blocking polygon it sits over: the
+/// retail camera is a sphere (`SphereRadius`), so walls alongside the follow ray hold it off too.
+fn keep_clear(scene: &LdbScene, mut eye: [f32; 3]) -> [f32; 3] {
+    for sm in &scene.static_meshes {
+        let o = sm.world_origin;
+        for poly in sm
+            .polys
+            .iter()
+            .filter(|p| p.vertices.len() >= 3 && blocks_camera(scene, p.material_id))
+        {
+            let n = poly.normal;
+            let world = poly_world(&poly.vertices, o);
+            let dist = dot3(n, sub3(eye, world[0]));
+            if dist.abs() >= CAMERA_CLEARANCE {
+                continue;
+            }
+            let foot = [0, 1, 2].map(|k| eye[k] - n[k] * dist);
+            if !inside_convex(&world, n, foot) {
+                continue;
+            }
+            let push = CAMERA_CLEARANCE.copysign(dist) - dist;
+            eye = [0, 1, 2].map(|k| eye[k] + n[k] * push);
+        }
+    }
+    eye
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn poly_world(vertices: &[SceneVertex], o: [f32; 3]) -> Vec<[f32; 3]> {
+    vertices
+        .iter()
+        .map(|v| [v.pos[0] + o[0], v.pos[1] + o[1], v.pos[2] + o[2]])
+        .collect()
+}
+
+/// `p` (on the polygon's plane) is on the same side of every edge of the convex polygon.
+fn inside_convex(world: &[[f32; 3]], n: [f32; 3], p: [f32; 3]) -> bool {
+    let cross = |a: [f32; 3], b: [f32; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let (mut pos, mut neg) = (false, false);
+    for i in 0..world.len() {
+        let a = world[i];
+        let b = world[(i + 1) % world.len()];
+        let side = dot3(cross(sub3(b, a), sub3(p, a)), n);
+        pos |= side > 1e-6;
+        neg |= side < -1e-6;
+    }
+    !(pos && neg)
 }
 
 /// Drawn solid surfaces and `CameraCollision`; not the sky, decals or script helpers.
@@ -1154,15 +1219,6 @@ fn blocks_camera(scene: &LdbScene, material_id: i32) -> bool {
 
 /// Smallest `t` in `0..=1` where `from + t * d` crosses a static polygon.
 fn segment_hit(scene: &LdbScene, from: [f32; 3], d: [f32; 3]) -> Option<f32> {
-    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-    let cross = |a: [f32; 3], b: [f32; 3]| {
-        [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]
-    };
     let mut best: Option<f32> = None;
     for sm in &scene.static_meshes {
         let o = sm.world_origin;
@@ -1172,32 +1228,17 @@ fn segment_hit(scene: &LdbScene, from: [f32; 3], d: [f32; 3]) -> Option<f32> {
             .filter(|p| p.vertices.len() >= 3 && blocks_camera(scene, p.material_id))
         {
             let n = poly.normal;
-            let denom = dot(n, d);
+            let denom = dot3(n, d);
             if denom.abs() < 1e-6 {
                 continue;
             }
-            let world: Vec<[f32; 3]> = poly
-                .vertices
-                .iter()
-                .map(|v| [v.pos[0] + o[0], v.pos[1] + o[1], v.pos[2] + o[2]])
-                .collect();
-            let t = dot(n, sub(world[0], from)) / denom;
+            let world = poly_world(&poly.vertices, o);
+            let t = dot3(n, sub3(world[0], from)) / denom;
             if !(0.0..=1.0).contains(&t) || best.is_some_and(|b| t >= b) {
                 continue;
             }
             let hit = [from[0] + d[0] * t, from[1] + d[1] * t, from[2] + d[2] * t];
-            // Inside a convex polygon: the hit is on the same side of every edge.
-            let sides = (0..world.len()).map(|i| {
-                let a = world[i];
-                let b = world[(i + 1) % world.len()];
-                dot(cross(sub(b, a), sub(hit, a)), n)
-            });
-            let (mut pos, mut neg) = (false, false);
-            for side in sides {
-                pos |= side > 1e-6;
-                neg |= side < -1e-6;
-            }
-            if !(pos && neg) {
+            if inside_convex(&world, n, hit) {
                 best = Some(t);
             }
         }
@@ -3349,6 +3390,32 @@ mod tests {
             chase_camera(&scene, player, fwd),
             chase_eye(player, fwd, CHASE_BACK)
         );
+    }
+
+    #[test]
+    fn chase_camera_keeps_its_clearance_from_a_wall_beside_it() {
+        // A wall alongside the follow ray is never hit by it; the eye ended up 0.1 m off the
+        // wall and the near plane showed the level behind it.
+        let mut scene = empty_scene();
+        let v = |y: f32, z: f32| SceneVertex {
+            pos: [0.1, y, z],
+            uv: [0.0; 2],
+            luv: [0.0; 2],
+        };
+        scene.static_meshes.push(crate::scene::SceneStaticMesh {
+            mesh_id: 0,
+            room_id: None,
+            world_origin: [0.0; 3],
+            polys: vec![ScenePoly {
+                vertices: vec![v(-5.0, -5.0), v(5.0, -5.0), v(5.0, 5.0), v(-5.0, 5.0)],
+                normal: [-1.0, 0.0, 0.0],
+                material_id: 0,
+                lightmap_id: -1,
+            }],
+        });
+        let eye = chase_camera(&scene, [0.0, 1.6, 0.0], [0.0, 0.0, 1.0]);
+        assert!((eye[0] - (0.1 - CAMERA_CLEARANCE)).abs() < 1e-4, "{eye:?}");
+        assert!((eye[2] + CHASE_BACK).abs() < 1e-4, "{eye:?}");
     }
 
     #[test]
