@@ -761,6 +761,19 @@ impl<'a> Message<'a> {
     }
 }
 
+/// Script boolean argument. Retail scripts mix `TRUE` and `true` (the startup intro sends both
+/// `frame.DO->DO_Hide(true)` and `cam_fade_1.DO->DO_Hide(TRUE)` from one track end).
+fn script_bool(arg: Option<&str>) -> Option<bool> {
+    let arg = arg?.trim();
+    if arg == "1" || arg.eq_ignore_ascii_case("true") {
+        Some(true)
+    } else if arg == "0" || arg.eq_ignore_ascii_case("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 impl LdbScene {
     /// Masked materials take their category's `AlphaReference` from `materials.txt`.
     pub fn apply_material_surfaces(&mut self, surfaces: &BTreeMap<String, MaterialSurface>) {
@@ -856,10 +869,8 @@ impl LdbScene {
                     })
             }
             "t_enable" => {
-                let enabled = match msg.args.first().copied().unwrap_or("") {
-                    "false" | "0" => false,
-                    "true" | "1" => true,
-                    _ => return false,
+                let Some(enabled) = script_bool(msg.args.first().copied()) else {
+                    return false;
                 };
                 self.resolve_trigger_mut(context_name, msg.receiver)
                     .is_some_and(|trigger| {
@@ -989,11 +1000,10 @@ impl LdbScene {
                 true
             }
             "gm_setplayercontrols" => {
-                self.player_controls = match msg.args.first().copied().unwrap_or("").trim() {
-                    "true" | "1" => true,
-                    "false" | "0" => false,
-                    _ => return false,
+                let Some(controls) = script_bool(msg.args.first().copied()) else {
+                    return false;
                 };
+                self.player_controls = controls;
                 true
             }
             "cam_attachtodo" => {
@@ -1010,10 +1020,8 @@ impl LdbScene {
                 true
             }
             "do_hide" => {
-                let hidden = match msg.args.first().copied().unwrap_or("") {
-                    "true" | "1" => true,
-                    "false" | "0" => false,
-                    _ => return false,
+                let Some(hidden) = script_bool(msg.args.first().copied()) else {
+                    return false;
                 };
                 self.resolve_mesh_mut(context_name, msg.receiver)
                     .is_some_and(|mesh| {
@@ -1022,10 +1030,8 @@ impl LdbScene {
                     })
             }
             "do_enablecollisions" => {
-                let collisions = match msg.args.first().copied().unwrap_or("") {
-                    "true" | "1" => true,
-                    "false" | "0" => false,
-                    _ => return false,
+                let Some(collisions) = script_bool(msg.args.first().copied()) else {
+                    return false;
                 };
                 self.resolve_mesh_mut(context_name, msg.receiver)
                     .is_some_and(|mesh| {
@@ -4058,6 +4064,27 @@ mod tests {
             .find(|m| m.name.eq_ignore_ascii_case("::Bathroom::glass01.DO"))
             .expect("glass mesh must exist");
         assert!(mesh.hidden, "do_hide(true) must set mesh.hidden == true");
+    }
+
+    #[test]
+    fn script_booleans_ignore_case() {
+        // The startup intro's frame track ends with `cam_fade_1.DO->DO_Hide(TRUE);` (upper case,
+        // next to `frame.DO->DO_Hide(true);`): the black wipe plate must hide too.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let mut mesh = door_mesh(Vec::new());
+        mesh.name = "::start::cam_fade_1.DO".into();
+        mesh.hidden = false;
+        scene.dynamic_meshes.push(mesh);
+        assert!(scene.dispatch_message(
+            "::start::frame.DO",
+            "::start::cam_fade_1.DO->DO_Hide(TRUE);"
+        ));
+        assert!(scene.dynamic_meshes[0].hidden);
+        assert!(scene.dispatch_message(
+            "::start::frame.DO",
+            "::start::cam_fade_1.DO->DO_HIDE(FALSE);"
+        ));
+        assert!(!scene.dynamic_meshes[0].hidden);
     }
 
     #[test]
