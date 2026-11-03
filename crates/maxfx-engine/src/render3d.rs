@@ -281,6 +281,7 @@ pub fn run_3d_walkthrough(
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default();
     let mut particle_lights = ParticleLights::default();
+    let mut particle_sprites = ParticleSprites::default();
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
@@ -587,8 +588,16 @@ pub fn run_3d_walkthrough(
             &room_origins,
             listener,
         );
-        start_queued_effects(&mut scene, &game_root, &particles_txt, &mut particle_lights);
+        start_queued_effects(
+            &mut scene,
+            &game_root,
+            &particles_txt,
+            &mut particle_lights,
+            &mut particle_sprites,
+        );
         particle_lights.step(base_dt);
+        particle_sprites.step(&scene, &room_origins, base_dt);
+        let sprites = particle_sprites.sprites();
         let frame_lights: Vec<ScenePointLight> = world_lights
             .iter()
             .cloned()
@@ -825,6 +834,14 @@ pub fn run_3d_walkthrough(
 
         if gpu.is_none() && !wireframe {
             apply_fog(&mut fb, &zb, scene.fog);
+            draw_sprites(
+                &mut fb,
+                &mut zb,
+                (cam_pos, cam_right, cam_up, cam_fwd),
+                fov_scale,
+                &sprites,
+                |key| particle_sprites.texture(key),
+            );
         }
 
         // Hardware: everything drawn so far (sky, wireframe geometry) is the background; the HUD
@@ -860,6 +877,9 @@ pub fn run_3d_walkthrough(
             fb[(cy_scr as i32 + d) as usize * W + cx] = cross_col;
         }
 
+        if let (Some((renderer, _)), Some(view)) = (gpu.as_mut(), scene_view) {
+            renderer.set_sprites(&sprites, view, |key| particle_sprites.texture(key));
+        }
         match gpu.as_mut() {
             Some((renderer, surface)) => renderer.present(
                 surface,
@@ -1690,9 +1710,11 @@ fn start_queued_effects(
     game_dir: &Path,
     particles_txt: &str,
     lights: &mut ParticleLights,
+    sprites: &mut ParticleSprites,
 ) {
     for emitter in std::mem::take(&mut scene.effect_stops) {
         lights.stop(&emitter);
+        sprites.field.stop(&emitter);
     }
     for effect in std::mem::take(&mut scene.effect_queue) {
         let Some((win_path, looping)) = crate::particle_effect_file(particles_txt, &effect.effect)
@@ -1708,8 +1730,92 @@ fn start_queued_effects(
                     .unwrap_or_default()
             })
             .clone();
+        sprites.start(effect.emitter.clone(), game_dir, &win_path, looping);
         lights.start(effect.emitter, rps, looping);
     }
+}
+
+/// Particles of running effects (`particles::ParticleField`) and their decoded bitmaps.
+#[derive(Default)]
+struct ParticleSprites {
+    field: crate::particles::ParticleField,
+    /// Parsed `.rps` per archive path (lower case); `None` when it does not parse.
+    effects: BTreeMap<String, Option<std::sync::Arc<openpfx::effect::RpsEffect>>>,
+    textures: BTreeMap<crate::particles::SpriteTexture, Option<DecodedTexture>>,
+}
+
+impl ParticleSprites {
+    fn start(&mut self, emitter: String, game_dir: &Path, win_path: &str, looping: bool) {
+        let key = win_path.to_ascii_lowercase();
+        let effect = self
+            .effects
+            .entry(key.clone())
+            .or_insert_with(|| {
+                crate::read_game_bytes(game_dir, win_path)
+                    .and_then(|bytes| openpfx::effect::rps_effect(&bytes))
+                    .map(std::sync::Arc::new)
+            })
+            .clone();
+        if let Some(effect) = effect {
+            self.field.start(emitter, key, effect, looping);
+        }
+    }
+
+    fn step(&mut self, scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, dt: f32) {
+        self.field
+            .step(dt, |emitter| emitter_frame(scene, rooms, emitter));
+    }
+
+    /// Live sprites, with their bitmaps decoded on first use.
+    fn sprites(&mut self) -> Vec<crate::particles::Sprite> {
+        let sprites = self.field.sprites();
+        for sprite in &sprites {
+            let key = &sprite.texture;
+            if self.textures.contains_key(key) {
+                continue;
+            }
+            let texture = self
+                .effects
+                .get(&key.effect)
+                .and_then(Option::as_ref)
+                .and_then(|effect| effect.emitters.get(key.emitter))
+                .and_then(|e| e.particle.sequences.get(key.sequence))
+                .and_then(|frames| frames.get(key.frame))
+                .and_then(crate::particles::frame_texture);
+            self.textures.insert(key.clone(), texture);
+        }
+        sprites
+    }
+
+    fn texture(&self, key: &crate::particles::SpriteTexture) -> Option<&DecodedTexture> {
+        self.textures.get(key)?.as_ref()
+    }
+}
+
+/// World position and rotation (columns) of a particle emitter: a dynamic mesh's frame, or the
+/// position of a trigger, FSM or character with no rotation.
+fn emitter_frame(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    emitter: &str,
+) -> Option<([f32; 3], [f32; 9])> {
+    if let Some(idx) = scene
+        .dynamic_meshes
+        .iter()
+        .position(|mesh| mesh.name.eq_ignore_ascii_case(emitter))
+    {
+        let (mat, pos) = dynamic_world(scene, idx, rooms);
+        return Some((pos, mat));
+    }
+    let pos = scene.emitter_world_pos(emitter)?;
+    let origin = rooms
+        .get(&emitter_room(scene, emitter))
+        .copied()
+        .unwrap_or([0.0; 3]);
+    Some((
+        [0, 1, 2].map(|k| pos[k] + origin[k]),
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+    ))
 }
 
 /// Point lights of running particle effects (ParticleFX emitter "Use Light").
@@ -2042,6 +2148,65 @@ fn sample_lightmap(lm: &DecodedLightmap, u: f32, v: f32) -> u32 {
         ((top + (bottom - top) * fy).round() as u32) << shift
     };
     channel(16) | channel(8) | channel(0)
+}
+
+/// Particle sprites as camera-facing squares: depth-tested against the frame without writing
+/// depth, the bitmap times the sprite colour, blended by alpha or added (`Sprite::additive`).
+pub(crate) fn draw_sprites<'a>(
+    fb: &mut [u32],
+    zb: &mut [f32],
+    (cam, right, up, fwd): View,
+    fov_scale: f32,
+    sprites: &[crate::particles::Sprite],
+    texture: impl Fn(&crate::particles::SpriteTexture) -> Option<&'a DecodedTexture>,
+) {
+    for sprite in sprites {
+        let d = sub3(sprite.pos, cam);
+        let cz = dot3(d, fwd);
+        if cz < NEAR_Z {
+            continue;
+        }
+        let Some(tex) = texture(&sprite.texture) else {
+            continue;
+        };
+        let sx = W as f32 * 0.5 + dot3(d, right) * fov_scale / cz;
+        let sy = H as f32 * 0.5 - dot3(d, up) * fov_scale / cz;
+        let half = sprite.size * 0.5 * fov_scale / cz;
+        if half < 0.25 {
+            continue;
+        }
+        let x0 = (sx - half).floor().max(0.0) as usize;
+        let x1 = ((sx + half).ceil().max(0.0) as usize).min(W);
+        let y0 = (sy - half).floor().max(0.0) as usize;
+        let y1 = ((sy + half).ceil().max(0.0) as usize).min(H);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let idx = y * W + x;
+                if cz >= zb[idx] {
+                    continue;
+                }
+                let u = (x as f32 + 0.5 - (sx - half)) / (2.0 * half);
+                let v = (y as f32 + 0.5 - (sy - half)) / (2.0 * half);
+                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                    continue;
+                }
+                let texel = sample_texture(tex, u, v);
+                let a = ((texel >> 24) as f32 / 255.0) * sprite.rgba[3];
+                let dst = fb[idx];
+                let channel = |shift: u32, k: usize| {
+                    let src = ((texel >> shift) & 0xff) as f32 * sprite.rgba[k];
+                    let back = ((dst >> shift) & 0xff) as f32;
+                    let out = if sprite.additive {
+                        back + src * a
+                    } else {
+                        src * a + back * (1.0 - a)
+                    };
+                    (out.round().clamp(0.0, 255.0) as u32) << shift
+                };
+                fb[idx] = channel(16, 0) | channel(8, 1) | channel(0, 2);
+            }
+        }
+    }
 }
 
 /// Bilinear diffuse texel at `(u, v)` with repeat addressing, all four channels (alpha is
@@ -3178,6 +3343,43 @@ mod tests {
     }
 
     #[test]
+    fn retail_snowstorm_fills_its_box_with_snowflakes() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        let Some(particles) =
+            crate::read_game_bytes(&game, r"\data\database\particles\particles.txt")
+        else {
+            return;
+        };
+        let particles = String::from_utf8_lossy(&particles).into_owned();
+        // Startup intro: `::startroom::cam_mover::camera1::snow->PS_StartEffect(snowstorm_60m_loop)`.
+        let mut scene = siren_scene();
+        assert!(scene.dispatch_message(
+            "::startroom",
+            "::startroom::car.DO->PS_StartEffect(snowstorm_60m_loop, \"\");"
+        ));
+        let mut lights = ParticleLights::default();
+        let mut sprites = ParticleSprites::default();
+        start_queued_effects(&mut scene, &game, &particles, &mut lights, &mut sprites);
+        let rooms = BTreeMap::new();
+        for _ in 0..20 {
+            sprites.step(&scene, &rooms, 0.05);
+        }
+        let live = sprites.sprites();
+        // 553..1284 flakes per second living 0.2..1.06 s, capped at 500, plus the faint haze.
+        assert!(live.len() > 200, "{} sprites", live.len());
+        let flake = live
+            .iter()
+            .find(|s| s.texture.emitter == 0)
+            .expect("a snowflake");
+        assert!(!flake.additive);
+        let bitmap = sprites.texture(&flake.texture).expect("decoded snowflake");
+        assert_eq!((bitmap.width, bitmap.height), (16, 16));
+    }
+
+    #[test]
     fn retail_police_car_light_flashes_red_and_blue() {
         let Some(home) = std::env::var_os("HOME") else {
             return;
@@ -3195,7 +3397,8 @@ mod tests {
             "::startroom::car.DO->ps_starteffect(light_policecar, \"\");"
         ));
         let mut lights = ParticleLights::default();
-        start_queued_effects(&mut scene, &game, &particles, &mut lights);
+        let mut sprites = ParticleSprites::default();
+        start_queued_effects(&mut scene, &game, &particles, &mut lights, &mut sprites);
         let rooms = BTreeMap::new();
         let (mut red, mut blue) = (false, false);
         for _ in 0..100 {
@@ -3572,6 +3775,49 @@ mod tests {
         assert_eq!(fov_scale(1.0), H as f32 * 0.85);
         let half = |scale: f32| (W as f32 * 0.5 / scale).atan();
         assert!((half(fov_scale(1.1)) - 1.1 * half(fov_scale(1.0))).abs() < 1e-5);
+    }
+
+    #[test]
+    fn sprites_blend_over_the_frame_and_hide_behind_closer_surfaces() {
+        use crate::particles::{Sprite, SpriteTexture};
+        let white = crate::scene::DecodedTexture {
+            path: String::new(),
+            flag: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![0xffff_ffff],
+        };
+        let key = SpriteTexture {
+            effect: "k".into(),
+            emitter: 0,
+            sequence: 0,
+            frame: 0,
+        };
+        let sprite = |rgba: [f32; 4], additive: bool| Sprite {
+            pos: [0.0, 0.0, 5.0],
+            size: 2.0,
+            rgba,
+            additive,
+            texture: key.clone(),
+        };
+        let view = test_view([0.0; 3], [0.0, 0.0, 1.0]);
+        let centre = (H / 2) * W + W / 2;
+        let draw = |fb: &mut Vec<u32>, zb: &mut Vec<f32>, sprite: Sprite| {
+            draw_sprites(fb, zb, view, H as f32 * 0.85, &[sprite], |_| Some(&white));
+        };
+        // Alpha blend: half of white over black.
+        let (mut fb, mut zb) = (vec![0u32; W * H], vec![f32::INFINITY; W * H]);
+        draw(&mut fb, &mut zb, sprite([1.0, 1.0, 1.0, 0.5], false));
+        assert_eq!(fb[centre], 0x0080_8080);
+        assert_eq!(zb[centre], f32::INFINITY, "sprites do not write depth");
+        // Additive: half of red added to grey.
+        let mut fb = vec![0x0040_4040u32; W * H];
+        draw(&mut fb, &mut zb, sprite([1.0, 0.0, 0.0, 0.5], true));
+        assert_eq!(fb[centre], 0x00c0_4040);
+        // A surface 3 m away hides a sprite 5 m away.
+        let (mut fb, mut zb) = (vec![0u32; W * H], vec![3.0f32; W * H]);
+        draw(&mut fb, &mut zb, sprite([1.0, 1.0, 1.0, 1.0], false));
+        assert_eq!(fb[centre], 0);
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! `texture × lightmap / 255` (`D3DTOP_MODULATE`), otherwise a normal-based shade.
 
 use crate::kf2::KfsMesh;
+use crate::particles::{Sprite, SpriteTexture};
 use crate::render3d::{
     back_plane, dynamic_mesh_drawn, dynamic_world, poly_policy, DETAIL_OFFSET_M, FRAME_H, FRAME_W,
     NEAR_Z,
@@ -77,6 +78,14 @@ pub struct GpuRenderer {
     sky_pipe: wgpu::RenderPipeline,
     /// World sphere image group and whether a sphere is set (else the flat background).
     sky: (wgpu::BindGroup, bool),
+    /// Particle sprites: alpha-blended and additive pipelines.
+    sprite_alpha: wgpu::RenderPipeline,
+    sprite_add: wgpu::RenderPipeline,
+    /// Uploaded particle bitmaps.
+    sprite_textures: BTreeMap<SpriteTexture, wgpu::BindGroup>,
+    sprite_vertices: Option<wgpu::Buffer>,
+    /// `(additive, texture, first vertex, vertex count)` for this frame.
+    sprite_draws: Vec<(bool, SpriteTexture, u32, u32)>,
 }
 
 /// The window's swapchain plus the offscreen colour and depth targets at window size.
@@ -272,6 +281,45 @@ fn fs_sky(v: V) -> @location(0) vec4f {
     return textureSampleLevel(img, img_sampler, vec2f(u, t), 0.0);
 }
 "#;
+
+/// Particle sprites (`render3d::draw_sprites`): the bitmap times the vertex colour, depth-tested
+/// with the same linear `frag_depth` as the scene shader, never writing depth.
+const SPRITE_SHADER: &str = r#"
+struct Camera { pos: vec4f, right: vec4f, up: vec4f, fwd: vec4f, params: vec4f, params2: vec4f, fog: vec4f, fog_range: vec4f };
+@group(0) @binding(0) var<uniform> cam: Camera;
+@group(1) @binding(0) var img: texture_2d<f32>;
+@group(1) @binding(1) var img_sampler: sampler;
+struct SpriteIn { @location(0) pos: vec3f, @location(1) uv: vec2f, @location(2) color: vec4f };
+struct SpriteOut { @builtin(position) clip: vec4f, @location(0) uv: vec2f, @location(1) color: vec4f, @location(2) vz: f32 };
+@vertex
+fn vs_sprite(v: SpriteIn) -> SpriteOut {
+    var o: SpriteOut;
+    let d = v.pos - cam.pos.xyz;
+    let cz = dot(d, cam.fwd.xyz);
+    o.clip = vec4f(dot(d, cam.right.xyz) * cam.params.x, dot(d, cam.up.xyz) * cam.params.y, cz - cam.params2.x, cz);
+    o.uv = v.uv;
+    o.color = v.color;
+    o.vz = cz;
+    return o;
+}
+struct SpriteFrag { @location(0) color: vec4f, @builtin(frag_depth) depth: f32 };
+@fragment
+fn fs_sprite(i: SpriteOut) -> SpriteFrag {
+    let t = textureSample(img, img_sampler, i.uv);
+    var f: SpriteFrag;
+    f.color = vec4f(t.rgb * i.color.rgb, t.a * i.color.a);
+    f.depth = clamp(i.vz / cam.params.w, 0.0, 1.0);
+    return f;
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SpriteVertex {
+    pos: [f32; 3],
+    uv: [f32; 2],
+    color: [f32; 4],
+}
 
 /// Fullscreen triangle vertex stage, shared by the image and sky shaders.
 const FULLSCREEN_VS: &str = r#"
@@ -1049,6 +1097,65 @@ impl GpuRenderer {
             true,
         );
         let sky_group = image_group(&device, &image_layout, &binder.blank, &binder.image_sampler);
+        let sprite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sprite"),
+            source: wgpu::ShaderSource::Wgsl(SPRITE_SHADER.into()),
+        });
+        let sprite_attributes =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x4];
+        let sprite_buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<SpriteVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &sprite_attributes,
+        })];
+        let sprite_pipeline = |blend: wgpu::BlendState| {
+            let targets = [Some(wgpu::ColorTargetState {
+                format: COLOR_FORMAT,
+                blend: Some(blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            })];
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("sprite"),
+                layout: Some(&sky_layout),
+                vertex: wgpu::VertexState {
+                    module: &sprite_shader,
+                    entry_point: Some("vs_sprite"),
+                    compilation_options: Default::default(),
+                    buffers: &sprite_buffers,
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &sprite_shader,
+                    entry_point: Some("fs_sprite"),
+                    compilation_options: Default::default(),
+                    targets: &targets,
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let sprite_alpha = sprite_pipeline(wgpu::BlendState::ALPHA_BLENDING);
+        let sprite_add = sprite_pipeline(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            // Accumulated so `render` sees where additive sprites drew.
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        });
         Self {
             device,
             queue,
@@ -1075,7 +1182,83 @@ impl GpuRenderer {
             overlay_image,
             sky_pipe,
             sky: (sky_group, false),
+            sprite_alpha,
+            sprite_add,
+            sprite_textures: BTreeMap::new(),
+            sprite_vertices: None,
+            sprite_draws: Vec::new(),
         }
+    }
+
+    /// Particle sprites for the next frames: camera-facing squares for `view`, bitmaps from
+    /// `texture` (uploaded once per key). Sprites without a bitmap are skipped.
+    pub fn set_sprites<'a>(
+        &mut self,
+        sprites: &[Sprite],
+        (_, right, up, _): GpuView,
+        texture: impl Fn(&SpriteTexture) -> Option<&'a crate::scene::DecodedTexture>,
+    ) {
+        let mut order: Vec<&Sprite> = sprites.iter().collect();
+        order.sort_by(|a, b| (a.additive, &a.texture).cmp(&(b.additive, &b.texture)));
+        let mut verts: Vec<SpriteVertex> = Vec::with_capacity(order.len() * 6);
+        self.sprite_draws.clear();
+        for sprite in order {
+            if !self.sprite_textures.contains_key(&sprite.texture) {
+                let Some(t) = texture(&sprite.texture).filter(|t| t.width > 0 && t.height > 0)
+                else {
+                    continue;
+                };
+                let view = upload(
+                    &self.device,
+                    &self.queue,
+                    t.width,
+                    t.height,
+                    &t.pixels,
+                    true,
+                );
+                let group = image_group(
+                    &self.device,
+                    &self.image_layout,
+                    &view,
+                    &self.binder.tex_sampler,
+                );
+                self.sprite_textures.insert(sprite.texture.clone(), group);
+            }
+            let h = sprite.size * 0.5;
+            let corner = |a: f32, b: f32, uv: [f32; 2]| SpriteVertex {
+                pos: [0, 1, 2].map(|k| sprite.pos[k] + (right[k] * a + up[k] * b) * h),
+                uv,
+                color: sprite.rgba,
+            };
+            let (tl, tr) = (corner(-1.0, 1.0, [0.0, 0.0]), corner(1.0, 1.0, [1.0, 0.0]));
+            let (bl, br) = (
+                corner(-1.0, -1.0, [0.0, 1.0]),
+                corner(1.0, -1.0, [1.0, 1.0]),
+            );
+            let start = verts.len() as u32;
+            verts.extend([tl, tr, br, tl, br, bl]);
+            match self.sprite_draws.last_mut() {
+                Some((additive, key, _, count))
+                    if *additive == sprite.additive && *key == sprite.texture =>
+                {
+                    *count += 6;
+                }
+                _ => self
+                    .sprite_draws
+                    .push((sprite.additive, sprite.texture.clone(), start, 6)),
+            }
+        }
+        self.sprite_vertices = (!verts.is_empty()).then(|| {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("sprites"),
+                size: std::mem::size_of_val(verts.as_slice()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue
+                .write_buffer(&buffer, 0, bytemuck::cast_slice(&verts));
+            buffer
+        });
     }
 
     /// Draw the static batches and write covered pixels into `fb` and their view depth into `zb`.
@@ -1163,11 +1346,15 @@ impl GpuRenderer {
             let depths: &[f32] = bytemuck::cast_slice(&depths);
             let far = back_plane(scene.fog);
             for (i, (rgba, &d)) in colors.as_chunks::<4>().0.iter().zip(depths).enumerate() {
-                if d >= 1.0 {
+                // Drawn pixels: geometry wrote depth; sprites write no depth but leave alpha
+                // over the transparent clear.
+                if d >= 1.0 && rgba[3] == 0 {
                     continue;
                 }
                 fb[i] = (u32::from(rgba[0]) << 16) | (u32::from(rgba[1]) << 8) | u32::from(rgba[2]);
-                zb[i] = d * far;
+                if d < 1.0 {
+                    zb[i] = d * far;
+                }
             }
         }
         self.color_out.unmap();
@@ -1304,6 +1491,18 @@ impl GpuRenderer {
                     }
                     pass.draw(d.start..d.start + d.count, 0..1);
                 }
+            }
+        }
+        if let Some(buffer) = &self.sprite_vertices {
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            for (additive, key, start, count) in &self.sprite_draws {
+                pass.set_pipeline(if *additive {
+                    &self.sprite_add
+                } else {
+                    &self.sprite_alpha
+                });
+                pass.set_bind_group(1, &self.sprite_textures[key], &[]);
+                pass.draw(*start..*start + *count, 0..1);
             }
         }
     }
@@ -2321,6 +2520,65 @@ mod tests {
         let mut zb = vec![f32::INFINITY; w * h];
         gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
         assert!(covered(&zb) > 1000, "gpu, free camera");
+    }
+
+    #[test]
+    fn gpu_sprites_match_the_software_sprites() {
+        use crate::particles::{Sprite, SpriteTexture};
+        let scene = crate::render3d::test_empty_scene();
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: gpu_sprites_match_the_software_sprites skipped");
+            return;
+        };
+        let white = crate::scene::DecodedTexture {
+            path: String::new(),
+            flag: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![0xffff_ffff],
+        };
+        let view = crate::render3d::test_view([0.0; 3], [0.0, 0.0, 1.0]);
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let centre = (h / 2) * w + w / 2;
+        for (rgba, additive) in [([1.0, 1.0, 1.0, 0.5], false), ([1.0, 0.25, 0.0, 0.5], true)] {
+            let sprite = Sprite {
+                pos: [0.0, 0.0, 5.0],
+                size: 2.0,
+                rgba,
+                additive,
+                texture: SpriteTexture {
+                    effect: "k".into(),
+                    emitter: 0,
+                    sequence: 0,
+                    frame: 0,
+                },
+            };
+            let mut sw = vec![0u32; w * h];
+            let mut sw_zb = vec![f32::INFINITY; w * h];
+            crate::render3d::draw_sprites(
+                &mut sw,
+                &mut sw_zb,
+                view,
+                h as f32 * 0.85,
+                std::slice::from_ref(&sprite),
+                |_| Some(&white),
+            );
+            gpu.set_sprites(std::slice::from_ref(&sprite), view, |_| Some(&white));
+            let mut fb = vec![0u32; w * h];
+            let mut zb = vec![f32::INFINITY; w * h];
+            gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
+            assert!(sw[centre] != 0, "the software sprite must draw");
+            let gap = (0..3)
+                .map(|k| ((fb[centre] >> (8 * k)) & 0xff).abs_diff((sw[centre] >> (8 * k)) & 0xff))
+                .max()
+                .unwrap_or(0);
+            assert!(
+                gap <= 2,
+                "additive {additive}: {:06x} vs {:06x}",
+                fb[centre],
+                sw[centre]
+            );
+        }
     }
 
     #[test]
