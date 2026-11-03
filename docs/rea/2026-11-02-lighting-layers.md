@@ -152,7 +152,8 @@ Constructor defaults: diffuse and specular 255, emissive 0.
 (`0x10003280`) returns `this+0x54`, so the same offset as the `D3DRS_AMBIENT` read. STRONGLY SUPPORTED:
 that object is the `P_Scene`. The `P_Scene` constructor (`0x10018820`, `0x1001887b`…) sets ambient to
 `(0, 0, 0, 255)`. Neither `P_Scene::setAmbientColor` (`0x100031e0`, `0x10003220`) has a caller or address
-reference in e2mfc, and no module imports them. So `D3DRS_AMBIENT` stays **black**.
+reference in e2mfc, and no module imports them. So `D3DRS_AMBIENT` stays **black**. **Superseded 2026-11-03:** the exe writes the field
+directly; see "Level ambient" below.
 
 **Engine consequence.** D3D fixed-function per vertex, for an object material (colour source 0):
 
@@ -251,6 +252,29 @@ built at load time. The method is UNKNOWN.
 **Engine consequence (STRONGLY SUPPORTED):** a lit object pixel is `texture × clamp(Σ point/spot lights ·
 max(N·L,0) · atten)`, per vertex then Gouraud, with black ambient and zero emissive. Light selection: see above.
 Lightmapped level geometry gets no lights; see next section.
+
+## Level ambient: `levels.txt` `AmbientColor` (2026-11-03)
+
+**VERIFIED (static):** the `levels.txt` key table entry at `0x52555d` binds `"AmbientColor"` (`0x880000`)
+to storage `0x8acdd8`. `0x525e50`…`0x525e7c` copies the three floats into the level info at `+0x58`.
+
+**VERIFIED (static):** `0x680500` creates the `P_Scene` (`0x6805b8` stores it at `+0x5b4`) and copies its
+colour argument straight into `P_Scene+0x54` (`0x6805be`…`0x6805d8`). That is the field `getAmbientColor`
+returns and the driver packs into `D3DRS_AMBIENT`. The setter is bypassed, which is why no
+`setAmbientColor` call shows up. Two more direct writers (`0x67ac30`, `0x67b29a`, gated by byte `0x8b485d`)
+are not identified yet.
+
+**VERIFIED (dynamic, winedbg, plain launch into the menu's startup level, break `0x6805be`):** the copied
+colour is `(140.0, 135.0, 110.0, 255.0)` (`430c0000 43070000 42dc0000 437f0000`), hit twice. That is exactly
+`[startup_level] AmbientColor = ( 140, 135, 110 )`. The constructor chain `0x503ec0` → `0x503a90` →
+`0x677580` → `0x680500` only forwards arguments.
+
+**Engine consequence (STRONGLY SUPPORTED):** object materials have white ambient and colour source 0
+(above), so a character vertex is `clamp(AmbientColor/255 + Σ point-light diffuse)`. Level templates set
+black material ambient, so lightmapped geometry does not change. The official MaxED tutorial
+("Dynamic lighting") agrees: AmbientColor "is an RBG value defining the level of ambient character
+lighting", and point lights and spotlights do not affect static geometry; particle lights do.
+`render3d::character_vertex_light` takes `LdbScene::ambient`, filled from `levels.txt`.
 
 ## Lights per draw: level geometry is unlit by point lights (2026-11-02)
 

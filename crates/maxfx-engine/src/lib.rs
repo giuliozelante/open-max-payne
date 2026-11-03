@@ -1947,7 +1947,7 @@ pub fn split_ldb_records(data: &[u8]) -> Option<Vec<LdbRecord>> {
 }
 
 /// One level entry from `\data\database\levels\levels.txt` (SharedDB catalog).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LevelsTxtEntry {
     /// Block name, e.g. `part0_level1`.
     pub id: String,
@@ -1961,6 +1961,9 @@ pub struct LevelsTxtEntry {
     pub player_skin: Option<String>,
     /// `WorldSphere`, e.g. `sunset` for the house.
     pub world_sphere: Option<String>,
+    /// `AmbientColor` (0..255 RGB, `#define`s resolved). Retail copies it into the `P_Scene`
+    /// ambient (`0x6805be`), which becomes `D3DRS_AMBIENT` for lit objects.
+    pub ambient: Option<[f32; 3]>,
 }
 
 impl LevelsTxtEntry {
@@ -1989,6 +1992,13 @@ impl LevelsTxtEntry {
 /// `\data\database\levels\` + `Directory` + `\` + `Level`.
 pub fn parse_levels_txt(text: &str) -> Vec<LevelsTxtEntry> {
     let mut out = Vec::new();
+    let defines: Vec<(&str, &str)> = text
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.trim().strip_prefix("#define")?.split_whitespace();
+            Some((words.next()?, words.next()?))
+        })
+        .collect();
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -2035,9 +2045,26 @@ pub fn parse_levels_txt(text: &str) -> Vec<LevelsTxtEntry> {
             player_start: prop_value(body, "PlayerStartingPlace"),
             player_skin: prop_value(body, "PlayerSkinName"),
             world_sphere: prop_value(body, "WorldSphere"),
+            ambient: prop_value(body, "AmbientColor").and_then(|v| parse_color3(&v, &defines)),
         });
     }
     out
+}
+
+/// `( r, g, b )` with each channel a number or a `#define` name.
+fn parse_color3(value: &str, defines: &[(&str, &str)]) -> Option<[f32; 3]> {
+    let inner = value.trim().strip_prefix('(')?.strip_suffix(')')?;
+    let mut rgb = [0.0f32; 3];
+    let mut parts = inner.split(',');
+    for c in &mut rgb {
+        let word = parts.next()?.trim();
+        let word = defines
+            .iter()
+            .find(|(name, _)| *name == word)
+            .map_or(word, |(_, v)| v);
+        *c = word.parse().ok()?;
+    }
+    parts.next().is_none().then_some(rgb)
 }
 
 /// `worldspheres.txt` block `[sunset]` → `bg_sunset.kf2`.
@@ -3896,6 +3923,39 @@ mod tests {
             Some(r"\data\database\music\wavs\max_theme.wav")
         );
         assert_eq!(music_win_path(music, "nope"), None);
+    }
+
+    #[test]
+    fn parse_levels_txt_reads_ambient_color_through_defines() {
+        let txt = r#"
+#define 	AMBIENT_R		32
+#define 	AMBIENT_G		33
+#define 	AMBIENT_B		34
+[startup_level]
+{
+	[Properties]
+	Directory 		= front_end;
+	Level 			= startup_level.ldb;
+	AmbientColor 	= ( 140, 135, 110 );
+}
+[part1_level1]
+{
+	[Properties]
+	Directory 		= part1;
+	Level 			= part1_level1.ldb;
+	AmbientColor 	= ( AMBIENT_R , AMBIENT_G , AMBIENT_B );
+}
+[part1_level2]
+{
+	[Properties]
+	Directory 		= part1;
+	Level 			= part1_level2.ldb;
+}
+"#;
+        let entries = parse_levels_txt(txt);
+        assert_eq!(entries[0].ambient, Some([140.0, 135.0, 110.0]));
+        assert_eq!(entries[1].ambient, Some([32.0, 33.0, 34.0]));
+        assert_eq!(entries[2].ambient, None);
     }
 
     #[test]

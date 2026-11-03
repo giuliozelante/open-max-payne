@@ -600,6 +600,7 @@ pub fn run_3d_walkthrough(
                         en.world_pos,
                         en.hit_flash > 0.0,
                         &world_lights,
+                        scene.ambient,
                     );
                     characters.push(crate::gpu::GpuCharacter {
                         mesh: &erig.mesh,
@@ -622,8 +623,14 @@ pub fn run_3d_walkthrough(
                     player_moving,
                     false,
                 );
-                let light =
-                    character_vertex_light(&prig.mesh, &verts, player_feet, false, &world_lights);
+                let light = character_vertex_light(
+                    &prig.mesh,
+                    &verts,
+                    player_feet,
+                    false,
+                    &world_lights,
+                    scene.ambient,
+                );
                 characters.push(crate::gpu::GpuCharacter {
                     mesh: &prig.mesh,
                     verts,
@@ -690,6 +697,7 @@ pub fn run_3d_walkthrough(
                     en.health <= 0,
                     en.hit_flash > 0.0,
                     &world_lights,
+                    scene.ambient,
                     cam_pos,
                     cam_right,
                     cam_up,
@@ -718,6 +726,7 @@ pub fn run_3d_walkthrough(
                     false,
                     false,
                     &world_lights,
+                    scene.ambient,
                     cam_pos,
                     cam_right,
                     cam_up,
@@ -1545,6 +1554,7 @@ pub(crate) fn character_vertex_light(
     world_pos: [f32; 3],
     hit_flash: bool,
     lights: &[ScenePointLight],
+    ambient: [f32; 3],
 ) -> Vec<[f32; 3]> {
     if hit_flash {
         return vec![[1.35; 3]; world.len()];
@@ -1563,7 +1573,11 @@ pub(crate) fn character_vertex_light(
     world
         .iter()
         .zip(&normals)
-        .map(|(p, n)| vertex_diffuse(*p, *n, &picked))
+        .map(|(p, n)| {
+            // D3D fixed function: white material ambient × D3DRS_AMBIENT + Σ light diffuse, clamped.
+            let d = vertex_diffuse(*p, *n, &picked);
+            std::array::from_fn(|c| (d[c] + ambient[c] / 255.0).min(1.0))
+        })
         .collect()
 }
 
@@ -1577,6 +1591,7 @@ fn render_kfs_character(
     dead: bool,
     hit_flash: bool,
     lights: &[ScenePointLight],
+    ambient: [f32; 3],
     cam_pos: [f32; 3],
     cam_right: [f32; 3],
     cam_up: [f32; 3],
@@ -1603,7 +1618,7 @@ fn render_kfs_character(
         cam_pts.push([cx, cy_c, cz]);
     }
 
-    let vertex_light = character_vertex_light(mesh, &world, world_pos, hit_flash, lights);
+    let vertex_light = character_vertex_light(mesh, &world, world_pos, hit_flash, lights, ambient);
     let mut tris = Vec::new();
     for face in &mesh.faces {
         let [i0, i1, i2] = face.indices;
@@ -1683,6 +1698,7 @@ fn render_kfs_character(
                     lmap: None,
                     write_z: true,
                     depth_bias: 0.0,
+                    blended: false,
                 });
             }
         }
@@ -1897,6 +1913,7 @@ fn draw_poly<'a>(
                 lmap,
                 write_z: policy.writes_z,
                 depth_bias: policy.detail_offset as f32 * DETAIL_OFFSET_M,
+                blended: alpha_reference.is_some() && material.is_some_and(|m| m.blended),
             });
         }
     }
@@ -1943,6 +1960,8 @@ struct QueuedTri<'a> {
     lmap: Option<&'a DecodedLightmap>,
     write_z: bool,
     depth_bias: f32,
+    /// Mix with the frame by texel alpha after the alpha test (`BlendedAlphaTest`).
+    blended: bool,
 }
 
 /// Rasterise `tris` in order. With more than one thread the frame is split into row bands and
@@ -2066,6 +2085,13 @@ fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usi
                 b *= light[2];
             }
 
+            if t.blended {
+                let a = ((base_rgb >> 24) & 0xff) as f32 / 255.0;
+                let dst = fb[idx];
+                r = r * a + ((dst >> 16) & 0xff) as f32 * (1.0 - a);
+                g = g * a + ((dst >> 8) & 0xff) as f32 * (1.0 - a);
+                b = b * a + (dst & 0xff) as f32 * (1.0 - a);
+            }
             let ri = (r.min(255.0) as u32) << 16;
             let gi = (g.min(255.0) as u32) << 8;
             let bi = b.min(255.0) as u32;
@@ -2254,6 +2280,7 @@ pub(crate) fn test_software_character(
         false,
         hit_flash,
         &[],
+        [0.0; 3],
         cam,
         right,
         up,
@@ -2368,6 +2395,25 @@ mod tests {
     }
 
     #[test]
+    fn character_light_adds_the_level_ambient_before_the_clamp() {
+        // One vertex, no faces: no normal, so point lights add nothing and only the ambient shows.
+        let rig = crate::kf2::KfsMesh {
+            name: "dot".into(),
+            vertices: vec![[0.0; 3]],
+            faces: Vec::new(),
+            material_textures: Vec::new(),
+        };
+        let verts = vec![[0.0, 0.0, 0.0]];
+        let dark = character_vertex_light(&rig, &verts, [0.0; 3], false, &[], [0.0; 3]);
+        assert_eq!(dark[0], [0.0, 0.0, 0.0]);
+        let lit = character_vertex_light(&rig, &verts, [0.0; 3], false, &[], [140.0, 135.0, 110.0]);
+        assert_eq!(lit[0], [140.0 / 255.0, 135.0 / 255.0, 110.0 / 255.0]);
+        let near = [light([0.0, 0.1, 0.0], 255.0, 10.0, 1.0)];
+        let sat = character_vertex_light(&rig, &verts, [0.0; 3], false, &near, [300.0, 0.0, 0.0]);
+        assert_eq!(sat[0], [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
     fn smooth_normals_point_outward_for_either_winding() {
         // Tetrahedron with its apex up; the apex normal must point +Y whatever the face winding.
         let pts = [
@@ -2476,6 +2522,7 @@ mod tests {
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
+            ambient: [0.0; 3],
             mode_switch: None,
         }
     }
@@ -2499,6 +2546,7 @@ mod tests {
                 texture_path: String::new(),
                 texture_index: None,
                 alpha_reference: None,
+                blended: false,
             },
         );
         scene.materials.insert(
@@ -2509,6 +2557,7 @@ mod tests {
                 texture_path: String::new(),
                 texture_index: None,
                 alpha_reference: None,
+                blended: false,
             },
         );
         let quad = ScenePoly {
@@ -2670,6 +2719,8 @@ mod tests {
                     lmap: None,
                     write_z: k % 3 != 0,
                     depth_bias: 0.0,
+                    // Blending reads the frame, so it also has to keep the per-pixel order.
+                    blended: k % 8 == 0,
                 });
             }
         }
@@ -2748,12 +2799,70 @@ mod tests {
                 texture_path: String::new(),
                 texture_index: Some(0),
                 alpha_reference: Some(15),
+                blended: false,
             },
         );
         scene.dynamic_meshes.push(glass_quad(false));
         assert_eq!(painted_pixels(&scene), 0, "alpha 14 fails reference 15");
         scene.textures[0].pixels[0] = 0x0f80_8080;
         assert!(painted_pixels(&scene) > 0, "alpha 15 passes reference 15");
+    }
+
+    /// A white texel of `alpha` on the glass quad, its material blended or cut out.
+    fn masked_quad_scene(alpha: u32, blended: bool) -> LdbScene {
+        let mut scene = empty_scene();
+        scene.textures.push(DecodedTexture {
+            path: "plate".into(),
+            flag: 4,
+            width: 1,
+            height: 1,
+            pixels: vec![(alpha << 24) | 0x00ff_ffff],
+        });
+        scene.materials.insert(
+            1,
+            SceneMaterial {
+                id: 1,
+                category: "externalwall".into(),
+                texture_path: String::new(),
+                texture_index: Some(0),
+                alpha_reference: Some(15),
+                blended,
+            },
+        );
+        scene.dynamic_meshes.push(glass_quad(false));
+        scene
+    }
+
+    fn centre_pixel(scene: &LdbScene) -> u32 {
+        let mut fb = vec![0u32; W * H];
+        let mut zb = vec![f32::INFINITY; W * H];
+        draw_dynamic_meshes(
+            scene,
+            &BTreeMap::new(),
+            [-4.0, 1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            (H as f32) * 0.85,
+            false,
+            false,
+            &mut fb,
+            &mut zb,
+        );
+        fb[(H / 2) * W + W / 2]
+    }
+
+    #[test]
+    fn blended_texels_mix_with_the_frame_by_their_alpha() {
+        // BlendedAlphaTest: past the alpha test, colour = src * a + dst * (1 - a). Over a black
+        // frame, alpha 128 gives half the cut-out colour (within rounding).
+        let opaque = centre_pixel(&masked_quad_scene(128, false));
+        let blended = centre_pixel(&masked_quad_scene(128, true));
+        assert!(opaque != 0, "the quad must draw");
+        for shift in [0, 8, 16] {
+            let (o, b) = ((opaque >> shift) & 0xff, (blended >> shift) & 0xff);
+            assert!(b.abs_diff(o * 128 / 255) <= 1, "{shift}: {o} -> {b}");
+        }
     }
 
     #[test]

@@ -699,9 +699,12 @@ fn play_level(
         // theme, as the retail menu plays it over the same rooftop.
         music.play_mode(game_dir, "gamemode");
     }
-    let scene = maxfx_engine::scene::parse_ldb_scene(&bytes)
+    let mut scene = maxfx_engine::scene::parse_ldb_scene(&bytes)
         .ok_or_else(|| format!("{win} did not decode"))?;
     let entry = maxfx_engine::level_entry(game_dir, level_id).ok();
+    if let Some(ambient) = entry.as_ref().and_then(|entry| entry.ambient) {
+        scene.ambient = ambient;
+    }
     let player_start = entry.as_ref().and_then(|entry| entry.player_start.clone());
     let player_skin = entry.as_ref().and_then(|entry| entry.player_skin.clone());
     let world_sphere = entry.as_ref().and_then(|entry| entry.world_sphere.clone());

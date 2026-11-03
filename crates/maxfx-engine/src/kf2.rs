@@ -88,7 +88,7 @@ pub struct CharacterRig {
     pub skin: Option<SkdSkin>,
     pub idle: Option<Kf2Anim>,
     pub walk: Option<Kf2Anim>,
-    /// `Pose.kf2` / `Widepose.kf2` — bind-pose locals for `inv(bind) * pose`.
+    /// `Widepose.kf2` (else `Pose.kf2`) — bind-pose locals for `inv(bind) * pose`.
     pub bind: Option<Kf2Anim>,
 }
 
@@ -812,9 +812,13 @@ fn find_file_ci(dirs: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
         let Ok(rd) = std::fs::read_dir(d) else {
             continue;
         };
-        for ent in rd.flatten() {
-            let n = ent.file_name().to_string_lossy().to_ascii_lowercase();
-            if targets.iter().any(|t| t == &n) {
+        let entries: Vec<_> = rd.flatten().collect();
+        // `names` is in preference order.
+        for t in &targets {
+            if let Some(ent) = entries
+                .iter()
+                .find(|e| e.file_name().to_string_lossy().to_ascii_lowercase() == *t)
+            {
                 return Some(ent.path());
             }
         }
@@ -839,8 +843,9 @@ pub(crate) fn load_bytes_from_ras(
             continue;
         }
         if let Ok(arc) = openras::RasArchive::read(&ras_path) {
-            for f in &arc.files {
-                if wants.iter().any(|w| f.name.to_ascii_lowercase() == *w) {
+            // `basenames` is in preference order.
+            for w in &wants {
+                if let Some(f) = arc.files.iter().find(|f| f.name.to_ascii_lowercase() == *w) {
                     return Some(f.data.clone());
                 }
             }
@@ -910,7 +915,9 @@ fn rig_from_mesh(mesh: KfsMesh, skin: Option<SkdSkin>, path: &Path) -> Character
         skin,
         idle: load_anim_named(path, &player_rest_anim_names()),
         walk: load_anim_named(path, &player_move_anim_names()),
-        bind: load_anim_named(path, &["pose.kf2", "widepose.kf2"]),
+        // `default_skeleton.txt` `CHARANIM_POSE = anim\\widepose.kf2`: the pose the skins were
+        // exported in. `Pose.kf2` raises the arms ~0.39 rad and narrows the legs.
+        bind: load_anim_named(path, &["widepose.kf2", "pose.kf2"]),
     }
 }
 
@@ -1425,5 +1432,38 @@ mod tests {
                 "idle_aim posed height {span} (y {min_y}..{max_y})"
             );
         }
+    }
+    /// The skins were exported in the skeleton's `CHARANIM_POSE` (`default_skeleton.txt`:
+    /// `anim\widepose.kf2`), so the bind clip must put each joint where its vertices are.
+    #[test]
+    fn retail_bind_pose_matches_the_exported_mesh() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = PathBuf::from(home).join("Games/MaxPayne1");
+        let Some(body) = load_skin_body(&game, "max_payne") else {
+            return;
+        };
+        let rig = body.rig;
+        let (skin, bind) = (rig.skin.as_ref().unwrap(), rig.bind.as_ref().unwrap());
+        let bind_world = compose_world(bind, &sample_locals(bind, 0.0));
+        let toe = skin
+            .bones
+            .iter()
+            .position(|b| b.eq_ignore_ascii_case("toe-l"))
+            .unwrap();
+        let (sum, n) = rig
+            .mesh
+            .vertices
+            .iter()
+            .zip(&skin.weights)
+            .filter(|(_, w)| w.iter().any(|w| w.bone == toe && w.weight > 0.9))
+            .fold((0.0f32, 0.0f32), |(s, n), (v, _)| (s + v[0], n + 1.0));
+        let joint_x = bind_world["toe-l"].1[0];
+        assert!(
+            (sum / n - joint_x).abs() < 0.03,
+            "toe-l mesh x {} vs bind joint x {joint_x}",
+            sum / n
+        );
     }
 }
