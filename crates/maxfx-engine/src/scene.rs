@@ -798,6 +798,7 @@ impl LdbScene {
                 };
                 self.fsm_send(msg.receiver, command)
             }
+            "fsm_randomize" => self.fsm_randomize(msg.receiver),
             "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
             "do_hide" => {
                 let hidden = match msg.args.first().copied().unwrap_or("") {
@@ -1002,6 +1003,19 @@ impl LdbScene {
         true
     }
 
+    /// `FSM_Randomize` (0x6e3310): switch to state `rand() % count` of the state list.
+    fn fsm_randomize(&mut self, fsm_name: &str) -> bool {
+        let Some(index) = self.fsm_index(fsm_name) else {
+            return false;
+        };
+        let states = &self.fsms[index].states;
+        if states.is_empty() {
+            return false;
+        }
+        let state = states[crt_rand() as usize % states.len()].clone();
+        self.fsm_switch(fsm_name, &state)
+    }
+
     /// `FSM_Send` (0x6e2f10): run the command's script with the current state.
     fn fsm_send(&mut self, fsm_name: &str, command: &str) -> bool {
         let Some(index) = self.fsm_index(fsm_name) else {
@@ -1148,6 +1162,16 @@ fn strip_trigger_suffix(name: &str) -> &str {
     } else {
         name
     }
+}
+
+/// MSVCRT `rand()`: `seed = seed * 214013 + 2531011`, result bits 16..30. Unseeded start is 1.
+fn crt_rand() -> u32 {
+    thread_local! {
+        static SEED: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+    }
+    let seed = SEED.get().wrapping_mul(214_013).wrapping_add(2_531_011);
+    SEED.set(seed);
+    (seed >> 16) & 0x7fff
 }
 
 fn find_script(scripts: &[FsmScript], name: &str) -> Option<FsmScript> {
@@ -3410,6 +3434,16 @@ mod tests {
         scene.fsms[0].state = "open".into();
         assert!(scene.dispatch_hook("::startroom::door", "T_Activate"));
         assert!(!scene.dynamic_meshes[0].hidden);
+    }
+
+    #[test]
+    fn fsm_randomize_switches_to_a_state_picked_by_crt_rand() {
+        // 0x6e3310: `rand() % states` (MSVCRT `rand`, IAT 0x7ca368), then the Switch path.
+        // The first `rand()` of an unseeded CRT is 41, so state 1 of 2.
+        let mut scene = door_fsm_scene();
+        assert!(scene.dispatch_message("", "::startroom::door->FSM_Randomize();"));
+        assert_eq!(scene.fsms[0].state, "open");
+        assert!(scene.dynamic_meshes[0].hidden, "the open state script ran");
     }
 
     #[test]
