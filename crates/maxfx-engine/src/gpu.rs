@@ -639,6 +639,11 @@ impl GpuRenderer {
         Some((renderer, surface))
     }
 
+    /// The same device (and so the same window swapchain) with batches for another scene.
+    pub fn for_scene(&self, scene: &LdbScene) -> Self {
+        Self::build(self.device.clone(), self.queue.clone(), scene)
+    }
+
     fn build(device: wgpu::Device, queue: wgpu::Queue, scene: &LdbScene) -> Self {
         let (w, h) = (FRAME_W as u32, FRAME_H as u32);
 
@@ -1693,6 +1698,24 @@ mod tests {
             zb.iter().all(|z| z.is_infinite()),
             "a hidden mesh draws nothing"
         );
+    }
+
+    #[test]
+    fn a_renderer_rebuilt_for_another_scene_keeps_drawing_on_the_same_device() {
+        let menu = crate::render3d::test_empty_scene();
+        let Some(gpu) = GpuRenderer::new(&menu) else {
+            eprintln!("no GPU adapter: renderer rebuild test skipped");
+            return;
+        };
+        let mut level = crate::render3d::test_empty_scene();
+        level.dynamic_meshes.push(yawed_door(false));
+        let mut gpu = gpu.for_scene(&level);
+        let view = crate::render3d::test_view([-4.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let mut fb = vec![0u32; w * h];
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&level, view, true, &[], &mut fb, &mut zb);
+        assert!(zb.iter().filter(|z| z.is_finite()).count() > 1000);
     }
 
     fn quad_rig() -> crate::kf2::CharacterRig {

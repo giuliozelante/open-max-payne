@@ -461,10 +461,20 @@ fn main() -> ExitCode {
                                 };
                             }
                             if want_window {
+                                let title = format!("Open Max Payne 3D — {}", p.display());
+                                let mut screen = match maxfx_engine::frontend::Screen::open(&title)
+                                {
+                                    Ok(screen) => screen,
+                                    Err(e) => {
+                                        eprintln!("window: {e}");
+                                        return ExitCode::FAILURE;
+                                    }
+                                };
                                 if let Err(e) = maxfx_engine::render3d::run_3d_walkthrough(
+                                    &mut screen,
                                     scene,
                                     p,
-                                    &format!("Open Max Payne 3D — {}", p.display()),
+                                    &title,
                                     None,
                                     None,
                                     None,
@@ -624,9 +634,17 @@ fn main() -> ExitCode {
 }
 
 fn launch_startup(game_dir: &Path) -> ExitCode {
+    // One window for the whole session: video, menu, comics and levels.
+    let mut screen = match maxfx_engine::frontend::Screen::open("Open Max Payne") {
+        Ok(screen) => screen,
+        Err(e) => {
+            eprintln!("window: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     if let Some(video) = maxfx_engine::startup_video_path(game_dir) {
         println!("startup video {}", video.display());
-        if let Err(e) = maxfx_engine::play_intro_video(&video) {
+        if let Err(e) = maxfx_engine::play_intro_video(&video, &mut screen) {
             eprintln!("intro: {e} — continuing to the main menu");
         }
     } else {
@@ -639,12 +657,12 @@ fn launch_startup(game_dir: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let Some(level_id) = maxfx_engine::menu_ui::run_main_menu(&menu) else {
+    let Some(level_id) = maxfx_engine::menu_ui::run_main_menu(&mut screen, &menu) else {
         println!("quit");
         return ExitCode::SUCCESS;
     };
     println!("start level {level_id}");
-    if let Err(e) = play_level(game_dir, &level_id, true) {
+    if let Err(e) = play_level(&mut screen, game_dir, &level_id, true) {
         eprintln!("error: {e}");
         return ExitCode::FAILURE;
     }
@@ -653,7 +671,12 @@ fn launch_startup(game_dir: &Path) -> ExitCode {
 
 /// One menu level. `startup_level` runs its own intro scripts (cutscene cameras) until they
 /// switch to the graphic novel, then the comic page, then the next level. Space skips the intro.
-fn play_level(game_dir: &Path, level_id: &str, allow_handoff: bool) -> Result<(), String> {
+fn play_level(
+    screen: &mut maxfx_engine::frontend::Screen,
+    game_dir: &Path,
+    level_id: &str,
+    allow_handoff: bool,
+) -> Result<(), String> {
     let (win, bytes) =
         maxfx_engine::load_level_by_id(game_dir, level_id).map_err(|e| e.to_string())?;
     let handoff = if allow_handoff {
@@ -666,7 +689,7 @@ fn play_level(game_dir: &Path, level_id: &str, allow_handoff: bool) -> Result<()
         if !pages.is_empty() {
             println!("opening pages {}", pages.join(", "));
             let (chrome, shown) = maxfx_engine::load_novel_session(game_dir, &pages);
-            maxfx_engine::menu_ui::show_novel_session(&chrome, &shown);
+            maxfx_engine::menu_ui::show_novel_session(screen, &chrome, &shown);
         }
     }
     let scene = maxfx_engine::scene::parse_ldb_scene(&bytes)
@@ -677,6 +700,7 @@ fn play_level(game_dir: &Path, level_id: &str, allow_handoff: bool) -> Result<()
     let world_sphere = entry.as_ref().and_then(|entry| entry.world_sphere.clone());
     let title = format!("Open Max Payne — {level_id}");
     maxfx_engine::render3d::run_3d_walkthrough(
+        screen,
         scene,
         game_dir,
         &title,
@@ -692,8 +716,8 @@ fn play_level(game_dir: &Path, level_id: &str, allow_handoff: bool) -> Result<()
         );
         let (chrome, shown) =
             maxfx_engine::load_novel_session(game_dir, std::slice::from_ref(&hand.novel_page));
-        maxfx_engine::menu_ui::show_novel_session(&chrome, &shown);
-        return play_level(game_dir, &hand.next_level, false);
+        maxfx_engine::menu_ui::show_novel_session(screen, &chrome, &shown);
+        return play_level(screen, game_dir, &hand.next_level, false);
     }
     Ok(())
 }

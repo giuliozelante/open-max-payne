@@ -1,7 +1,8 @@
 //! Keyboard main menu drawn after the intro. Retail actions come from `menu.txt`.
 
+use crate::frontend::{Frontend, Screen};
 use crate::{novel_input, novel_turn, MenuEntry, NovelShownPage};
-use minifb::{Key, KeyRepeat, MouseButton, Window, WindowOptions};
+use minifb::{Key, KeyRepeat, MouseButton};
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 
@@ -9,31 +10,21 @@ const W: usize = 960;
 const H: usize = 600;
 
 /// `Some(level id)` from `gm_init`, or `None` when the player quits.
-pub fn run_main_menu(root: &[MenuEntry]) -> Option<String> {
-    let mut window = Window::new(
-        "Open Max Payne",
-        W,
-        H,
-        WindowOptions {
-            resize: false,
-            ..WindowOptions::default()
-        },
-    )
-    .map_err(|e| eprintln!("menu window: {e}"))
-    .ok()?;
-    window.set_target_fps(30);
+pub fn run_main_menu(screen: &mut Screen, root: &[MenuEntry]) -> Option<String> {
+    screen.set_title("Open Max Payne");
     let mut stack: Vec<(Vec<MenuEntry>, usize)> = vec![(root.to_vec(), 0)];
     let mut buf = vec![0u32; W * H];
-    while window.is_open() {
+    while screen.is_open() {
+        screen.pump();
         let (entries, sel) = stack.last_mut().unwrap();
         let n = entries.len().max(1);
-        if window.is_key_pressed(Key::Down, KeyRepeat::No) && !entries.is_empty() {
+        if screen.is_key_pressed(Key::Down, KeyRepeat::No) && !entries.is_empty() {
             *sel = (*sel + 1) % n;
         }
-        if window.is_key_pressed(Key::Up, KeyRepeat::No) && !entries.is_empty() {
+        if screen.is_key_pressed(Key::Up, KeyRepeat::No) && !entries.is_empty() {
             *sel = (*sel + n - 1) % n;
         }
-        if window.is_key_pressed(Key::Enter, KeyRepeat::No) && !entries.is_empty() {
+        if screen.is_key_pressed(Key::Enter, KeyRepeat::No) && !entries.is_empty() {
             let entry = entries[*sel].clone();
             if !entry.children.is_empty() {
                 stack.push((entry.children, 0));
@@ -45,8 +36,8 @@ pub fn run_main_menu(root: &[MenuEntry]) -> Option<String> {
                 stack.pop();
             }
         }
-        if window.is_key_pressed(Key::Escape, KeyRepeat::No)
-            || window.is_key_pressed(Key::Backspace, KeyRepeat::No)
+        if screen.is_key_pressed(Key::Escape, KeyRepeat::No)
+            || screen.is_key_pressed(Key::Backspace, KeyRepeat::No)
         {
             if stack.len() > 1 {
                 stack.pop();
@@ -55,7 +46,7 @@ pub fn run_main_menu(root: &[MenuEntry]) -> Option<String> {
             }
         }
         paint(&mut buf, stack.last().unwrap());
-        if window.update_with_buffer(&buf, W, H).is_err() {
+        if screen.show(&buf).is_err() {
             return None;
         }
     }
@@ -63,54 +54,40 @@ pub fn run_main_menu(root: &[MenuEntry]) -> Option<String> {
 }
 
 /// Collected pages, then the exit-to-game indicator. A bad jpeg draws the page id.
-pub fn show_novel_session(chrome: &[u8], pages: &[NovelShownPage]) {
+pub fn show_novel_session(screen: &mut Screen, chrome: &[u8], pages: &[NovelShownPage]) {
     if pages.is_empty() {
         return;
     }
-    let mut window = match Window::new(
-        "Open Max Payne — graphic novel",
-        W,
-        H,
-        WindowOptions {
-            resize: false,
-            ..WindowOptions::default()
-        },
-    ) {
-        Ok(window) => window,
-        Err(e) => {
-            eprintln!("comic window: {e}");
-            return;
-        }
-    };
-    window.set_target_fps(30);
+    screen.set_title("Open Max Payne — graphic novel");
     let mut index = 0usize;
     let mut buf = vec![0u32; W * H];
     let mut voice: Option<Child> = None;
     let mut shown = usize::MAX;
     let mut mouse_down = false;
-    while window.is_open() {
+    while screen.is_open() {
+        screen.pump();
         if shown != index {
             stop_voice(&mut voice);
             voice = start_voice(&pages[index].wav);
             shown = index;
         }
         paint_novel_page(&mut buf, &pages[index].jpeg, &pages[index].id, chrome);
-        let click = window.get_mouse_down(MouseButton::Left);
+        let click = screen.get_mouse_down(MouseButton::Left);
         let click_edge = click && !mouse_down;
         mouse_down = click;
-        let advance = window.is_key_pressed(Key::Right, KeyRepeat::No)
-            || window.is_key_pressed(Key::Space, KeyRepeat::No)
-            || window.is_key_pressed(Key::Enter, KeyRepeat::No)
+        let advance = screen.is_key_pressed(Key::Right, KeyRepeat::No)
+            || screen.is_key_pressed(Key::Space, KeyRepeat::No)
+            || screen.is_key_pressed(Key::Enter, KeyRepeat::No)
             || click_edge;
-        let back = window.is_key_pressed(Key::Left, KeyRepeat::No);
-        let escape = window.is_key_pressed(Key::Escape, KeyRepeat::No);
+        let back = screen.is_key_pressed(Key::Left, KeyRepeat::No);
+        let escape = screen.is_key_pressed(Key::Escape, KeyRepeat::No);
         if let Some(input) = novel_input(escape, advance, back) {
             match novel_turn(index, pages.len(), input) {
                 Some(next) => index = next,
                 None => break,
             }
         }
-        if window.update_with_buffer(&buf, W, H).is_err() {
+        if screen.show(&buf).is_err() {
             break;
         }
     }
