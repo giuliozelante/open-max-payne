@@ -2565,6 +2565,11 @@ pub fn read_game_bytes(game_dir: &Path, win_path: &str) -> Option<Vec<u8>> {
 pub fn load_sound_catalogs(game_dir: &Path) -> BTreeMap<String, String> {
     let mut src = GameSource::open(game_dir);
     let mut catalogs = BTreeMap::new();
+    // Both catalogs start with `#include <..\soundid.h>` (the `ID_DOOR_*` ranges).
+    let header = src
+        .read(r"\data\database\soundid.h")
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
     for (category, win_path) in [
         ("breakable", r"\data\database\sounds\breakable.txt"),
         ("dynamic", r"\data\database\sounds\dynamic.txt"),
@@ -2575,7 +2580,7 @@ pub fn load_sound_catalogs(game_dir: &Path) -> BTreeMap<String, String> {
         let Ok(text) = String::from_utf8(bytes) else {
             continue;
         };
-        catalogs.insert(category.to_string(), text);
+        catalogs.insert(category.to_string(), format!("{header}\n{text}"));
     }
     catalogs
 }
@@ -2624,6 +2629,36 @@ pub fn particle_effect_file(particles_txt: &str, effect: &str) -> Option<(String
         ),
         sound_cue_looping(particles_txt, effect),
     ))
+}
+
+/// Distance model of a `3DSound = YES` cue: full `volume` inside `hotspot` metres, released past
+/// `falloff` metres (`sndmfc.dll` `S_SoundOmni` `+0x149` / `+0x14d`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SoundRange {
+    pub hotspot: f32,
+    pub falloff: f32,
+    pub volume: f32,
+}
+
+/// `Hotspot`, `FallOff` and `Volume` of `[cue]`, `#define`s resolved; `None` unless `3DSound = YES`.
+pub fn sound_cue_3d(text: &str, cue: &str) -> Option<SoundRange> {
+    if !sound_cue_value(text, cue, "3dsound")?.eq_ignore_ascii_case("yes") {
+        return None;
+    }
+    let number = |key: &str| {
+        let value = sound_cue_value(text, cue, key)?;
+        value.parse::<f32>().ok().or_else(|| {
+            text.lines().find_map(|line| {
+                let mut words = line.trim().strip_prefix("#define")?.split_whitespace();
+                (words.next()? == value).then(|| words.next()?.parse().ok())?
+            })
+        })
+    };
+    Some(SoundRange {
+        hotspot: number("hotspot")?,
+        falloff: number("falloff")?,
+        volume: number("volume").unwrap_or(1.0),
+    })
 }
 
 /// `Looping = YES` inside `[cue]` (siren and engine loops in `sounds/dynamic.txt`).
@@ -3928,6 +3963,21 @@ mod tests {
     }
 
     #[test]
+    fn sound_cue_3d_reads_hotspot_falloff_and_volume_with_defines() {
+        let text = "#define\tID_DOOR_HOTSPOT\t\t\t\t 2\n#define DYNAMIC_MEDIUMFALLOFF\t20\n[door]\n{\n[Default]\n{\n[Sound]\nFilename = d.wav;\nVolume = 0.6;\n3Dsound = YES;\nHotspot = ID_DOOR_HOTSPOT;\nFallOff = DYNAMIC_MEDIUMFALLOFF;\n}\n}\n[flat]\n{\n[Sound]\nFilename = f.wav;\n3DSound = NO;\nHotspot = 1;\nFallOff = 5;\n}\n";
+        assert_eq!(
+            sound_cue_3d(text, "door"),
+            Some(SoundRange {
+                hotspot: 2.0,
+                falloff: 20.0,
+                volume: 0.6,
+            })
+        );
+        assert_eq!(sound_cue_3d(text, "flat"), None);
+        assert_eq!(sound_cue_3d(text, "missing"), None);
+    }
+
+    #[test]
     fn sound_cue_looping_reads_the_cue_block_only() {
         let text = "[a_loop]\n{\n[Sound]\nFilename = x.wav;\nLooping = YES;\n}\n[b]\n{\n[Sound]\nFilename = y.wav;\n}\n";
         assert!(sound_cue_looping(text, "A_Loop"));
@@ -4139,6 +4189,15 @@ mod tests {
             )
             .as_deref(),
             Some(r"dynamic\door\door_wood_locked3.wav")
+        );
+        // `ID_DOOR_*` come from `#include <..\soundid.h>`.
+        assert_eq!(
+            sound_cue_3d(catalogs.get("dynamic").expect("dynamic"), "briefcase_open"),
+            Some(SoundRange {
+                hotspot: 2.0,
+                falloff: 20.0,
+                volume: 1.0,
+            })
         );
         let win = story_wav_win_path(r"breakable\glass\break_glass_medium.wav");
         assert_eq!(

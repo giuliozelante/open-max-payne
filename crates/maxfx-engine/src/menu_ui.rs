@@ -132,7 +132,7 @@ impl Music {
             return;
         }
         self.child = Command::new("ffplay")
-            .args(crate::render3d::sound_player_args(&path, true))
+            .args(crate::render3d::sound_player_args(&path, true, 100))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

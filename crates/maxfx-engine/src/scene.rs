@@ -681,7 +681,7 @@ impl ScreenFade {
 }
 
 /// One `A_Play3DSound` accepted by a mesh or trigger that this scene actually stores.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QueuedSound {
     pub category: String,
     pub cue: String,
@@ -690,6 +690,8 @@ pub struct QueuedSound {
     pub emitter: String,
     /// `Looping = YES`: plays until its emitter is stopped or the level ends.
     pub looping: bool,
+    /// Distance model of a `3DSound = YES` cue; `None` plays at full volume.
+    pub range: Option<crate::SoundRange>,
 }
 
 /// One `PS_StartEffect(effect, ...)` on a mesh, trigger or FSM this scene stores.
@@ -1041,6 +1043,11 @@ impl LdbScene {
             filename,
             emitter,
             looping,
+            range: self
+                .sound_catalogs
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(category))
+                .and_then(|(_, text)| crate::sound_cue_3d(text, cue)),
         });
         true
     }
@@ -3393,7 +3400,7 @@ mod tests {
         scene.dynamic_meshes.push(siren);
         scene.sound_catalogs.insert(
             "dynamic".into(),
-            "[Police_Wail_Siren_Close_Loop]\n{\n[Sound]\nFilename = dynamic\\cars\\Police_Wail_Siren_Close.wav;\nLooping = YES;\n}\n[door_wood_locked]\n{\n[Sound]\nFilename = dynamic\\door\\door_wood_locked3.wav;\n}\n"
+            "[Police_Wail_Siren_Close_Loop]\n{\n[Sound]\nFilename = dynamic\\cars\\Police_Wail_Siren_Close.wav;\n3DSound = YES;\nHotspot = 2;\nFallOff = 50;\nLooping = YES;\n}\n[door_wood_locked]\n{\n[Sound]\nFilename = dynamic\\door\\door_wood_locked3.wav;\n}\n"
                 .into(),
         );
         let ctx = "::startroom::car";
@@ -3407,6 +3414,15 @@ mod tests {
         ));
         assert_eq!(scene.sound_queue[0].emitter, "::startroom::car::siren");
         assert!(scene.sound_queue[0].looping);
+        assert_eq!(
+            scene.sound_queue[0].range,
+            Some(crate::SoundRange {
+                hotspot: 2.0,
+                falloff: 50.0,
+                volume: 1.0,
+            })
+        );
+        assert_eq!(scene.sound_queue[1].range, None);
         assert!(!scene.sound_queue[1].looping);
         assert!(scene.dispatch_message(ctx, "::startroom::car::siren->a_stopall3dsounds(\"\");"));
         assert_eq!(

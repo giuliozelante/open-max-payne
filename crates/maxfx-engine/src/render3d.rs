@@ -258,6 +258,8 @@ pub fn run_3d_walkthrough(
         }
     );
     let mut sounds = SoundChannels::default();
+    // Last frame's eye: the sound listener.
+    let mut listener = player_pos;
     let game_root = catalog_root(level_path);
     let particles_txt =
         crate::read_game_bytes(&game_root, r"\data\database\particles\particles.txt")
@@ -329,7 +331,13 @@ pub fn run_3d_walkthrough(
         if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             toggle_nearest_dynamic_mesh(&mut scene, &room_origins, player_pos, 36.0);
             if scene.activate_nearest_trigger(&room_origins, player_pos, 36.0) {
-                play_queued_sounds(&mut scene, &catalog_root(level_path), &mut sounds);
+                play_queued_sounds(
+                    &mut scene,
+                    &catalog_root(level_path),
+                    &mut sounds,
+                    &room_origins,
+                    listener,
+                );
             }
         }
 
@@ -484,7 +492,13 @@ pub fn run_3d_walkthrough(
                 (Some((midx, mt)), enemy) if enemy.is_none_or(|(_, et)| mt < et) => {
                     if scene.damage_mesh(midx, BERETTA_BULLET_DAMAGE) {
                         println!("  3D Engine: {} broke", scene.dynamic_meshes[midx].name);
-                        play_queued_sounds(&mut scene, &catalog_root(level_path), &mut sounds);
+                        play_queued_sounds(
+                            &mut scene,
+                            &catalog_root(level_path),
+                            &mut sounds,
+                            &room_origins,
+                            listener,
+                        );
                     }
                 }
                 (_, Some((idx, _))) => {
@@ -543,7 +557,13 @@ pub fn run_3d_walkthrough(
         scene.step_dynamic_anims(base_dt);
         scene.step_screen_fade(base_dt);
         // Scripted sounds (sirens, the chopper) start and stop with the scripts.
-        play_queued_sounds(&mut scene, &catalog_root(level_path), &mut sounds);
+        play_queued_sounds(
+            &mut scene,
+            &catalog_root(level_path),
+            &mut sounds,
+            &room_origins,
+            listener,
+        );
         start_queued_effects(&mut scene, &game_root, &particles_txt, &mut particle_lights);
         particle_lights.step(base_dt);
         let frame_lights: Vec<ScenePointLight> = world_lights
@@ -574,6 +594,7 @@ pub fn run_3d_walkthrough(
         if let Some((pos, right, up, fwd)) = attached_view(&scene, &room_origins) {
             (cam_pos, cam_right, cam_up, cam_fwd) = (pos, right, up, fwd);
         }
+        listener = cam_pos;
 
         let fov_scale = (H as f32) * 0.85;
         // World sphere (house = sunset) or the flat ceiling when the level names none.
@@ -1145,26 +1166,92 @@ fn ray_slab(origin: [f32; 3], dir: [f32; 3], min: [f32; 3], max: [f32; 3]) -> Op
     Some(if tmin >= 0.0 { tmin } else { tmax })
 }
 
-/// Playing sounds, each tagged with its emitter. Dropping it stops them all (end of level).
+/// Sound voices, each tagged with its emitter. Dropping it stops them all (end of level).
 #[derive(Default)]
 struct SoundChannels {
-    playing: Vec<(String, Child)>,
+    voices: Vec<Voice>,
 }
 
-impl Drop for SoundChannels {
-    fn drop(&mut self) {
-        for (_, mut child) in self.playing.drain(..) {
+/// One cue's player. A positional loop keeps its voice while out of range, with no player.
+struct Voice {
+    emitter: String,
+    wav: PathBuf,
+    looping: bool,
+    range: Option<crate::SoundRange>,
+    /// The player and the gain it was started at.
+    child: Option<(Child, f32)>,
+}
+
+impl Voice {
+    fn kill(&mut self) {
+        if let Some((mut child, _)) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
     }
+
+    fn start(&mut self, gain: f32) {
+        self.kill();
+        let volume = (gain * 100.0).round().clamp(1.0, 100.0) as u32;
+        self.child = std::process::Command::new("ffplay")
+            .args(sound_player_args(&self.wav, self.looping, volume))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()
+            .map(|child| (child, gain));
+    }
 }
 
-/// `ffplay` without a window; `-loop 0` repeats a looping cue until it is killed.
-pub(crate) fn sound_player_args(wav: &Path, looping: bool) -> Vec<String> {
+impl Drop for SoundChannels {
+    fn drop(&mut self) {
+        for voice in &mut self.voices {
+            voice.kill();
+        }
+    }
+}
+
+/// Linear gain of a positional cue `distance` metres from the listener: full inside the hotspot,
+/// `hotspot / distance` beyond it, nothing past the falloff.
+fn sound_gain(distance: f32, range: &crate::SoundRange) -> f32 {
+    if distance > range.falloff {
+        return 0.0;
+    }
+    range.volume * (range.hotspot / distance).min(1.0)
+}
+
+/// What a positional voice needs this frame, given the gain it was started at (if running).
+#[derive(Debug, PartialEq)]
+enum VoiceAction {
+    Keep,
+    /// Out of range: release the player (retail `0x1000bb60` stops the buffer).
+    Stop,
+    /// (Re)start at the new gain: `ffplay` cannot change volume while it plays.
+    Start,
+}
+
+fn voice_action(running: Option<f32>, gain: f32) -> VoiceAction {
+    match running {
+        _ if gain <= 0.0 => {
+            if running.is_some() {
+                VoiceAction::Stop
+            } else {
+                VoiceAction::Keep
+            }
+        }
+        None => VoiceAction::Start,
+        Some(started) if gain > started * 2.0 || gain < started * 0.5 => VoiceAction::Start,
+        Some(_) => VoiceAction::Keep,
+    }
+}
+
+/// `ffplay` without a window at `volume` percent; `-loop 0` repeats a looping cue until it is killed.
+pub(crate) fn sound_player_args(wav: &Path, looping: bool, volume: u32) -> Vec<String> {
     let mut args: Vec<String> = ["-nodisp", "-autoexit", "-loglevel", "quiet"]
         .map(String::from)
         .to_vec();
+    args.extend(["-volume".to_string(), volume.to_string()]);
     if looping {
         args.extend(["-loop".to_string(), "0".to_string()]);
     }
@@ -1172,23 +1259,65 @@ pub(crate) fn sound_player_args(wav: &Path, looping: bool) -> Vec<String> {
     args
 }
 
-/// Stop what `A_StopAll3DSounds` asked for, then start the queued cues. Not positional yet:
-/// every cue plays at full volume.
-fn play_queued_sounds(scene: &mut LdbScene, game_dir: &Path, sounds: &mut SoundChannels) {
+/// Gain of `voice` heard at `listener`: full for a non-positional cue or an emitter with no position.
+fn voice_gain(
+    voice: &Voice,
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    listener: [f32; 3],
+) -> f32 {
+    let Some(range) = &voice.range else {
+        return 1.0;
+    };
+    let Some(pos) = scene.emitter_world_pos(&voice.emitter) else {
+        return range.volume;
+    };
+    let origin = rooms
+        .get(&emitter_room(scene, &voice.emitter))
+        .copied()
+        .unwrap_or([0.0; 3]);
+    let d = (0..3)
+        .map(|k| (origin[k] + pos[k] - listener[k]).powi(2))
+        .sum::<f32>()
+        .sqrt();
+    sound_gain(d, range)
+}
+
+/// Stop what `A_StopAll3DSounds` asked for, start the queued cues, and keep positional loops at
+/// the listener's distance: a loop is released past its falloff and restarted when the gain
+/// halves or doubles (`ffplay` cannot change volume while it plays).
+fn play_queued_sounds(
+    scene: &mut LdbScene,
+    game_dir: &Path,
+    sounds: &mut SoundChannels,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    listener: [f32; 3],
+) {
     for emitter in std::mem::take(&mut scene.sound_stops) {
-        sounds.playing.retain_mut(|(owner, child)| {
-            if owner.eq_ignore_ascii_case(&emitter) {
-                let _ = child.kill();
-                let _ = child.wait();
+        sounds.voices.retain_mut(|voice| {
+            if voice.emitter.eq_ignore_ascii_case(&emitter) {
+                voice.kill();
                 return false;
             }
             true
         });
     }
     // Reap one-shots that finished.
-    sounds
-        .playing
-        .retain_mut(|(_, child)| matches!(child.try_wait(), Ok(None)));
+    sounds.voices.retain_mut(|voice| {
+        voice.looping
+            || voice
+                .child
+                .as_mut()
+                .is_some_and(|(child, _)| matches!(child.try_wait(), Ok(None)))
+    });
+    for voice in sounds.voices.iter_mut().filter(|voice| voice.looping) {
+        let gain = voice_gain(voice, scene, rooms, listener);
+        match voice_action(voice.child.as_ref().map(|(_, g)| *g), gain) {
+            VoiceAction::Keep => {}
+            VoiceAction::Stop => voice.kill(),
+            VoiceAction::Start => voice.start(gain),
+        }
+    }
     for sound in std::mem::take(&mut scene.sound_queue) {
         let Some(filename) = sound.filename.as_deref() else {
             continue;
@@ -1202,14 +1331,20 @@ fn play_queued_sounds(scene: &mut LdbScene, game_dir: &Path, sounds: &mut SoundC
         if !wav.is_file() && std::fs::write(&wav, &bytes).is_err() {
             continue;
         }
-        let child = std::process::Command::new("ffplay")
-            .args(sound_player_args(&wav, sound.looping))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        if let Ok(child) = child {
-            sounds.playing.push((sound.emitter, child));
+        let mut voice = Voice {
+            emitter: sound.emitter,
+            wav,
+            looping: sound.looping,
+            range: sound.range,
+            child: None,
+        };
+        let gain = voice_gain(&voice, scene, rooms, listener);
+        if gain > 0.0 {
+            voice.start(gain);
+        }
+        // A one-shot out of range is never heard; a loop waits for the listener.
+        if voice.looping || voice.child.is_some() {
+            sounds.voices.push(voice);
         }
     }
 }
@@ -2592,12 +2727,43 @@ mod tests {
     }
 
     #[test]
+    fn sound_gain_is_full_inside_the_hotspot_inverse_beyond_and_silent_past_the_falloff() {
+        let range = crate::SoundRange {
+            hotspot: 2.0,
+            falloff: 50.0,
+            volume: 0.5,
+        };
+        assert_eq!(sound_gain(1.0, &range), 0.5);
+        assert_eq!(sound_gain(8.0, &range), 0.125);
+        assert_eq!(sound_gain(50.0, &range), 0.02);
+        assert_eq!(sound_gain(50.5, &range), 0.0);
+    }
+
+    #[test]
+    fn a_voice_restarts_only_when_its_gain_halves_or_doubles_and_stops_out_of_range() {
+        assert_eq!(voice_action(None, 0.0), VoiceAction::Keep);
+        assert_eq!(voice_action(None, 0.3), VoiceAction::Start);
+        assert_eq!(voice_action(Some(0.3), 0.0), VoiceAction::Stop);
+        assert_eq!(voice_action(Some(0.3), 0.5), VoiceAction::Keep);
+        assert_eq!(voice_action(Some(0.3), 0.16), VoiceAction::Keep);
+        assert_eq!(voice_action(Some(0.3), 0.61), VoiceAction::Start);
+        assert_eq!(voice_action(Some(0.3), 0.14), VoiceAction::Start);
+    }
+
+    #[test]
+    fn sound_player_args_set_the_start_volume() {
+        let args = sound_player_args(std::path::Path::new("/x/s.wav"), false, 37);
+        let at = args.iter().position(|a| a == "-volume").expect("-volume");
+        assert_eq!(args[at + 1], "37");
+    }
+
+    #[test]
     fn looping_sounds_play_until_stopped() {
         let wav = std::path::Path::new("/x/s.wav");
-        let once = sound_player_args(wav, false);
+        let once = sound_player_args(wav, false, 100);
         assert!(!once.iter().any(|a| a == "-loop"));
         assert!(once.iter().any(|a| a == "-autoexit"));
-        let looped = sound_player_args(wav, true);
+        let looped = sound_player_args(wav, true, 100);
         let at = looped.iter().position(|a| a == "-loop").expect("-loop");
         assert_eq!(looped[at + 1], "0");
         assert_eq!(looped.last().map(String::as_str), Some("/x/s.wav"));
