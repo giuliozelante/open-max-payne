@@ -2555,6 +2555,17 @@ pub fn load_sound_catalogs(game_dir: &Path) -> BTreeMap<String, String> {
 
 /// Filename inside `[cue]` in `sounds/story.txt`. `empty` reads `[Empty]`.
 pub fn story_sound_filename(text: &str, cue: &str) -> Option<String> {
+    sound_cue_value(text, cue, "filename")
+}
+
+/// `Looping = YES` inside `[cue]` (siren and engine loops in `sounds/dynamic.txt`).
+pub fn sound_cue_looping(text: &str, cue: &str) -> bool {
+    sound_cue_value(text, cue, "looping")
+        .is_some_and(|v| v.eq_ignore_ascii_case("yes") || v.eq_ignore_ascii_case("true"))
+}
+
+/// First non-empty `key = value` inside `[cue]`, across its `[Properties]`/`[Default]`/`[Sound]` parts.
+fn sound_cue_value(text: &str, cue: &str, wanted: &str) -> Option<String> {
     let header = format!("[{}]", cue.trim());
     let mut grab = false;
     for line in text.lines() {
@@ -2575,7 +2586,7 @@ pub fn story_sound_filename(text: &str, cue: &str) -> Option<String> {
             }
         }
         if let Some((key, value)) = assign_pair(line) {
-            if key.eq_ignore_ascii_case("filename") && !value.is_empty() {
+            if key.eq_ignore_ascii_case(wanted) && !value.is_empty() {
                 return Some(value);
             }
         }
@@ -3826,6 +3837,14 @@ mod tests {
         let mut frame = vec![0u32; 2];
         bgra_to_frame(&bytes, &mut frame);
         assert_eq!(frame, vec![0x0030_2010, 0x0003_0201]);
+    }
+
+    #[test]
+    fn sound_cue_looping_reads_the_cue_block_only() {
+        let text = "[a_loop]\n{\n[Sound]\nFilename = x.wav;\nLooping = YES;\n}\n[b]\n{\n[Sound]\nFilename = y.wav;\n}\n";
+        assert!(sound_cue_looping(text, "A_Loop"));
+        assert!(!sound_cue_looping(text, "b"));
+        assert!(!sound_cue_looping(text, "missing"));
     }
 
     #[test]

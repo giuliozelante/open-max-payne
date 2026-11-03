@@ -257,7 +257,7 @@ pub fn run_3d_walkthrough(
             "software"
         }
     );
-    let mut break_voice: Option<Child> = None;
+    let mut sounds = SoundChannels::default();
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
@@ -323,7 +323,7 @@ pub fn run_3d_walkthrough(
         if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             toggle_nearest_dynamic_mesh(&mut scene, &room_origins, player_pos, 36.0);
             if scene.activate_nearest_trigger(&room_origins, player_pos, 36.0) {
-                play_queued_sounds(&mut scene, &catalog_root(level_path), &mut break_voice);
+                play_queued_sounds(&mut scene, &catalog_root(level_path), &mut sounds);
             }
         }
 
@@ -478,7 +478,7 @@ pub fn run_3d_walkthrough(
                 (Some((midx, mt)), enemy) if enemy.is_none_or(|(_, et)| mt < et) => {
                     if scene.damage_mesh(midx, BERETTA_BULLET_DAMAGE) {
                         println!("  3D Engine: {} broke", scene.dynamic_meshes[midx].name);
-                        play_queued_sounds(&mut scene, &catalog_root(level_path), &mut break_voice);
+                        play_queued_sounds(&mut scene, &catalog_root(level_path), &mut sounds);
                     }
                 }
                 (_, Some((idx, _))) => {
@@ -536,6 +536,8 @@ pub fn run_3d_walkthrough(
 
         scene.step_dynamic_anims(base_dt);
         scene.step_screen_fade(base_dt);
+        // Scripted sounds (sirens, the chopper) start and stop with the scripts.
+        play_queued_sounds(&mut scene, &catalog_root(level_path), &mut sounds);
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
 
@@ -1121,9 +1123,51 @@ fn ray_slab(origin: [f32; 3], dir: [f32; 3], min: [f32; 3], max: [f32; 3]) -> Op
     Some(if tmin >= 0.0 { tmin } else { tmax })
 }
 
-fn play_queued_sounds(scene: &mut LdbScene, game_dir: &Path, voice: &mut Option<Child>) {
-    let queued = std::mem::take(&mut scene.sound_queue);
-    for sound in queued {
+/// Playing sounds, each tagged with its emitter. Dropping it stops them all (end of level).
+#[derive(Default)]
+struct SoundChannels {
+    playing: Vec<(String, Child)>,
+}
+
+impl Drop for SoundChannels {
+    fn drop(&mut self) {
+        for (_, mut child) in self.playing.drain(..) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// `ffplay` without a window; `-loop 0` repeats a looping cue until it is killed.
+fn sound_player_args(wav: &Path, looping: bool) -> Vec<String> {
+    let mut args: Vec<String> = ["-nodisp", "-autoexit", "-loglevel", "quiet"]
+        .map(String::from)
+        .to_vec();
+    if looping {
+        args.extend(["-loop".to_string(), "0".to_string()]);
+    }
+    args.push(wav.display().to_string());
+    args
+}
+
+/// Stop what `A_StopAll3DSounds` asked for, then start the queued cues. Not positional yet:
+/// every cue plays at full volume.
+fn play_queued_sounds(scene: &mut LdbScene, game_dir: &Path, sounds: &mut SoundChannels) {
+    for emitter in std::mem::take(&mut scene.sound_stops) {
+        sounds.playing.retain_mut(|(owner, child)| {
+            if owner.eq_ignore_ascii_case(&emitter) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            true
+        });
+    }
+    // Reap one-shots that finished.
+    sounds
+        .playing
+        .retain_mut(|(_, child)| matches!(child.try_wait(), Ok(None)));
+    for sound in std::mem::take(&mut scene.sound_queue) {
         let Some(filename) = sound.filename.as_deref() else {
             continue;
         };
@@ -1131,8 +1175,20 @@ fn play_queued_sounds(scene: &mut LdbScene, game_dir: &Path, voice: &mut Option<
         else {
             continue;
         };
-        crate::menu_ui::stop_voice(voice);
-        *voice = crate::menu_ui::start_voice(&bytes);
+        let name = filename.replace(['\\', '/'], "_");
+        let wav = std::env::temp_dir().join(format!("omp-{}-{name}", std::process::id()));
+        if !wav.is_file() && std::fs::write(&wav, &bytes).is_err() {
+            continue;
+        }
+        let child = std::process::Command::new("ffplay")
+            .args(sound_player_args(&wav, sound.looping))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(child) = child {
+            sounds.playing.push((sound.emitter, child));
+        }
     }
 }
 
@@ -2300,6 +2356,18 @@ mod tests {
     }
 
     #[test]
+    fn looping_sounds_play_until_stopped() {
+        let wav = std::path::Path::new("/x/s.wav");
+        let once = sound_player_args(wav, false);
+        assert!(!once.iter().any(|a| a == "-loop"));
+        assert!(once.iter().any(|a| a == "-autoexit"));
+        let looped = sound_player_args(wav, true);
+        let at = looped.iter().position(|a| a == "-loop").expect("-loop");
+        assert_eq!(looped[at + 1], "0");
+        assert_eq!(looped.last().map(String::as_str), Some("/x/s.wav"));
+    }
+
+    #[test]
     fn smooth_normals_point_outward_for_either_winding() {
         // Tetrahedron with its apex up; the apex normal must point +Y whatever the face winding.
         let pts = [
@@ -2404,6 +2472,7 @@ mod tests {
             bytes_consumed: 0,
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
+            sound_stops: Vec::new(),
             attached_camera: None,
             player_controls: true,
             screen_fade: None,

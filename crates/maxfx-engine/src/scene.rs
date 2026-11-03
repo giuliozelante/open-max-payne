@@ -635,6 +635,8 @@ pub struct LdbScene {
     pub sound_catalogs: BTreeMap<String, String>,
     /// Sounds a verb asked to play. Dispatch only enqueues them.
     pub sound_queue: Vec<QueuedSound>,
+    /// Emitters whose sounds `A_StopAll3DSounds` stopped since the last frame.
+    pub sound_stops: Vec<String>,
     /// Dynamic mesh the view is attached to by `CAM_AttachToDO`, if any.
     pub attached_camera: Option<usize>,
     /// Cleared by `GM_SetPlayerControls(false)` during cutscenes.
@@ -675,6 +677,10 @@ pub struct QueuedSound {
     pub category: String,
     pub cue: String,
     pub filename: Option<String>,
+    /// The mesh or trigger that plays it, so `A_StopAll3DSounds` can stop it.
+    pub emitter: String,
+    /// `Looping = YES`: plays until its emitter is stopped or the level ends.
+    pub looping: bool,
 }
 
 /// One `Receiver->Verb(args);` call stored on an anim, FSM, or trigger.
@@ -846,6 +852,13 @@ impl LdbScene {
             }
             "fsm_randomize" => self.fsm_randomize(msg.receiver),
             "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
+            "a_stopall3dsounds" => match self.sound_emitter(context_name, msg.receiver) {
+                Some(emitter) => {
+                    self.sound_stops.push(emitter);
+                    true
+                }
+                None => false,
+            },
             "mphm_fadetocolor" => {
                 let colour = |i: usize| {
                     let arg = msg.args.get(i)?.trim();
@@ -962,11 +975,9 @@ impl LdbScene {
         if category.is_empty() || cue.is_empty() {
             return false;
         }
-        let resolved = self.resolve_trigger_mut(context_name, receiver).is_some()
-            || self.resolve_mesh_mut(context_name, receiver).is_some();
-        if !resolved {
+        let Some(emitter) = self.sound_emitter(context_name, receiver) else {
             return false;
-        }
+        };
         let catalog_loaded = self
             .sound_catalogs
             .keys()
@@ -979,12 +990,37 @@ impl LdbScene {
         if catalog_loaded && filename.is_none() {
             return false;
         }
+        let looping = self
+            .sound_catalogs
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(category))
+            .is_some_and(|(_, text)| crate::sound_cue_looping(text, cue));
         self.sound_queue.push(QueuedSound {
             category: category.to_string(),
             cue: cue.to_string(),
             filename,
+            emitter,
+            looping,
         });
         true
+    }
+
+    /// Full name of the trigger, mesh or FSM `receiver` names, if this scene stores it.
+    fn sound_emitter(&mut self, context_name: &str, receiver: &str) -> Option<String> {
+        if let Some(trigger) = self.resolve_trigger_mut(context_name, receiver) {
+            return Some(trigger.name.clone());
+        }
+        if let Some(mesh) = self.resolve_mesh_mut(context_name, receiver) {
+            return Some(mesh.name.clone());
+        }
+        // Floating FSMs emit sounds too (MaxED "dynamic entities"); `this` is the running FSM.
+        let fsm_name = if receiver.eq_ignore_ascii_case("this") {
+            context_name
+        } else {
+            receiver
+        };
+        self.fsm_index(fsm_name)
+            .map(|index| self.fsms[index].name.clone())
     }
 
     /// Advance the screen fade; a finished fade to a transparent colour goes away.
@@ -2507,6 +2543,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         bytes_consumed: i,
         sound_catalogs: BTreeMap::new(),
         sound_queue: Vec::new(),
+        sound_stops: Vec::new(),
         attached_camera: None,
         player_controls: true,
         screen_fade: None,
@@ -2609,6 +2646,7 @@ mod tests {
             bytes_consumed: 0,
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
+            sound_stops: Vec::new(),
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
@@ -3242,6 +3280,56 @@ mod tests {
         assert!(!res, "unparsed emitter receiver must fail closed");
         assert!(scene.triggers[0].enabled);
         assert!(scene.sound_queue.is_empty());
+    }
+
+    #[test]
+    fn looping_cues_queue_with_their_emitter_and_stop_all_stops_that_emitter() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let mut siren = crate::render3d::test_glass_quad(false);
+        siren.name = "::startroom::car::siren".into();
+        scene.dynamic_meshes.push(siren);
+        scene.sound_catalogs.insert(
+            "dynamic".into(),
+            "[Police_Wail_Siren_Close_Loop]\n{\n[Sound]\nFilename = dynamic\\cars\\Police_Wail_Siren_Close.wav;\nLooping = YES;\n}\n[door_wood_locked]\n{\n[Sound]\nFilename = dynamic\\door\\door_wood_locked3.wav;\n}\n"
+                .into(),
+        );
+        let ctx = "::startroom::car";
+        assert!(scene.dispatch_message(
+            ctx,
+            "::startroom::car::siren->a_play3dsound(dynamic, Police_Wail_Siren_Close_Loop, \"\");"
+        ));
+        assert!(scene.dispatch_message(
+            ctx,
+            "::startroom::car::siren->A_Play3DSound(dynamic, door_wood_locked, \"\");"
+        ));
+        assert_eq!(scene.sound_queue[0].emitter, "::startroom::car::siren");
+        assert!(scene.sound_queue[0].looping);
+        assert!(!scene.sound_queue[1].looping);
+        assert!(scene.dispatch_message(ctx, "::startroom::car::siren->a_stopall3dsounds(\"\");"));
+        assert_eq!(
+            scene.sound_stops,
+            vec!["::startroom::car::siren".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_floating_fsm_emits_its_own_sounds() {
+        // The startup intro's sirens are Floating FSMs (`::startroom::police_car1::siren`).
+        let mut scene = door_fsm_scene();
+        scene.fsms[0].name = "::startroom::police_car1::siren".into();
+        scene.sound_catalogs.insert(
+            "dynamic".into(),
+            "[siren_loop]\n{\n[Sound]\nFilename = dynamic\\cars\\siren.wav;\nLooping = YES;\n}\n"
+                .into(),
+        );
+        let fsm = "::startroom::police_car1::siren";
+        assert!(scene.dispatch_message(fsm, "this->A_Play3DSound(dynamic, siren_loop, \"\");"));
+        assert!(scene.dispatch_message(
+            "::startroom",
+            "::startroom::police_car1::siren->a_stopall3dsounds(\"\");"
+        ));
+        assert_eq!(scene.sound_queue[0].emitter, fsm);
+        assert_eq!(scene.sound_stops, vec![fsm.to_string()]);
     }
 
     #[test]
