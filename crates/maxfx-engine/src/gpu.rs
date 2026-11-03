@@ -805,16 +805,19 @@ impl GpuRenderer {
             }],
         });
 
-        let sampler = |address| {
+        let sampler = |address, filter| {
             device.create_sampler(&wgpu::SamplerDescriptor {
                 address_mode_u: address,
                 address_mode_v: address,
                 address_mode_w: address,
+                mag_filter: filter,
+                min_filter: filter,
                 ..Default::default()
             })
         };
-        let tex_sampler = sampler(wgpu::AddressMode::Repeat);
-        let lmap_sampler = sampler(wgpu::AddressMode::ClampToEdge);
+        let tex_sampler = sampler(wgpu::AddressMode::Repeat, wgpu::FilterMode::Nearest);
+        // `render3d::sample_lightmap`: lightmaps are filtered, so their shading is smooth.
+        let lmap_sampler = sampler(wgpu::AddressMode::ClampToEdge, wgpu::FilterMode::Linear);
         let binder = Binder {
             batch_layout,
             model_layout,
@@ -2025,6 +2028,49 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert!(gap <= 1, "{:06x} vs {:06x}", fb[center], sw_fb[center]);
+    }
+
+    #[test]
+    fn gpu_lightmap_filtering_matches_the_software_lightmap() {
+        // A black-to-white 2x1 lightmap stretched across the quad: both renderers blend it.
+        let mut poly = quad(7, 0);
+        for v in &mut poly.vertices {
+            v.luv = [(v.pos[2] + 1.0) * 0.5, 0.5];
+        }
+        let mut scene = scene_with(vec![poly], [0.0; 3]);
+        scene.lightmaps.push(crate::scene::DecodedLightmap {
+            width: 2,
+            height: 1,
+            pixels: vec![0x0000_0000, 0x00ff_ffff],
+        });
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!(
+                "no GPU adapter: gpu_lightmap_filtering_matches_the_software_lightmap skipped"
+            );
+            return;
+        };
+        let view = crate::render3d::test_view([-4.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        let (sw_fb, sw_zb) = crate::render3d::test_software_static(&scene, view);
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let mut fb = vec![0u32; w * h];
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
+        let row = (h / 2) * w;
+        let covered: Vec<usize> = (row..row + w).filter(|&i| sw_zb[i].is_finite()).collect();
+        assert!(covered.len() > 20, "the quad must cover the middle row");
+        let close = covered
+            .iter()
+            .filter(|&&i| {
+                (0..3).all(|k| {
+                    ((fb[i] >> (8 * k)) & 0xff).abs_diff((sw_fb[i] >> (8 * k)) & 0xff) <= 3
+                })
+            })
+            .count();
+        assert!(
+            close as f32 / covered.len() as f32 > 0.95,
+            "{close} of {}",
+            covered.len()
+        );
     }
 
     #[test]

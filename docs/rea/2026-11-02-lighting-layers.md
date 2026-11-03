@@ -348,3 +348,11 @@ particle effect data (`PS_RTParticleEmitter`, `0x77d08e` path) and are not read 
 2. ~~Do static point lights also add to lightmapped level polygons?~~ No (see above, house only).
 3. ~~Dynamic lights: do they enter level-object light lists?~~ Yes, after a shot (second capture above).
 4. Muzzle-flash light parameters (colour, range, lifetime) from the particle effect data behind `0x77d08e`.
+
+## Lightmap filtering (HYPOTHESIS, 2026-11-03)
+
+Both renderers sample lightmaps bilinearly, clamped to the edge (`render3d::sample_lightmap`, and the
+wgpu `lmap_sampler` with linear filtering). Nearest sampling showed each lightmap texel as a hard step.
+In the retail house, the owner sees the same shading change smoothly. The `FILTER_MODE` values passed
+to `addTextureLayer` (`0x1000000`, `0x5000000`) are not decoded, so this rests on that visual
+comparison. Diffuse textures keep nearest sampling until the filter values are read.

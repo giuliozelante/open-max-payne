@@ -1926,6 +1926,27 @@ fn player_mesh_yaw(look_yaw: f32) -> f32 {
 
 /// Lightmap layer `MUL` = `D3DTOP_MODULATE` (`e2_d3d8_driver_mfc` `0x10008082`): per channel
 /// `texture × lightmap / 255`, no overbright. Alpha bits are dropped.
+/// Bilinear lightmap texel at `(u, v)`, clamped to the edges (wgpu `ClampToEdge`, linear filter).
+/// HYPOTHESIS: retail filters lightmaps linearly; the `addTextureLayer` filter values (`0x1000000`,
+/// `0x5000000`) are not decoded, but the retail house shades smoothly.
+fn sample_lightmap(lm: &DecodedLightmap, u: f32, v: f32) -> u32 {
+    let (w, h) = (lm.width.max(1), lm.height.max(1));
+    let x = (u.clamp(0.0, 1.0) * w as f32 - 0.5).clamp(0.0, (w - 1) as f32);
+    let y = (v.clamp(0.0, 1.0) * h as f32 - 0.5).clamp(0.0, (h - 1) as f32);
+    let (x0, y0) = (x as u32, y as u32);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+    let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+    let texel = |tx: u32, ty: u32| lm.pixels.get((ty * w + tx) as usize).copied().unwrap_or(0);
+    let (c00, c10, c01, c11) = (texel(x0, y0), texel(x1, y0), texel(x0, y1), texel(x1, y1));
+    let channel = |shift: u32| {
+        let c = |p: u32| ((p >> shift) & 0xff) as f32;
+        let top = c(c00) + (c(c10) - c(c00)) * fx;
+        let bottom = c(c01) + (c(c11) - c(c01)) * fx;
+        ((top + (bottom - top) * fy).round() as u32) << shift
+    };
+    channel(16) | channel(8) | channel(0)
+}
+
 fn lightmap_modulate(texture: u32, lightmap: u32) -> u32 {
     let channel =
         |shift: u32| (((texture >> shift) & 0xff) * ((lightmap >> shift) & 0xff) / 255) << shift;
@@ -2611,14 +2632,10 @@ fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usi
             if let Some(lm) = lmap {
                 let lu = (w0 * p0.lu_over_z + w1 * p1.lu_over_z + w2 * p2.lu_over_z) * z;
                 let lv = (w0 * p0.lv_over_z + w1 * p1.lv_over_z + w2 * p2.lv_over_z) * z;
-                let lx = (lu.clamp(0.0, 1.0) * (lm.width - 1) as f32) as u32;
-                let ly = (lv.clamp(0.0, 1.0) * (lm.height - 1) as f32) as u32;
-                if let Some(&lcol) = lm.pixels.get((ly * lm.width + lx) as usize) {
-                    let lit = lightmap_modulate(base_rgb, lcol);
-                    r = ((lit >> 16) & 0xff) as f32;
-                    g = ((lit >> 8) & 0xff) as f32;
-                    b = (lit & 0xff) as f32;
-                }
+                let lit = lightmap_modulate(base_rgb, sample_lightmap(lm, lu, lv));
+                r = ((lit >> 16) & 0xff) as f32;
+                g = ((lit >> 8) & 0xff) as f32;
+                b = (lit & 0xff) as f32;
             } else {
                 let light = [0, 1, 2].map(|c| {
                     (w0 * p0.light_over_z[c] + w1 * p1.light_over_z[c] + w2 * p2.light_over_z[c])
@@ -3261,6 +3278,21 @@ mod tests {
         assert_eq!(picked.len(), 8);
         let xs: Vec<f32> = picked.iter().map(|l| l.pos[0]).collect();
         assert_eq!(xs, vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]);
+    }
+
+    #[test]
+    fn lightmaps_are_sampled_bilinearly() {
+        // Retail lightmaps shade smoothly; nearest sampling showed every texel as a hard step.
+        let lm = DecodedLightmap {
+            width: 2,
+            height: 1,
+            pixels: vec![0x0000_0000, 0x00ff_ffff],
+        };
+        // Texel centres at u = 0.25 and 0.75 (D3D/wgpu convention), clamped at the edges.
+        assert_eq!(sample_lightmap(&lm, 0.25, 0.5), 0x0000_0000);
+        assert_eq!(sample_lightmap(&lm, 0.75, 0.5), 0x00ff_ffff);
+        assert_eq!(sample_lightmap(&lm, 0.5, 0.5), 0x0080_8080);
+        assert_eq!(sample_lightmap(&lm, 1.0, 0.5), 0x00ff_ffff);
     }
 
     #[test]
