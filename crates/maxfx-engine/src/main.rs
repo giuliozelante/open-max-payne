@@ -695,10 +695,10 @@ fn play_level(
             music.play_mode(game_dir, "graphicnovelmode");
             maxfx_engine::menu_ui::show_novel_session(screen, &chrome, &shown);
         }
-        // `LevelOnInitMessages`: a level starts in silence; the startup intro keeps the menu
-        // theme, as the retail menu plays it over the same rooftop.
-        music.play_mode(game_dir, "gamemode");
     }
+    // `LevelOnInitMessages`: every level starts in silence, the startup intro included (owner
+    // check against retail, 2026-11-03: New Game stops the menu theme).
+    music.play_mode(game_dir, "gamemode");
     let mut scene = maxfx_engine::scene::parse_ldb_scene(&bytes)
         .ok_or_else(|| format!("{win} did not decode"))?;
     let entry = maxfx_engine::level_entry(game_dir, level_id).ok();
