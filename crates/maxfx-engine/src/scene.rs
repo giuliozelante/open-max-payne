@@ -629,6 +629,32 @@ pub struct LdbScene {
     pub attached_camera: Option<usize>,
     /// Cleared by `GM_SetPlayerControls(false)` during cutscenes.
     pub player_controls: bool,
+    /// Full-screen colour from `MPHM_FadeToColor`, if any.
+    pub screen_fade: Option<ScreenFade>,
+}
+
+/// `MPHM_FadeToColor(from, to, seconds)`: colours are `0xRRGGBBAA`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenFade {
+    pub from: [u8; 4],
+    pub to: [u8; 4],
+    pub duration: f32,
+    pub elapsed: f32,
+}
+
+impl ScreenFade {
+    /// `[r, g, b, a]` now, held at `to` once the fade is over.
+    pub fn color(&self) -> [u8; 4] {
+        let t = if self.duration > 0.0 {
+            (self.elapsed / self.duration).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        std::array::from_fn(|i| {
+            let (a, b) = (f32::from(self.from[i]), f32::from(self.to[i]));
+            (a + (b - a) * t).round() as u8
+        })
+    }
 }
 
 /// One `A_Play3DSound` accepted by a mesh or trigger that this scene actually stores.
@@ -808,6 +834,27 @@ impl LdbScene {
             }
             "fsm_randomize" => self.fsm_randomize(msg.receiver),
             "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
+            "mphm_fadetocolor" => {
+                let colour = |i: usize| {
+                    let arg = msg.args.get(i)?.trim();
+                    let hex = arg.strip_prefix("0x").or_else(|| arg.strip_prefix("0X"))?;
+                    u32::from_str_radix(hex, 16).ok().map(u32::to_be_bytes)
+                };
+                let (Some(from), Some(to), Some(duration)) = (
+                    colour(0),
+                    colour(1),
+                    msg.args.get(2).and_then(|a| a.trim().parse::<f32>().ok()),
+                ) else {
+                    return false;
+                };
+                self.screen_fade = Some(ScreenFade {
+                    from,
+                    to,
+                    duration,
+                    elapsed: 0.0,
+                });
+                true
+            }
             "gm_setplayercontrols" => {
                 self.player_controls = match msg.args.first().copied().unwrap_or("").trim() {
                     "true" | "1" => true,
@@ -918,6 +965,17 @@ impl LdbScene {
             filename,
         });
         true
+    }
+
+    /// Advance the screen fade; a finished fade to a transparent colour goes away.
+    pub fn step_screen_fade(&mut self, dt: f32) {
+        let Some(fade) = self.screen_fade.as_mut() else {
+            return;
+        };
+        fade.elapsed += dt;
+        if fade.elapsed >= fade.duration && fade.to[3] == 0 {
+            self.screen_fade = None;
+        }
     }
 
     /// Run startup `DO_SetHitpoints` calls. Other startup verbs stay untouched.
@@ -2412,6 +2470,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         sound_queue: Vec::new(),
         attached_camera: None,
         player_controls: true,
+        screen_fade: None,
     })
 }
 
@@ -2663,6 +2722,7 @@ mod tests {
             sound_queue: Vec::new(),
             attached_camera: None,
             player_controls: true,
+            screen_fade: None,
         }
     }
 
@@ -3532,6 +3592,32 @@ mod tests {
         assert!(!scene.player_controls);
         assert!(scene.dispatch_message("", "MaxPayne_GameMode->gm_setplayercontrols(true);"));
         assert!(scene.player_controls);
+    }
+
+    #[test]
+    fn mphm_fade_to_color_ramps_rrggbbaa_and_holds_the_target() {
+        // `::finito::camera2` track 2 ends with `MPHM_FadeToColor(0x0, 0x000000ff, 0.4)`.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        assert!(scene.dispatch_message(
+            "",
+            "maxpayne_hudmode->MPHM_FadeToColor(0x0, 0x000000ff, 0.4);"
+        ));
+        assert_eq!(scene.screen_fade.map(|f| f.color()), Some([0, 0, 0, 0]));
+        scene.step_screen_fade(0.2);
+        assert_eq!(scene.screen_fade.map(|f| f.color()), Some([0, 0, 0, 128]));
+        scene.step_screen_fade(1.0);
+        assert_eq!(scene.screen_fade.map(|f| f.color()), Some([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn mphm_fade_to_transparent_clears_the_fade_when_done() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        assert!(scene.dispatch_message(
+            "",
+            "maxpayne_hudmode->mphm_fadetocolor(0x000000ff, 0x0, 0.5);"
+        ));
+        scene.step_screen_fade(0.6);
+        assert_eq!(scene.screen_fade, None);
     }
 
     #[test]
