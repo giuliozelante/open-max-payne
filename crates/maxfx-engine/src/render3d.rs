@@ -518,10 +518,10 @@ pub fn run_3d_walkthrough(
         let (sp, cp) = pitch.sin_cos();
 
         // Compute camera position (3rd-person over-the-shoulder vs 1st-person)
-        let cam_right = [cy, 0.0, -sy];
-        let cam_up = [-sy * sp, cp, -cy * sp];
-        let cam_fwd = [sy * cp, sp, cy * cp];
-        let cam_pos = if third_person && !fly_mode {
+        let mut cam_right = [cy, 0.0, -sy];
+        let mut cam_up = [-sy * sp, cp, -cy * sp];
+        let mut cam_fwd = [sy * cp, sp, cy * cp];
+        let mut cam_pos = if third_person && !fly_mode {
             let mut dist = CHASE_BACK;
             while dist > 0.45 {
                 let cand = chase_eye(player_pos, cam_fwd, dist);
@@ -534,6 +534,9 @@ pub fn run_3d_walkthrough(
         } else {
             player_pos
         };
+        if let Some((pos, right, up, fwd)) = attached_view(&scene, &room_origins) {
+            (cam_pos, cam_right, cam_up, cam_fwd) = (pos, right, up, fwd);
+        }
 
         let fov_scale = (H as f32) * 0.85;
         // World sphere (house = sunset) or the flat ceiling when the level names none.
@@ -1049,6 +1052,30 @@ fn dynamic_world(
         .unwrap_or([0.0; 3]);
     let (mat, pos) = scene.dynamic_world_pose(idx);
     (mat, [ro[0] + pos[0], ro[1] + pos[1], ro[2] + pos[2]])
+}
+
+/// Eye position, right, up, forward.
+type View = ([f32; 3], [f32; 3], [f32; 3], [f32; 3]);
+
+/// Eye, right, up and forward of the `CAM_AttachToDO` mesh: forward is its +z axis (as the
+/// startup flyover), up its y axis, right = up × forward like the player camera.
+fn attached_view(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>) -> Option<View> {
+    let idx = scene.attached_camera?;
+    scene.dynamic_meshes.get(idx)?;
+    let (mat, pos) = dynamic_world(scene, idx, rooms);
+    let fwd = normalize(xform_dir(mat, [0.0, 0.0, 1.0]));
+    let up = normalize(xform_dir(mat, [0.0, 1.0, 0.0]));
+    let right = [
+        up[1] * fwd[2] - up[2] * fwd[1],
+        up[2] * fwd[0] - up[0] * fwd[2],
+        up[0] * fwd[1] - up[1] * fwd[0],
+    ];
+    Some((pos, right, up, fwd))
+}
+
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1.0e-6);
+    [v[0] / len, v[1] / len, v[2] / len]
 }
 
 fn xform_dir(mat: [f32; 9], v: [f32; 3]) -> [f32; 3] {
@@ -1932,6 +1959,7 @@ mod tests {
             bytes_consumed: 0,
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
+            attached_camera: None,
         }
     }
 
@@ -1999,6 +2027,30 @@ mod tests {
         assert!(hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
         scene.dynamic_meshes[0].polys[0].material_id = 2;
         assert!(!hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+    }
+
+    #[test]
+    fn attached_camera_looks_along_the_do_z_axis() {
+        // The four house cutscene cameras (`::entrance05::camera1`, `::startroom::camera2`,
+        // `::entrance06::camera2`, `::Bathroom::camera2`) frame their rooms along +z; along -z
+        // they face a wall (offline frames, docs/rea/2026-11-02-camera-attach-to-do.md).
+        let mut scene = empty_scene();
+        let mut cam = glass_quad(false);
+        // Yaw 90 degrees: local z points along world +x.
+        cam.world_mat = [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0];
+        cam.local_start_mat = cam.world_mat;
+        cam.world_pos = [2.0, 1.5, -3.0];
+        cam.local_start_pos = cam.world_pos;
+        scene.dynamic_meshes.push(cam);
+        let rooms = BTreeMap::new();
+        assert!(attached_view(&scene, &rooms).is_none());
+        scene.attached_camera = Some(0);
+        let (pos, right, up, fwd) = attached_view(&scene, &rooms).expect("attached");
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
+        assert!(close(pos, [2.0, 1.5, -3.0]), "{pos:?}");
+        assert!(close(fwd, [1.0, 0.0, 0.0]), "{fwd:?}");
+        assert!(close(up, [0.0, 1.0, 0.0]), "{up:?}");
+        assert!(close(right, [0.0, 0.0, -1.0]), "{right:?}");
     }
 
     #[test]
