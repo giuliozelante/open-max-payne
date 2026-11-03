@@ -941,6 +941,23 @@ impl LdbScene {
         }
     }
 
+    /// Startup `FSM_Send` only (door locks, ceiling fans). Other startup verbs stay untouched.
+    pub fn apply_startup_sends(&mut self) {
+        let scripts: Vec<(String, String)> = self
+            .fsms
+            .iter()
+            .flat_map(|fsm| {
+                fsm.startup_actions.iter().filter_map(|act| {
+                    let verb = Message::parse(act)?.verb.to_ascii_lowercase();
+                    (verb == "fsm_send").then(|| (fsm.name.clone(), act.clone()))
+                })
+            })
+            .collect();
+        for (name, act) in scripts {
+            self.dispatch_message(&name, &act);
+        }
+    }
+
     /// Subtract `amount` from a mesh that has hit points. At zero, run its `DO_OnDeath` hook.
     pub fn damage_mesh(&mut self, index: usize, amount: i32) -> bool {
         let Some(mesh) = self.dynamic_meshes.get_mut(index) else {
@@ -3393,6 +3410,16 @@ mod tests {
         scene.fsms[0].state = "open".into();
         assert!(scene.dispatch_hook("::startroom::door", "T_Activate"));
         assert!(!scene.dynamic_meshes[0].hidden);
+    }
+
+    #[test]
+    fn startup_fsm_send_runs_the_command() {
+        let mut scene = door_fsm_scene();
+        scene.fsms[0]
+            .startup_actions
+            .push("::startroom::door->FSM_Send(toggle);".into());
+        scene.apply_startup_sends();
+        assert!(scene.dynamic_meshes[0].hidden);
     }
 
     #[test]

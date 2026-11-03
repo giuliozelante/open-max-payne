@@ -241,6 +241,7 @@ pub fn run_3d_walkthrough(
     scene.apply_startup_hitpoints();
     scene.apply_startup_hides();
     scene.apply_startup_enables();
+    scene.apply_startup_sends();
     let mut break_voice: Option<Child> = None;
 
     let mut fb = vec![0u32; W * H];
