@@ -3926,6 +3926,20 @@ mod tests {
     }
 
     #[test]
+    fn retail_music_cues_say_whether_they_loop() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        let Some(music) = read_game_bytes(&game, r"\data\database\music\music.txt") else {
+            return;
+        };
+        let music = String::from_utf8_lossy(&music);
+        assert!(sound_cue_looping(&music, "old_building"));
+        assert!(!sound_cue_looping(&music, "empty"));
+    }
+
+    #[test]
     fn parse_levels_txt_reads_ambient_color_through_defines() {
         let txt = r#"
 #define 	AMBIENT_R		32

@@ -258,6 +258,8 @@ pub fn run_3d_walkthrough(
         }
     );
     let mut sounds = SoundChannels::default();
+    // Level scripts' `A_PlayMusic`; dropped (stopped) when the level ends.
+    let mut music = crate::menu_ui::Music::default();
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
@@ -538,6 +540,9 @@ pub fn run_3d_walkthrough(
         scene.step_screen_fade(base_dt);
         // Scripted sounds (sirens, the chopper) start and stop with the scripts.
         play_queued_sounds(&mut scene, &catalog_root(level_path), &mut sounds);
+        if let Some(cue) = scene.music_request.take() {
+            music.play_cue(&catalog_root(level_path), &cue);
+        }
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
 
@@ -2519,6 +2524,7 @@ mod tests {
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
             sound_stops: Vec::new(),
+            music_request: None,
             attached_camera: None,
             player_controls: true,
             screen_fade: None,

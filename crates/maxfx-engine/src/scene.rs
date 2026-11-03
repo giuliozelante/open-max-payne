@@ -640,6 +640,8 @@ pub struct LdbScene {
     pub sound_queue: Vec<QueuedSound>,
     /// Emitters whose sounds `A_StopAll3DSounds` stopped since the last frame.
     pub sound_stops: Vec<String>,
+    /// Last `maxpayne_gamemode->A_PlayMusic(cue)` not yet played; `""` stops the music.
+    pub music_request: Option<String>,
     /// Dynamic mesh the view is attached to by `CAM_AttachToDO`, if any.
     pub attached_camera: Option<usize>,
     /// Cleared by `GM_SetPlayerControls(false)` during cutscenes.
@@ -858,6 +860,15 @@ impl LdbScene {
             }
             "fsm_randomize" => self.fsm_randomize(msg.receiver),
             "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
+            // Every retail call goes to `maxpayne_gamemode`; the game mode owns the music.
+            "a_playmusic" => {
+                let cue = msg
+                    .args
+                    .first()
+                    .map_or("", |a| a.trim().trim_matches('"').trim());
+                self.music_request = Some(cue.to_string());
+                true
+            }
             "a_stopall3dsounds" => match self.sound_emitter(context_name, msg.receiver) {
                 Some(emitter) => {
                     self.sound_stops.push(emitter);
@@ -2551,6 +2562,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         sound_catalogs: BTreeMap::new(),
         sound_queue: Vec::new(),
         sound_stops: Vec::new(),
+        music_request: None,
         attached_camera: None,
         player_controls: true,
         screen_fade: None,
@@ -2655,6 +2667,7 @@ mod tests {
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
             sound_stops: Vec::new(),
+            music_request: None,
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
@@ -3344,6 +3357,15 @@ mod tests {
             scene.sound_stops,
             vec!["::startroom::car::siren".to_string()]
         );
+    }
+
+    #[test]
+    fn a_play_music_requests_the_cue_and_an_empty_cue_stops() {
+        let mut scene = door_fsm_scene();
+        assert!(scene.dispatch_message("::x", "maxpayne_gamemode->a_playmusic(old_building);"));
+        assert_eq!(scene.music_request.as_deref(), Some("old_building"));
+        assert!(scene.dispatch_message("::x", "maxpayne_gamemode->A_PlayMusic(\"\");"));
+        assert_eq!(scene.music_request.as_deref(), Some(""));
     }
 
     #[test]

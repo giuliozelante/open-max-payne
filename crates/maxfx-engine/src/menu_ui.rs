@@ -111,6 +111,11 @@ impl Music {
         self.play(game_dir, cue.as_deref());
     }
 
+    /// Play a `music.txt` cue from a level script; `""` stops the music.
+    pub fn play_cue(&mut self, game_dir: &std::path::Path, cue: &str) {
+        self.play(game_dir, Some(cue).filter(|cue| !cue.is_empty()));
+    }
+
     fn play(&mut self, game_dir: &std::path::Path, cue: Option<&str>) {
         if self.cue.as_deref() == cue {
             return;
@@ -120,8 +125,10 @@ impl Music {
         let Some(cue) = cue else {
             return;
         };
-        let wav = crate::read_game_bytes(game_dir, r"\data\database\music\music.txt")
-            .and_then(|bytes| crate::music_win_path(&String::from_utf8_lossy(&bytes), cue))
+        let music_txt = crate::read_game_bytes(game_dir, r"\data\database\music\music.txt")
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        let wav = crate::music_win_path(&music_txt, cue)
             .and_then(|win| crate::read_game_bytes(game_dir, &win));
         let Some(wav) = wav else {
             eprintln!("music {cue}: not found");
@@ -132,7 +139,10 @@ impl Music {
             return;
         }
         self.child = Command::new("ffplay")
-            .args(crate::render3d::sound_player_args(&path, true))
+            .args(crate::render3d::sound_player_args(
+                &path,
+                crate::sound_cue_looping(&music_txt, cue),
+            ))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
