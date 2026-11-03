@@ -10,7 +10,7 @@
 
 use crate::kf2::{load_character_rigs, load_skin_body, pose_mesh, CharacterRig, KfsFace};
 use crate::scene::{
-    decode_texture_blob, material_policy, CameraFlyover, DecodedLightmap, DecodedTexture, LdbScene,
+    decode_texture_blob, material_policy, DecodedLightmap, DecodedTexture, LdbScene,
     MaterialPolicy, ScenePointLight, ScenePoly, SceneVertex,
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
@@ -90,7 +90,7 @@ pub fn run_3d_walkthrough(
     player_start: Option<&str>,
     player_skin: Option<&str>,
     world_sphere: Option<&str>,
-    shot: Option<CameraFlyover>,
+    cinematic: bool,
 ) -> Result<(), String> {
     // Hardware: a resizable winit window with a wgpu swapchain. Software (or no GPU): minifb.
     let mut winit_window = if hardware_renderer() {
@@ -236,7 +236,6 @@ pub fn run_3d_walkthrough(
     let mut wireframe = false;
     let mut last_mouse: Option<(f32, f32)> = None;
     let mut anim_clock = 0.0f32;
-    let mut shot_clock = 0.0f32;
     println!(
         "  3D Engine: Spawned ({} actors, {} skins, player={}, sky={}) | WASD move, Mouse/Arrows look, F/Ctrl shoot, B/RightClick Bullet-Time, E interact, V 3rd/1st person, Tab next spawn, G fly/walk",
         enemies.len(),
@@ -258,6 +257,12 @@ pub fn run_3d_walkthrough(
     scene.apply_startup_hides();
     scene.apply_startup_enables();
     scene.apply_startup_sends();
+    scene.apply_startup_animates();
+    if cinematic {
+        // The scripts own the camera; the player body stays where the level puts it (Max with the
+        // sniper rifle on the rooftop in the startup intro).
+        scene.player_controls = false;
+    }
     // Built after the material surfaces, so batches follow the draw policies.
     let mut gpu = winit_window
         .as_ref()
@@ -296,10 +301,12 @@ pub fn run_3d_walkthrough(
         if !window.is_open() || window.is_key_down(Key::Escape) {
             break;
         }
-        if let Some(shot) = shot.as_ref() {
-            if shot_clock >= shot.duration || window.is_key_pressed(Key::Space, KeyRepeat::No) {
-                break;
-            }
+        // A cinematic level (the startup intro) runs on its own scripts and ends when they ask
+        // for the graphic novel (`S_ModeSwitch`); Space skips it.
+        if cinematic
+            && (scene.mode_switch.is_some() || window.is_key_pressed(Key::Space, KeyRepeat::No))
+        {
+            break;
         }
         if window.is_key_pressed(Key::V, KeyRepeat::No) {
             third_person = !third_person;
@@ -558,15 +565,6 @@ pub fn run_3d_walkthrough(
             }
         }
 
-        if let Some(shot) = shot.as_ref() {
-            let (pos, fwd) = shot.pose(shot_clock);
-            player_pos = pos;
-            let horiz = (fwd[0] * fwd[0] + fwd[2] * fwd[2]).sqrt().max(0.001);
-            pitch = fwd[1].atan2(horiz);
-            yaw = fwd[0].atan2(fwd[2]);
-            third_person = false;
-            shot_clock += base_dt;
-        }
         scene.step_dynamic_anims(base_dt);
         scene.step_screen_fade(base_dt);
         let (sy, cy) = yaw.sin_cos();
@@ -797,7 +795,7 @@ pub fn run_3d_walkthrough(
         };
         let cx = W / 2;
         let cy_scr = H / 2;
-        for d in -4i32..=4 {
+        for d in (-4i32..=4).filter(|_| crosshair_visible(&scene)) {
             fb[cy_scr * W + (cx as i32 + d) as usize] = cross_col;
             fb[(cy_scr as i32 + d) as usize * W + cx] = cross_col;
         }
@@ -1292,6 +1290,11 @@ pub fn write_ppm(path: &Path, w: usize, h: usize, fb: &[u32]) -> std::io::Result
     std::fs::write(path, out)
 }
 
+/// The HUD crosshair is hidden while a cutscene camera owns the view.
+fn crosshair_visible(scene: &LdbScene) -> bool {
+    scene.attached_camera.is_none()
+}
+
 /// Eye position, right, up, forward.
 type View = ([f32; 3], [f32; 3], [f32; 3], [f32; 3]);
 
@@ -1671,6 +1674,7 @@ fn render_kfs_character(
                     lmap: None,
                     write_z: true,
                     depth_bias: 0.0,
+                    blended: false,
                 });
             }
         }
@@ -1885,6 +1889,7 @@ fn draw_poly<'a>(
                 lmap,
                 write_z: policy.writes_z,
                 depth_bias: policy.detail_offset as f32 * DETAIL_OFFSET_M,
+                blended: alpha_reference.is_some() && material.is_some_and(|m| m.blended),
             });
         }
     }
@@ -1931,6 +1936,8 @@ struct QueuedTri<'a> {
     lmap: Option<&'a DecodedLightmap>,
     write_z: bool,
     depth_bias: f32,
+    /// Mix with the frame by texel alpha after the alpha test (`BlendedAlphaTest`).
+    blended: bool,
 }
 
 /// Rasterise `tris` in order. With more than one thread the frame is split into row bands and
@@ -2054,6 +2061,13 @@ fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usi
                 b *= light[2];
             }
 
+            if t.blended {
+                let a = ((base_rgb >> 24) & 0xff) as f32 / 255.0;
+                let dst = fb[idx];
+                r = r * a + ((dst >> 16) & 0xff) as f32 * (1.0 - a);
+                g = g * a + ((dst >> 8) & 0xff) as f32 * (1.0 - a);
+                b = b * a + (dst & 0xff) as f32 * (1.0 - a);
+            }
             let ri = (r.min(255.0) as u32) << 16;
             let gi = (g.min(255.0) as u32) << 8;
             let bi = b.min(255.0) as u32;
@@ -2472,6 +2486,7 @@ mod tests {
             player_controls: true,
             screen_fade: None,
             ambient: [0.0; 3],
+            mode_switch: None,
         }
     }
 
@@ -2494,6 +2509,7 @@ mod tests {
                 texture_path: String::new(),
                 texture_index: None,
                 alpha_reference: None,
+                blended: false,
             },
         );
         scene.materials.insert(
@@ -2504,6 +2520,7 @@ mod tests {
                 texture_path: String::new(),
                 texture_index: None,
                 alpha_reference: None,
+                blended: false,
             },
         );
         let quad = ScenePoly {
@@ -2665,6 +2682,8 @@ mod tests {
                     lmap: None,
                     write_z: k % 3 != 0,
                     depth_bias: 0.0,
+                    // Blending reads the frame, so it also has to keep the per-pixel order.
+                    blended: k % 8 == 0,
                 });
             }
         }
@@ -2684,6 +2703,15 @@ mod tests {
                 .all(|(a, b)| a.to_bits() == b.to_bits()),
             "depth differs between serial and parallel"
         );
+    }
+
+    #[test]
+    fn crosshair_is_hidden_while_a_cutscene_camera_is_attached() {
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(glass_quad(false));
+        assert!(crosshair_visible(&scene));
+        scene.attached_camera = Some(0);
+        assert!(!crosshair_visible(&scene));
     }
 
     #[test]
@@ -2734,12 +2762,70 @@ mod tests {
                 texture_path: String::new(),
                 texture_index: Some(0),
                 alpha_reference: Some(15),
+                blended: false,
             },
         );
         scene.dynamic_meshes.push(glass_quad(false));
         assert_eq!(painted_pixels(&scene), 0, "alpha 14 fails reference 15");
         scene.textures[0].pixels[0] = 0x0f80_8080;
         assert!(painted_pixels(&scene) > 0, "alpha 15 passes reference 15");
+    }
+
+    /// A white texel of `alpha` on the glass quad, its material blended or cut out.
+    fn masked_quad_scene(alpha: u32, blended: bool) -> LdbScene {
+        let mut scene = empty_scene();
+        scene.textures.push(DecodedTexture {
+            path: "plate".into(),
+            flag: 4,
+            width: 1,
+            height: 1,
+            pixels: vec![(alpha << 24) | 0x00ff_ffff],
+        });
+        scene.materials.insert(
+            1,
+            SceneMaterial {
+                id: 1,
+                category: "externalwall".into(),
+                texture_path: String::new(),
+                texture_index: Some(0),
+                alpha_reference: Some(15),
+                blended,
+            },
+        );
+        scene.dynamic_meshes.push(glass_quad(false));
+        scene
+    }
+
+    fn centre_pixel(scene: &LdbScene) -> u32 {
+        let mut fb = vec![0u32; W * H];
+        let mut zb = vec![f32::INFINITY; W * H];
+        draw_dynamic_meshes(
+            scene,
+            &BTreeMap::new(),
+            [-4.0, 1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            (H as f32) * 0.85,
+            false,
+            false,
+            &mut fb,
+            &mut zb,
+        );
+        fb[(H / 2) * W + W / 2]
+    }
+
+    #[test]
+    fn blended_texels_mix_with_the_frame_by_their_alpha() {
+        // BlendedAlphaTest: past the alpha test, colour = src * a + dst * (1 - a). Over a black
+        // frame, alpha 128 gives half the cut-out colour (within rounding).
+        let opaque = centre_pixel(&masked_quad_scene(128, false));
+        let blended = centre_pixel(&masked_quad_scene(128, true));
+        assert!(opaque != 0, "the quad must draw");
+        for shift in [0, 8, 16] {
+            let (o, b) = ((opaque >> shift) & 0xff, (blended >> shift) & 0xff);
+            assert!(b.abs_diff(o * 128 / 255) <= 1, "{shift}: {o} -> {b}");
+        }
     }
 
     #[test]

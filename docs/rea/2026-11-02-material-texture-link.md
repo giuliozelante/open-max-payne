@@ -62,4 +62,16 @@ record stores `0e 00`.
 setting is **7 = `D3DCMP_GREATEREQUAL`** (`0x100353f8`, next to `D3DRS_ALPHAREF = 0x7f`; also
 `0x1002871a`). The other two sites restore saved state. So a texel passes when `alpha >= AlphaReference`.
 
-UNKNOWN: how `BlendedAlphaTest` blends.
+**VERIFIED (static, `MaxPayne.exe`):** the `BlendedAlphaTest` key string sits at `0x880ec8`; the
+category reader `0x52dd16` stores it in the surface table `0x8ad398` at record `+0x20`.
+
+**STRONGLY SUPPORTED (official MaxED tutorial, "Alpha test"):** with alpha test on, texels below the
+reference are cut and texels between the reference and 255 "are semi-transparent as usual", while the
+polygons still sort with the Z-buffer. The tutorial pictures show a plant blending with the background
+at reference 128 and none at 254. The engine therefore reads `BlendedAlphaTest = TRUE` as alpha test
+plus `src·a + dst·(1−a)` blending, with depth writes kept. `[Leaves]` (FALSE) stays a hard cut-out.
+Both renderers implement it (`render3d::raster_band`, `gpu.rs` `ALPHA_BLENDING` pipelines).
+
+UNKNOWN: the driver-side consumer of record `+0x20` (the D3D blend states it sets) has not been
+traced. The same tutorial describes additive (`A`) and multiplicative (`M`) blending as per-polygon
+qualities; the engine does not decode those polygon flags yet.

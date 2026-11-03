@@ -468,7 +468,7 @@ fn main() -> ExitCode {
                                     None,
                                     None,
                                     None,
-                                    None,
+                                    false,
                                 ) {
                                     eprintln!("3D walkthrough error: {e}");
                                     return ExitCode::FAILURE;
@@ -651,8 +651,8 @@ fn launch_startup(game_dir: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// One menu level. `startup_level` plays the rotator camera tracks, then the
-/// comic page, then the next level. Escape or Space skips the tracks.
+/// One menu level. `startup_level` runs its own intro scripts (cutscene cameras) until they
+/// switch to the graphic novel, then the comic page, then the next level. Space skips the intro.
 fn play_level(game_dir: &Path, level_id: &str, allow_handoff: bool) -> Result<(), String> {
     let (win, bytes) =
         maxfx_engine::load_level_by_id(game_dir, level_id).map_err(|e| e.to_string())?;
@@ -679,11 +679,6 @@ fn play_level(game_dir: &Path, level_id: &str, allow_handoff: bool) -> Result<()
     let player_skin = entry.as_ref().and_then(|entry| entry.player_skin.clone());
     let world_sphere = entry.as_ref().and_then(|entry| entry.world_sphere.clone());
     let title = format!("Open Max Payne — {level_id}");
-    let shot = if handoff.is_some() {
-        maxfx_engine::scene::camera_flyover(&scene)
-    } else {
-        None
-    };
     maxfx_engine::render3d::run_3d_walkthrough(
         scene,
         game_dir,
@@ -691,7 +686,7 @@ fn play_level(game_dir: &Path, level_id: &str, allow_handoff: bool) -> Result<()
         player_start.as_deref(),
         player_skin.as_deref(),
         world_sphere.as_deref(),
-        shot,
+        handoff.is_some(),
     )?;
     if let Some(hand) = handoff {
         println!(
