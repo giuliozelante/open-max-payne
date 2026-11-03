@@ -686,6 +686,7 @@ pub fn run_3d_walkthrough(
                     characters.push(crate::gpu::GpuCharacter {
                         mesh: &erig.mesh,
                         verts,
+                        dead: en.health <= 0,
                         light,
                     });
                 }
@@ -715,6 +716,7 @@ pub fn run_3d_walkthrough(
                 characters.push(crate::gpu::GpuCharacter {
                     mesh: &prig.mesh,
                     verts,
+                    dead: false,
                     light,
                 });
             }
@@ -2152,6 +2154,33 @@ pub(crate) fn character_world_verts(
         .collect()
 }
 
+/// Unit front normal of a posed character triangle. KFS fronts are wound so that
+/// `(b - a) x (c - a)` points out of the mesh (188 of 193 head triangles of `Payne_Max_L0`).
+/// Zero for dead bodies, whose lie-flat placement mirrors the mesh: they are drawn two-sided.
+pub(crate) fn character_face_normal(
+    world: &[[f32; 3]],
+    [a, b, c]: [usize; 3],
+    dead: bool,
+) -> [f32; 3] {
+    let (Some(&a), Some(&b), Some(&c)) = (world.get(a), world.get(b), world.get(c)) else {
+        return [0.0; 3];
+    };
+    if dead {
+        return [0.0; 3];
+    }
+    let (e1, e2) = (sub3(b, a), sub3(c, a));
+    let n = [
+        e1[1] * e2[2] - e1[2] * e2[1],
+        e1[2] * e2[0] - e1[0] * e2[2],
+        e1[0] * e2[1] - e1[1] * e2[0],
+    ];
+    let len = dot3(n, n).sqrt();
+    if len < 1e-12 {
+        return [0.0; 3];
+    }
+    n.map(|x| x / len)
+}
+
 /// Per-vertex diffuse of a posed character: the retail point-light selection and D3D diffuse
 /// (#37), or a flat 1.35 while a hit flash lasts.
 pub(crate) fn character_vertex_light(
@@ -2235,6 +2264,10 @@ fn render_kfs_character(
             continue;
         }
         if c0[2] > FAR_Z && c1[2] > FAR_Z && c2[2] > FAR_Z {
+            continue;
+        }
+        let n = character_face_normal(&world, face.indices, dead);
+        if !wireframe && dot3(sub3(world[i0], cam_pos), n) >= 0.05 {
             continue;
         }
         let cam_verts = [

@@ -391,6 +391,8 @@ struct CharacterCache {
 pub struct GpuCharacter<'a> {
     pub mesh: &'a KfsMesh,
     pub verts: Vec<[f32; 3]>,
+    /// Lying dead: drawn two-sided (`character_face_normal`).
+    pub dead: bool,
     /// Per-vertex diffuse from `character_vertex_light`.
     pub light: Vec<[f32; 3]>,
 }
@@ -482,12 +484,12 @@ impl ModelUniform {
         }
     }
 
-    /// Identity placement, no culling, per-vertex light (characters).
+    /// Identity placement, back-face cull, per-vertex light (characters).
     fn vertex_lit() -> Self {
         let mut m = Self::new(
             [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             [0.0; 3],
-            false,
+            true,
         );
         m.flags[1] = 1.0;
         m
@@ -1342,6 +1344,9 @@ impl GpuRenderer {
             for face in &ch.mesh.faces {
                 let material = face.mat_index.min(materials - 1);
                 let out = by_material.entry(material).or_default();
+                let normal =
+                    crate::render3d::character_face_normal(&ch.verts, face.indices, ch.dead);
+                let cull_ref = ch.verts.get(face.indices[0]).copied().unwrap_or([0.0; 3]);
                 for (k, &i) in face.indices.iter().enumerate() {
                     let Some(&pos) = ch.verts.get(i) else {
                         continue;
@@ -1350,8 +1355,8 @@ impl GpuRenderer {
                         pos,
                         uv: face.uvs[k],
                         luv: [0.5, 0.5],
-                        cull_ref: pos,
-                        normal: [0.0; 3],
+                        cull_ref,
+                        normal,
                         light: ch.light.get(i).copied().unwrap_or([1.0; 3]),
                     });
                 }
@@ -1811,13 +1816,49 @@ mod tests {
                     [0.5, 1.8, 0.0],
                     [-0.5, 1.8, 0.0],
                 ],
-                faces: vec![face([0, 1, 2]), face([0, 2, 3])],
+                // Wound so that (b - a) x (c - a) = -z, the KFS front.
+                faces: vec![face([0, 2, 1]), face([0, 3, 2])],
                 material_textures: vec![None],
             },
             skin: None,
             idle: None,
             walk: None,
             bind: None,
+        }
+    }
+
+    #[test]
+    fn characters_hide_their_back_faces() {
+        // A camera inside Max's head saw the inside of his face. KFS fronts are wound so that
+        // (b - a) x (c - a) points out of the mesh (188 of 193 head triangles of Payne_Max_L0).
+        let rig = quad_rig();
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let front = crate::render3d::test_view([0.0, 1.0, -3.0], [0.0, 0.0, 1.0]);
+        let back = crate::render3d::test_view([0.0, 1.0, 3.0], [0.0, 0.0, -1.0]);
+        let covered = |zb: &[f32]| zb.iter().filter(|z| z.is_finite()).count();
+        let (_, sw_front) = crate::render3d::test_software_character(&rig, [0.0; 3], false, front);
+        let (_, sw_back) = crate::render3d::test_software_character(&rig, [0.0; 3], false, back);
+        assert!(covered(&sw_front) > 1000, "software front");
+        assert_eq!(covered(&sw_back), 0, "software back");
+        let scene = crate::render3d::test_empty_scene();
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: characters_hide_their_back_faces GPU half skipped");
+            return;
+        };
+        for (view, want_drawn) in [(front, true), (back, false)] {
+            let verts =
+                crate::render3d::character_world_verts(&rig, [0.0; 3], 0.0, 0.0, false, false);
+            let light = vec![[1.0; 3]; verts.len()];
+            let character = GpuCharacter {
+                mesh: &rig.mesh,
+                verts,
+                dead: false,
+                light,
+            };
+            let mut fb = vec![0u32; w * h];
+            let mut zb = vec![f32::INFINITY; w * h];
+            gpu.render(&scene, view, true, &[character], &mut fb, &mut zb);
+            assert_eq!(covered(&zb) > 1000, want_drawn, "gpu drawn={want_drawn}");
         }
     }
 
@@ -1847,6 +1888,7 @@ mod tests {
             let character = GpuCharacter {
                 mesh: &rig.mesh,
                 verts,
+                dead: false,
                 light,
             };
             let mut fb = vec![0u32; w * h];
