@@ -639,8 +639,9 @@ pub fn run_3d_walkthrough(
             }
             scene_view = Some((cam_pos, cam_right, cam_up, cam_fwd));
         } else {
+            let mut tris = Vec::new();
             for sm in &scene.static_meshes {
-                render_poly_batch(
+                queue_poly_batch(
                     &sm.polys,
                     IDENT_MAT,
                     sm.world_origin,
@@ -654,9 +655,10 @@ pub fn run_3d_walkthrough(
                     wireframe,
                     true,
                     &mut fb,
-                    &mut zb,
+                    &mut tris,
                 );
             }
+            flush_tris(&tris, &mut fb, &mut zb, raster_threads());
         }
 
         // 2. Render dynamic meshes (doors, breakables, furniture, vans, cameras); the hardware
@@ -1029,12 +1031,13 @@ fn draw_dynamic_meshes(
     fb: &mut [u32],
     zb: &mut [f32],
 ) {
+    let mut tris = Vec::new();
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
         if !dynamic_mesh_drawn(dm) {
             continue;
         }
         let (mat, origin) = dynamic_world(scene, idx, room_origins);
-        render_poly_batch(
+        queue_poly_batch(
             &dm.polys,
             mat,
             origin,
@@ -1048,9 +1051,10 @@ fn draw_dynamic_meshes(
             wireframe,
             false,
             fb,
-            zb,
+            &mut tris,
         );
     }
+    flush_tris(&tris, fb, zb, raster_threads());
 }
 
 /// Closest dynamic mesh that has hit points and whose posed bounds meet the ray.
@@ -1288,6 +1292,7 @@ fn render_kfs_character(
     }
 
     let shade = character_shade(hit_flash);
+    let mut tris = Vec::new();
     for face in &mesh.faces {
         let [i0, i1, i2] = face.indices;
         let c0 = cam_pts[i0];
@@ -1355,24 +1360,23 @@ fn render_kfs_character(
                     fb, proj[0].sx, proj[0].sy, proj[k].sx, proj[k].sy, 0x00ff8844,
                 );
             } else {
-                rasterize_tri(
-                    fb,
-                    zb,
-                    proj[0],
-                    proj[k],
-                    proj[k + 1],
+                tris.push(QueuedTri {
+                    p: [proj[0], proj[k], proj[k + 1]],
                     tex,
-                    None,
-                    None,
+                    alpha_reference: None,
+                    lmap: None,
                     shade,
-                    true,
-                    0.0,
-                );
+                    write_z: true,
+                    depth_bias: 0.0,
+                });
             }
         }
     }
+    flush_tris(&tris, fb, zb, raster_threads());
 }
 
+/// Queue and draw one batch at once (the reference path the tests compare against).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn render_poly_batch(
     polys: &[ScenePoly],
@@ -1389,6 +1393,45 @@ fn render_poly_batch(
     cull_backfaces: bool,
     fb: &mut [u32],
     zb: &mut [f32],
+) {
+    let mut tris = Vec::new();
+    queue_poly_batch(
+        polys,
+        mat,
+        origin,
+        scene,
+        cam_pos,
+        cam_right,
+        cam_up,
+        cam_fwd,
+        fov_scale,
+        use_lightmaps,
+        wireframe,
+        cull_backfaces,
+        fb,
+        &mut tris,
+    );
+    flush_tris(&tris, fb, zb, raster_threads());
+}
+
+/// Project, clip and queue `polys` (opaque first, then non-z-writing), as `render_poly_batch`
+/// draws them. Wireframe lines go straight to `fb`.
+#[allow(clippy::too_many_arguments)]
+fn queue_poly_batch<'a>(
+    polys: &[ScenePoly],
+    mat: [f32; 9],
+    origin: [f32; 3],
+    scene: &'a LdbScene,
+    cam_pos: [f32; 3],
+    cam_right: [f32; 3],
+    cam_up: [f32; 3],
+    cam_fwd: [f32; 3],
+    fov_scale: f32,
+    use_lightmaps: bool,
+    wireframe: bool,
+    cull_backfaces: bool,
+    fb: &mut [u32],
+    tris: &mut Vec<QueuedTri<'a>>,
 ) {
     for opaque in [true, false] {
         for poly in polys {
@@ -1411,19 +1454,19 @@ fn render_poly_batch(
                 wireframe,
                 cull_backfaces,
                 fb,
-                zb,
+                tris,
             );
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_poly(
+fn draw_poly<'a>(
     poly: &ScenePoly,
     policy: MaterialPolicy,
     mat: [f32; 9],
     origin: [f32; 3],
-    scene: &LdbScene,
+    scene: &'a LdbScene,
     cam_pos: [f32; 3],
     cam_right: [f32; 3],
     cam_up: [f32; 3],
@@ -1433,7 +1476,7 @@ fn draw_poly(
     wireframe: bool,
     cull_backfaces: bool,
     fb: &mut [u32],
-    zb: &mut [f32],
+    tris: &mut Vec<QueuedTri<'a>>,
 ) {
     let half_w = W as f32 * 0.5;
     let half_h = H as f32 * 0.5;
@@ -1531,19 +1574,15 @@ fn draw_poly(
             draw_line(fb, p1.sx, p1.sy, p2.sx, p2.sy, 0x0066ccff);
             draw_line(fb, p2.sx, p2.sy, p0.sx, p0.sy, 0x0066ccff);
         } else {
-            rasterize_tri(
-                fb,
-                zb,
-                p0,
-                p1,
-                p2,
+            tris.push(QueuedTri {
+                p: [p0, p1, p2],
                 tex,
                 alpha_reference,
                 lmap,
                 shade,
-                policy.writes_z,
-                policy.detail_offset as f32 * DETAIL_OFFSET_M,
-            );
+                write_z: policy.writes_z,
+                depth_bias: policy.detail_offset as f32 * DETAIL_OFFSET_M,
+            });
         }
     }
 }
@@ -1580,19 +1619,62 @@ fn clip_near_plane(verts: &[CamVert]) -> Vec<CamVert> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn rasterize_tri(
-    fb: &mut [u32],
-    zb: &mut [f32],
-    p0: ProjVert,
-    p1: ProjVert,
-    p2: ProjVert,
-    tex: Option<&DecodedTexture>,
+/// One projected triangle waiting for [`flush_tris`].
+#[derive(Clone, Copy)]
+struct QueuedTri<'a> {
+    p: [ProjVert; 3],
+    tex: Option<&'a DecodedTexture>,
     alpha_reference: Option<u8>,
-    lmap: Option<&DecodedLightmap>,
+    lmap: Option<&'a DecodedLightmap>,
     shade: f32,
     write_z: bool,
     depth_bias: f32,
-) {
+}
+
+/// Rasterise `tris` in order. With more than one thread the frame is split into row bands and
+/// each band runs the whole list in order, so every pixel sees the same sequence as a serial
+/// pass and the result is identical.
+fn flush_tris(tris: &[QueuedTri], fb: &mut [u32], zb: &mut [f32], threads: usize) {
+    if threads <= 1 || tris.len() < 16 {
+        for t in tris {
+            raster_band(t, fb, zb, 0, H);
+        }
+        return;
+    }
+    let rows = H.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (band, (fb_band, zb_band)) in fb
+            .chunks_mut(rows * W)
+            .zip(zb.chunks_mut(rows * W))
+            .enumerate()
+        {
+            let y0 = band * rows;
+            let y1 = (y0 + rows).min(H);
+            scope.spawn(move || {
+                for t in tris {
+                    raster_band(t, fb_band, zb_band, y0, y1);
+                }
+            });
+        }
+    });
+}
+
+/// Worker threads for the software rasterizer.
+fn raster_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get().min(16))
+}
+
+/// Rasterise rows `y0..y1` of `t` into band buffers whose row 0 is frame row `y0`.
+fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usize) {
+    let [p0, p1, p2] = t.p;
+    let (tex, alpha_reference, lmap, shade, write_z, depth_bias) = (
+        t.tex,
+        t.alpha_reference,
+        t.lmap,
+        t.shade,
+        t.write_z,
+        t.depth_bias,
+    );
     let area = (p1.sx - p0.sx) * (p2.sy - p0.sy) - (p2.sx - p0.sx) * (p1.sy - p0.sy);
     if area.abs() < 1e-3 {
         return;
@@ -1601,15 +1683,16 @@ fn rasterize_tri(
 
     let min_x = p0.sx.min(p1.sx).min(p2.sx).floor().max(0.0) as usize;
     let max_x = p0.sx.max(p1.sx).max(p2.sx).ceil().min((W - 1) as f32) as usize;
-    let min_y = p0.sy.min(p1.sy).min(p2.sy).floor().max(0.0) as usize;
-    let max_y = p0.sy.max(p1.sy).max(p2.sy).ceil().min((H - 1) as f32) as usize;
-    if min_x > max_x || min_y > max_y {
+    let min_y = (p0.sy.min(p1.sy).min(p2.sy).floor().max(0.0) as usize).max(y0);
+    let max_y =
+        (p0.sy.max(p1.sy).max(p2.sy).ceil().min((H - 1) as f32) as usize).min(y1.saturating_sub(1));
+    if min_x > max_x || min_y > max_y || y1 <= y0 {
         return;
     }
 
     for y in min_y..=max_y {
         let py = y as f32 + 0.5;
-        let row = y * W;
+        let row = (y - y0) * W;
         for x in min_x..=max_x {
             let px = x as f32 + 0.5;
             let w0 = ((p1.sx - px) * (p2.sy - py) - (p2.sx - px) * (p1.sy - py)) * inv_area;
@@ -2041,6 +2124,80 @@ mod tests {
         assert!(hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
         scene.dynamic_meshes[0].polys[0].material_id = 2;
         assert!(!hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+    }
+
+    #[test]
+    fn parallel_band_raster_matches_serial_raster_exactly() {
+        // Overlapping quads at several depths, some with an alpha-masked texture and some
+        // that do not write depth: any change in per-pixel order would change the result.
+        let tex = DecodedTexture {
+            path: "t.tga".into(),
+            flag: 0,
+            width: 8,
+            height: 8,
+            pixels: (0..64u32)
+                .map(|i| {
+                    if i % 3 == 0 {
+                        0x0012_3456
+                    } else {
+                        0xff00_0000 | (i * 0x0003_0507)
+                    }
+                })
+                .collect(),
+        };
+        let mut tris = Vec::new();
+        for k in 0..40 {
+            let x = 40.0 + (k * 37 % 700) as f32;
+            let y = 20.0 + (k * 53 % 450) as f32;
+            let z = 1.0 + (k % 7) as f32;
+            let v = |sx: f32, sy: f32, u: f32, vv: f32| ProjVert {
+                sx,
+                sy,
+                inv_z: 1.0 / z,
+                u_over_z: u / z,
+                v_over_z: vv / z,
+                lu_over_z: 0.0,
+                lv_over_z: 0.0,
+            };
+            for (a, b, c) in [
+                (
+                    v(x, y, 0.0, 0.0),
+                    v(x + 260.0, y, 1.0, 0.0),
+                    v(x + 260.0, y + 180.0, 1.0, 1.0),
+                ),
+                (
+                    v(x, y, 0.0, 0.0),
+                    v(x + 260.0, y + 180.0, 1.0, 1.0),
+                    v(x, y + 180.0, 0.0, 1.0),
+                ),
+            ] {
+                tris.push(QueuedTri {
+                    p: [a, b, c],
+                    tex: (k % 2 == 0).then_some(&tex),
+                    alpha_reference: (k % 4 == 0).then_some(128),
+                    lmap: None,
+                    shade: 0.5 + (k % 5) as f32 * 0.1,
+                    write_z: k % 3 != 0,
+                    depth_bias: 0.0,
+                });
+            }
+        }
+        let run = |threads: usize| {
+            let mut fb = vec![0u32; W * H];
+            let mut zb = vec![f32::INFINITY; W * H];
+            flush_tris(&tris, &mut fb, &mut zb, threads);
+            (fb, zb)
+        };
+        let (fb1, zb1) = run(1);
+        let (fb8, zb8) = run(8);
+        assert!(fb1.iter().any(|&p| p != 0), "the quads must draw");
+        assert!(fb1 == fb8, "colour differs between serial and parallel");
+        assert!(
+            zb1.iter()
+                .zip(&zb8)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "depth differs between serial and parallel"
+        );
     }
 
     #[test]
