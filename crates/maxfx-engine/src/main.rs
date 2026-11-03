@@ -706,6 +706,7 @@ fn play_level(
         scene.ambient = ambient;
     }
     scene.fog = entry.as_ref().and_then(|entry| entry.fog);
+    scene.gravity = entry.as_ref().and_then(|entry| entry.gravity);
     let player_start = entry.as_ref().and_then(|entry| entry.player_start.clone());
     let player_skin = entry.as_ref().and_then(|entry| entry.player_skin.clone());
     let world_sphere = entry.as_ref().and_then(|entry| entry.world_sphere.clone());

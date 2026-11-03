@@ -668,6 +668,8 @@ pub struct LdbScene {
     pub fog_fade: Option<(LevelFog, LevelFog, f32, f32)>,
     /// `GM_EnableWidescreen(bool, fade_time)`: how far the letterbox bars are in (0..1).
     pub widescreen: Ramp,
+    /// `levels.txt` `Gravity` (m/s²); particles fall with it.
+    pub gravity: Option<[f32; 3]>,
     /// `gm_changeFOV(multiplier, time)`: multiplier on the view angle (1 = default; 0 in a
     /// `Default` scene, which `render3d::fov_scale` also treats as the default).
     pub fov_multiplier: Ramp,
@@ -2910,6 +2912,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         fog_fade: None,
         widescreen: Ramp::at(0.0),
         fov_multiplier: Ramp::at(1.0),
+        gravity: None,
     })
 }
 
@@ -3023,6 +3026,7 @@ mod tests {
             fog_fade: None,
             widescreen: Ramp::at(0.0),
             fov_multiplier: Ramp::at(1.0),
+            gravity: None,
         }
     }
 

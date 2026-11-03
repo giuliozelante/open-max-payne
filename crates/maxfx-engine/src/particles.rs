@@ -4,9 +4,10 @@
 use openpfx::effect::RpsEffect;
 use std::sync::Arc;
 
-/// ParticleFX's gravity (tutorial: "Default: 9.81m/s^2"); each particle scales it by its
-/// "Gravity Multiplier".
-const GRAVITY: f32 = 9.81;
+/// Gravity until the level sets its own: ParticleFX's preview default ("Default: 9.81m/s^2").
+/// In the game the level's `levels.txt` `Gravity` applies (retail: -20 m/s²); each particle scales
+/// it by its "Gravity Multiplier".
+const DEFAULT_GRAVITY: [f32; 3] = [0.0, -9.81, 0.0];
 
 /// Which bitmap a sprite shows: effect key, emitter index, sequence and frame.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -57,6 +58,8 @@ struct Running {
 pub struct ParticleField {
     running: Vec<Running>,
     seed: u32,
+    /// The level's gravity, m/s².
+    pub gravity: [f32; 3],
 }
 
 impl Default for ParticleField {
@@ -64,6 +67,7 @@ impl Default for ParticleField {
         Self {
             running: Vec::new(),
             seed: 0x9e37_79b9,
+            gravity: DEFAULT_GRAVITY,
         }
     }
 }
@@ -106,11 +110,11 @@ impl ParticleField {
             let frame = frame_of(&run.emitter);
             let mut live: usize = run.particles.iter().map(Vec::len).sum();
             for (k, emitter) in run.effect.emitters.iter().enumerate() {
-                let gravity = GRAVITY * emitter.particle.gravity;
+                let gravity = self.gravity.map(|g| g * emitter.particle.gravity);
                 let list = &mut run.particles[k];
                 for p in list.iter_mut() {
-                    p.vel[1] -= gravity * dt;
                     for c in 0..3 {
+                        p.vel[c] += gravity[c] * dt;
                         p.pos[c] += p.vel[c] * dt;
                     }
                     p.age += dt;
@@ -467,6 +471,23 @@ mod tests {
             (y - expected).abs() < 0.6,
             "y = {y}, expected about {expected}"
         );
+    }
+
+    #[test]
+    fn particles_fall_with_the_level_gravity() {
+        // levels.txt `Gravity = ( 0, GRAVITY_VALUE , 0 )` with `GRAVITY_VALUE -20`; the tutorial:
+        // the editor's gravity "does not affect the gravity setting used in the game".
+        let mut def = effect(10.0, 5.0, 0.5);
+        def.emitters[0].emission.velocity = flat(2, &[0.0, 0.0]);
+        let mut field = ParticleField::default();
+        field.gravity = [0.0, -20.0, 0.0];
+        field.start("e".into(), "k".into(), std::sync::Arc::new(def), false);
+        field.step(0.1, at_origin);
+        field.stop("e");
+        field.step(1.0, at_origin);
+        // One step of 1 s at half of -20 m/s^2: velocity -10, moved -10 (semi-implicit).
+        let y = field.sprites()[0].pos[1];
+        assert!((y - 0.0).abs() < 1e-3, "y = {y}");
     }
 
     #[test]

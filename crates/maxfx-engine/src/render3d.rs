@@ -1762,6 +1762,9 @@ impl ParticleSprites {
     }
 
     fn step(&mut self, scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, dt: f32) {
+        if let Some(gravity) = scene.gravity {
+            self.field.gravity = gravity;
+        }
         self.field
             .step(dt, |emitter| emitter_frame(scene, rooms, emitter));
     }
@@ -3884,6 +3887,7 @@ mod tests {
             fog_fade: None,
             widescreen: crate::scene::Ramp::at(0.0),
             fov_multiplier: crate::scene::Ramp::at(1.0),
+            gravity: None,
         }
     }
 
