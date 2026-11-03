@@ -137,7 +137,9 @@ pub fn parse_ras_ldb_section_at(data: &[u8], offset: usize) -> Option<RasLdbSect
     let kind = data[offset + 1];
     let count = u16::from_le_bytes([data[offset + 2], data[offset + 3]]);
     match kind {
-        LDB_SECTION_KIND_VEC3 if offset == 0 || data.get(offset + 5) == Some(&0x16) => {
+        // Only the first section is the vertex cloud (all 25 retail levels). Later `1c 12`
+        // heads are MF arrays with a u24 count whose body may start with 0x16.
+        LDB_SECTION_KIND_VEC3 if offset == 0 => {
             if data.len() < offset + 5 {
                 return None;
             }
@@ -3039,6 +3041,16 @@ mod tests {
         assert_eq!(sec.count, 3);
         assert_eq!(sec.flag, None);
         assert_eq!(s2[4], 0x14);
+    }
+
+    #[test]
+    fn u24_count_section_after_offset_zero_is_memory_file() {
+        // Part1_Level1 @0x6438fb: `1c 12 <u24>` MF array whose first body byte is 0x16.
+        let mut data = vec![0u8; 8];
+        data.extend_from_slice(&[LDB_SECTION_TAG, 0x12, 0x58, 0x3c, 0x01, 0x16, 0, 0]);
+        let sec = parse_ras_ldb_section_at(&data, 8).unwrap();
+        assert_eq!(sec.kind, LDB_SECTION_KIND_MF);
+        assert_eq!(sec.flag, None);
     }
 
     #[test]
