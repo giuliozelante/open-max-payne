@@ -296,7 +296,7 @@ pub fn run_3d_walkthrough(
         }
 
         // Interact (`E`): trigger nearest dynamic mesh / door within 6m
-        if window.is_key_pressed(Key::E, KeyRepeat::No) {
+        if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             toggle_nearest_dynamic_mesh(&mut scene, &room_origins, player_pos, 36.0);
             if scene.activate_nearest_trigger(&room_origins, player_pos, 36.0) {
                 play_queued_sounds(&mut scene, &catalog_root(level_path), &mut break_voice);
@@ -362,6 +362,9 @@ pub fn run_3d_walkthrough(
             mv[0] -= right[0];
             mv[2] -= right[2];
         }
+        if !scene.player_controls {
+            mv = [0.0; 3];
+        }
         let mv_len = (mv[0] * mv[0] + mv[2] * mv[2]).sqrt();
         let player_moving = mv_len > 0.01;
         if player_moving {
@@ -396,7 +399,10 @@ pub fn run_3d_walkthrough(
                 player_pos[2] = nz;
             }
 
-            if window.is_key_pressed(Key::Space, KeyRepeat::No) && vel_y.abs() < 0.05 {
+            if scene.player_controls
+                && window.is_key_pressed(Key::Space, KeyRepeat::No)
+                && vel_y.abs() < 0.05
+            {
                 vel_y = 5.2;
             }
             vel_y -= 15.0 * player_dt;
@@ -417,7 +423,7 @@ pub fn run_3d_walkthrough(
         let fire_pressed = window.is_key_pressed(Key::F, KeyRepeat::No)
             || window.is_key_pressed(Key::LeftCtrl, KeyRepeat::No)
             || window.is_key_pressed(Key::RightCtrl, KeyRepeat::No);
-        if fire_pressed && shot_timer <= 0.0 {
+        if fire_pressed && scene.player_controls && shot_timer <= 0.0 {
             shot_timer = 0.18;
             let aim_dir = [sy * cp, sp, cy * cp];
             // Raycast against living enemies
@@ -1960,6 +1966,7 @@ mod tests {
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
             attached_camera: None,
+            player_controls: true,
         }
     }
 

@@ -37,6 +37,10 @@ and because single static frames of `::street02::camera1` and P3L6 `altitude::ca
 Those frames were taken before the cameras' tracks run, and the model's shape does not set the view axis. The
 four house cameras outweigh them.
 
+`GM_SetPlayerControls(bool)` (61 uses) clears or sets `LdbScene::player_controls`. While it is off,
+`render3d` ignores movement, jump, interact and fire; look keys stay live. HYPOTHESIS from the name and the
+cutscene pairing only; the `MaxPayne_GameMode` handler has not been read.
+
 ## Open
 
 - The view pose has been checked only in offline engine frames, not against a retail frame.

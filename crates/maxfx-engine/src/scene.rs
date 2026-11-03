@@ -627,6 +627,8 @@ pub struct LdbScene {
     pub sound_queue: Vec<QueuedSound>,
     /// Dynamic mesh the view is attached to by `CAM_AttachToDO`, if any.
     pub attached_camera: Option<usize>,
+    /// Cleared by `GM_SetPlayerControls(false)` during cutscenes.
+    pub player_controls: bool,
 }
 
 /// One `A_Play3DSound` accepted by a mesh or trigger that this scene actually stores.
@@ -806,6 +808,14 @@ impl LdbScene {
             }
             "fsm_randomize" => self.fsm_randomize(msg.receiver),
             "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
+            "gm_setplayercontrols" => {
+                self.player_controls = match msg.args.first().copied().unwrap_or("").trim() {
+                    "true" | "1" => true,
+                    "false" | "0" => false,
+                    _ => return false,
+                };
+                true
+            }
             "cam_attachtodo" => {
                 // Arg 0 (camera `+0x14f`, 0x672d12) is the camera's weight in percent: 100
                 // attaches, 0 hands the view back to the player.
@@ -2401,6 +2411,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         sound_catalogs: BTreeMap::new(),
         sound_queue: Vec::new(),
         attached_camera: None,
+        player_controls: true,
     })
 }
 
@@ -2651,6 +2662,7 @@ mod tests {
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
             attached_camera: None,
+            player_controls: true,
         }
     }
 
@@ -3510,6 +3522,16 @@ mod tests {
         assert_eq!(scene.attached_camera, Some(0));
         assert!(scene.dispatch_message("", "::startroom::door.DO->CAM_AttachToDO(0, false);"));
         assert_eq!(scene.attached_camera, None);
+    }
+
+    #[test]
+    fn gm_set_player_controls_toggles_the_flag() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        assert!(scene.player_controls);
+        assert!(scene.dispatch_message("", "maxpayne_gamemode->GM_SetPlayerControls(false);"));
+        assert!(!scene.player_controls);
+        assert!(scene.dispatch_message("", "MaxPayne_GameMode->gm_setplayercontrols(true);"));
+        assert!(scene.player_controls);
     }
 
     #[test]
