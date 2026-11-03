@@ -641,6 +641,8 @@ pub struct LdbScene {
     pub player_controls: bool,
     /// Full-screen colour from `MPHM_FadeToColor`, if any.
     pub screen_fade: Option<ScreenFade>,
+    /// Last `S_ModeSwitch` request (`graphicnovel` ends the startup intro).
+    pub mode_switch: Option<String>,
 }
 
 /// `MPHM_FadeToColor(from, to, seconds)`: colours are `0xRRGGBBAA`.
@@ -865,6 +867,14 @@ impl LdbScene {
                 });
                 true
             }
+            "s_modeswitch" => {
+                let Some(mode) = msg.args.first().map(|m| m.trim()).filter(|m| !m.is_empty())
+                else {
+                    return false;
+                };
+                self.mode_switch = Some(mode.to_ascii_lowercase());
+                true
+            }
             "gm_setplayercontrols" => {
                 self.player_controls = match msg.args.first().copied().unwrap_or("").trim() {
                     "true" | "1" => true,
@@ -1031,6 +1041,24 @@ impl LdbScene {
                 fsm.startup_actions.iter().filter_map(|act| {
                     let verb = Message::parse(act)?.verb.to_ascii_lowercase();
                     (verb == "t_enable").then(|| (fsm.name.clone(), act.clone()))
+                })
+            })
+            .collect();
+        for (name, act) in scripts {
+            self.dispatch_message(&name, &act);
+        }
+    }
+
+    /// Startup `DO_Animate` only (the startup intro's `Start_FSM`, idle machinery). Other startup
+    /// verbs stay untouched.
+    pub fn apply_startup_animates(&mut self) {
+        let scripts: Vec<(String, String)> = self
+            .fsms
+            .iter()
+            .flat_map(|fsm| {
+                fsm.startup_actions.iter().filter_map(|act| {
+                    let verb = Message::parse(act)?.verb.to_ascii_lowercase();
+                    (verb == "do_animate").then(|| (fsm.name.clone(), act.clone()))
                 })
             })
             .collect();
@@ -2482,6 +2510,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         attached_camera: None,
         player_controls: true,
         screen_fade: None,
+        mode_switch: None,
     })
 }
 
@@ -2524,98 +2553,12 @@ impl LdbScene {
     }
 }
 
-/// One animated dynamic object in the intro camera rig.
-#[derive(Debug, Clone)]
-struct FlyBone {
-    /// Rest orientation. Column 0, 1, 2 are the local axes.
-    mat: [f32; 9],
-    start_pos: [f32; 3],
-    end_pos: [f32; 3],
-    duration: f32,
-    /// Distance curve (`+0xbc`) and slerp curve (`+0xd8`).
-    curves: [Vec<f32>; 2],
-}
-
-/// Startup flyover: ancestor bones run from t = 0, and `altitude::camera`
-/// plays tracks 1..5 in order. Track 5's script is the graphic-novel handoff.
-#[derive(Debug, Clone)]
-pub struct CameraFlyover {
-    ancestors: Vec<FlyBone>,
-    segments: Vec<FlyBone>,
-    room_origin: [f32; 3],
-    forward: [f32; 3],
-    pub duration: f32,
-}
-
-impl CameraFlyover {
-    /// World position and look direction at `time` seconds.
-    pub fn pose(&self, time: f32) -> ([f32; 3], [f32; 3]) {
-        let mut origin = [0.0f32; 3];
-        let mut mat = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-        for (i, bone) in self.ancestors.iter().enumerate() {
-            let local = bone.pos_at(time);
-            if i == 0 {
-                origin = local;
-            } else {
-                origin = xform_point(mat, origin, local);
-            }
-            mat = bone.mat;
-        }
-        let (seg, local_t) = segment_at(&self.segments, time);
-        let local = seg.pos_at(local_t);
-        let mut pos = xform_point(mat, origin, local);
-        pos[0] += self.room_origin[0];
-        pos[1] += self.room_origin[1];
-        pos[2] += self.room_origin[2];
-        (pos, self.forward)
-    }
-}
-
-impl FlyBone {
-    fn pos_at(&self, time: f32) -> [f32; 3] {
-        let (w, _) = track_weights(
-            &self.curves,
-            self.start_pos,
-            self.end_pos,
-            self.duration,
-            time,
-        );
-        [
-            self.start_pos[0] + (self.end_pos[0] - self.start_pos[0]) * w,
-            self.start_pos[1] + (self.end_pos[1] - self.start_pos[1]) * w,
-            self.start_pos[2] + (self.end_pos[2] - self.start_pos[2]) * w,
-        ]
-    }
-}
-
 fn xform_point(mat: [f32; 9], origin: [f32; 3], v: [f32; 3]) -> [f32; 3] {
     [
         origin[0] + mat[0] * v[0] + mat[3] * v[1] + mat[6] * v[2],
         origin[1] + mat[1] * v[0] + mat[4] * v[1] + mat[7] * v[2],
         origin[2] + mat[2] * v[0] + mat[5] * v[1] + mat[8] * v[2],
     ]
-}
-
-fn segment_at(segments: &[FlyBone], time: f32) -> (&FlyBone, f32) {
-    let mut remain = time.max(0.0);
-    for seg in segments {
-        if remain <= seg.duration || seg.duration <= 0.0 {
-            return (seg, remain.min(seg.duration.max(0.0)));
-        }
-        remain -= seg.duration;
-    }
-    let last = segments.last().expect("flyover has a segment");
-    (last, last.duration)
-}
-
-fn bone_from_anim(mesh: &SceneDynamicMesh, anim: &SceneDynamicAnim) -> FlyBone {
-    FlyBone {
-        mat: mesh.world_mat,
-        start_pos: anim.start_pos,
-        end_pos: anim.end_pos,
-        duration: anim.duration,
-        curves: anim.curves.clone(),
-    }
 }
 
 fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -2627,71 +2570,6 @@ fn parent_name(name: &str) -> Option<String> {
     let bare = name.strip_suffix(".DO").unwrap_or(name);
     let (parent, _) = bare.rsplit_once("::")?;
     Some(format!("{parent}.DO"))
-}
-
-/// The `startup_level` camera rig, if this scene has the rotator that ends in
-/// `s_modeswitch(graphicnovel)`.
-pub fn camera_flyover(scene: &LdbScene) -> Option<CameraFlyover> {
-    let cam = scene.dynamic_meshes.iter().find(|m| {
-        m.name.ends_with("altitude::camera.DO")
-            && m.anims.iter().any(|a| {
-                a.start_scripts
-                    .iter()
-                    .chain(&a.reverse_end_scripts)
-                    .chain(&a.end_scripts)
-                    .any(|s| {
-                        s.to_ascii_lowercase()
-                            .contains("s_modeswitch(graphicnovel)")
-                    })
-            })
-    })?;
-    let mut chain = vec![cam];
-    while let Some(parent) = parent_name(&chain.last()?.name) {
-        let Some(mesh) = scene.dynamic_meshes.iter().find(|m| m.name == parent) else {
-            break;
-        };
-        chain.push(mesh);
-    }
-    chain.reverse();
-    let camera = chain.pop()?;
-    let ancestors = chain
-        .iter()
-        .filter_map(|mesh| {
-            mesh.anims
-                .iter()
-                .find(|a| a.name == "1")
-                .or_else(|| mesh.anims.first())
-                .map(|anim| bone_from_anim(mesh, anim))
-        })
-        .collect::<Vec<_>>();
-    if ancestors.is_empty() {
-        return None;
-    }
-    let mut segments = Vec::new();
-    for index in 1..=5 {
-        let anim = camera.anims.iter().find(|a| a.name == index.to_string())?;
-        segments.push(bone_from_anim(camera, anim));
-    }
-    let duration = segments.iter().map(|s| s.duration).sum();
-    let room_origin = scene
-        .rooms
-        .iter()
-        .find(|r| r.id == camera.room_id)
-        .map(|r| r.world_origin)
-        .unwrap_or([0.0; 3]);
-    let z = [
-        camera.world_mat[6],
-        camera.world_mat[7],
-        camera.world_mat[8],
-    ];
-    let len = (z[0] * z[0] + z[1] * z[1] + z[2] * z[2]).sqrt().max(1.0e-6);
-    Some(CameraFlyover {
-        ancestors,
-        segments,
-        room_origin,
-        forward: [z[0] / len, z[1] / len, z[2] / len],
-        duration,
-    })
 }
 
 #[cfg(test)]
@@ -2734,6 +2612,7 @@ mod tests {
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
+            mode_switch: None,
         }
     }
 
@@ -2907,16 +2786,28 @@ mod tests {
         assert!((track1.start_pos[0] + 0.07).abs() < 0.02);
         assert!((track1.start_pos[1] - 0.2).abs() < 0.02);
         assert!((track1.start_pos[2] - 1.56).abs() < 0.02);
-        let fly = camera_flyover(&scene).expect("flyover");
-        assert_eq!(fly.segments.len(), 5);
-        assert!((fly.duration - 28.5).abs() < 0.05);
-        let (pos, forward) = fly.pose(0.0);
-        assert!((pos[0] + 40.57).abs() < 0.05);
-        assert!((pos[1] + 58.55).abs() < 0.05);
-        assert!((pos[2] + 34.44).abs() < 0.05);
-        let flen =
-            (forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]).sqrt();
-        assert!((flen - 1.0).abs() < 0.01);
+        // The intro runs on the level's own scripts: Start_FSM's startup DO_Animate, then
+        // FSM_Send(start) to each camera rig, CAM_AttachToDO and DO_Animate, and finally
+        // S_ModeSwitch(graphicnovel).
+        let mut scene = scene;
+        scene.apply_startup_sends();
+        scene.apply_startup_animates();
+        let mut cameras: Vec<String> = Vec::new();
+        for _ in 0..60 * 90 {
+            scene.step_dynamic_anims(1.0 / 60.0);
+            if let Some(i) = scene.attached_camera {
+                let name = &scene.dynamic_meshes[i].name;
+                if cameras.last() != Some(name) {
+                    cameras.push(name.clone());
+                }
+            }
+            if scene.mode_switch.is_some() {
+                break;
+            }
+        }
+        assert_eq!(scene.mode_switch.as_deref(), Some("graphicnovel"));
+        assert_eq!(cameras.len(), 5, "{cameras:?}");
+        assert!(cameras[4].ends_with("altitude::camera.DO"));
     }
 
     fn door_mesh(anims: Vec<SceneDynamicAnim>) -> SceneDynamicMesh {
@@ -3571,6 +3462,32 @@ mod tests {
         assert!(scene.dispatch_message("", "::startroom::door->FSM_Randomize();"));
         assert_eq!(scene.fsms[0].state, "open");
         assert!(scene.dynamic_meshes[0].hidden, "the open state script ran");
+    }
+
+    #[test]
+    fn s_mode_switch_records_the_requested_mode() {
+        // The startup level ends its intro with `x_modeswitch->s_modeswitch(graphicnovel);`.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        assert_eq!(scene.mode_switch, None);
+        assert!(scene.dispatch_message("", "x_modeswitch->s_modeswitch(graphicnovel);"));
+        assert_eq!(scene.mode_switch.as_deref(), Some("graphicnovel"));
+    }
+
+    #[test]
+    fn startup_do_animate_starts_the_track() {
+        // `::start::Start_FSM` starts the intro with `Start_FSM.DO->DO_Animate(1);` at startup.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene
+            .dynamic_meshes
+            .push(door_mesh(vec![track("open", [0.4, 0.0, 0.0])]));
+        let mut fsm = door_fsm_scene().fsms.remove(0);
+        fsm.startup_actions = vec!["::startroom::door.DO->DO_Animate(open);".into()];
+        scene.fsms.push(fsm);
+        scene.apply_startup_animates();
+        assert_eq!(
+            scene.dynamic_meshes[0].active_track.as_deref(),
+            Some("open")
+        );
     }
 
     #[test]
