@@ -218,6 +218,45 @@ fn e2e_synthetic_ldb_scene_decodes_to_exact_eof() {
     assert_eq!(scene.rooms[0].name, "::StartRoom");
 }
 
+/// The synthetic level with one empty dynamic mesh whose six trailing flags are `flags`.
+fn synthetic_ldb_with_one_do(flags: [u8; 6]) -> Vec<u8> {
+    let mut b = build_synthetic_full_ldb();
+    // Dynamic mesh count 0, then the level items header (`14 0e`).
+    let marker = [0x14, 0, 0x14, 14, 0x14, 0, 0x14, 0, 0x14, 1];
+    let at = b
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("dynamic mesh count");
+    let mut dm = vec![0x14, 1];
+    push_mf_str(&mut dm, "::StartRoom::timer.DO");
+    dm.extend_from_slice(&[0x11, 0, 0x1c, 0x14, 0]); // no points, no extra records
+    push_xform(&mut dm, [0.0; 3]);
+    dm.extend_from_slice(&[0x14, 0, 0x14, 0, 0x1f, 0x14, 0]); // no polys, no attribs
+    push_mf_str(&mut dm, "");
+    push_xform(&mut dm, [0.0; 3]);
+    push_xform(&mut dm, [0.0; 3]);
+    dm.extend_from_slice(&[0x14, 0]); // room
+    push_mf_str(&mut dm, "");
+    dm.extend_from_slice(&[0x14, 0]); // no animations
+    for f in flags {
+        dm.extend_from_slice(&[0x0e, f]);
+    }
+    dm.extend_from_slice(&[0x14, 0, 0x14, 0, 0x14, 0]);
+    b.splice(at..at + 2, dm);
+    b
+}
+
+#[test]
+fn e2e_dynamic_mesh_collisions_come_from_the_first_record_flag() {
+    // X_LevelDBDynamicMesh serializes six bools in order to +0xa0..+0xa5 (0x5ef340);
+    // DO setup copies +0xa0 to the DO's collisions flag +0x4ae (0x6f2c7c).
+    let on = parse_ldb_scene(&synthetic_ldb_with_one_do([1, 0, 0, 0, 0, 0])).expect("on");
+    let off = parse_ldb_scene(&synthetic_ldb_with_one_do([0, 1, 1, 1, 1, 1])).expect("off");
+    assert_eq!(on.dynamic_meshes.len(), 1);
+    assert!(on.dynamic_meshes[0].collisions);
+    assert!(!off.dynamic_meshes[0].collisions);
+}
+
 #[test]
 fn e2e_pcx_and_kf2_decoders_roundtrip() {
     // 8-bit 2x1 PCX with VGA palette marker 0x0c at EOF-769

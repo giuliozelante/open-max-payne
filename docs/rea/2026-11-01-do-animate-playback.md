@@ -239,11 +239,130 @@ Note: KF `VertexAnimation` / LODs also have slots at `+0xb8` (different vts) —
 See `docs/rea/2026-11-01-kf2-vertex-animation.md` — `KF_VertexAnimation` apply `0x57c860` (matrix×verts).  
 `KF_ObjectKeyframeAnimationCallback` still list/dtor-heavy.
 
+## Animation control messages (2026-11-02, static)
+
+**Handler table (VERIFIED).** `0x6f4a20`… registers one `(handler, registrar)` pair per message. Each registrar
+(`0x6f60b0` + n·`0x820`) references the message's RTTI type descriptor, which names it:
+
+| Handler | Message class (`X_LevelRuntimeDynamicObjectMessage_…`) |
+|---------|--------------------------------------------------------|
+| `0x6f3d20` | `Animate` |
+| `0x6f40e0` | `InvertAnimation` |
+| `0x6f4100` | `PauseAnimation` |
+| `0x6f4120` | `StopAnimation` |
+| `0x6f4150` | `ResumeAnimation` |
+| `0x6f4180` | `Hide` |
+| `0x6f4300` | `EnableCollisions` |
+| `0x6f4320` | `EnableContinuousUpdate` |
+| `0x6f4340` | `SetHitpoints` |
+| `0x6f4360` / `0x6f43d0` | `X_CameraMessage_AttachToDO` / `X_CameraMessage_AnimateInPlace` |
+
+The vt `+0xb8`/`+0xbc` slots (`0x6f3b70`/`0x6f3b90`) are **not** these messages. They snapshot the playhead
+into `+0x4c8` around FSM pause/resume (`0x6e2520`/`0x6e2680`).
+
+**Handler bodies (VERIFIED).** All act only while a curve is active (`+0x483 != 0`), except Resume:
+
+- **Invert** `0x6f40e0`: `+0x4a7 = !+0x4a7`.
+- **Pause(t)** `0x6f4100`: hold `+0x4a3` = float arg 0 (`0x74d340`).
+- **Stop** `0x6f4120`: `+0x487 = +0x483`, `+0x49f = +0x49b`, `+0x483 = 0`. The pose at `+0x259` is not touched.
+- **Resume** `0x6f4150`: if `+0x487` is set, `+0x483 = +0x487`, `+0x49b = +0x49f`, `+0x4a3 = 0`, `+0x487 = 0`.
+
+**Tick `0x6f34c0` (VERIFIED).** `0x7cb8b0` is `0.0f`; duration is DMA `+0x84` (`0x5ff0f0`).
+
+1. `hold == 0`: playhead `+0x49b` ± dt (− when reversed).
+2. `hold > 0`: `hold -= dt`. If it goes negative, the overshoot moves the playhead (same direction rule) and hold = 0.
+3. `hold < 0`: no advance (`PauseAnimation(10000)` and negative values freeze).
+4. Sample at the playhead → `+0x259`.
+5. `duration <= playhead`: sample at `duration`, clear hold/playhead/curve/reverse, send runtime-anim list `+0x29`
+   (`0x751d90`) lagged by the overshoot.
+6. Else `playhead < 0`: sample at 0, clear the same fields, send list `+0x19` (`0x751d80`) lagged by `-playhead`.
+
+Animate apply zeroes `+0x49b`/`+0x4a3`/`+0x4c8` and sends list `+0x9` (`0x751d70`, at `0x6f40aa`). It does **not**
+clear reverse `+0x4a7`.
+
+**Message lists (VERIFIED).** The runtime anim (`0x751aa0`, vt `0x7d9800`) holds three vectors. Its compile
+method `0x751d10` fills them from the DMA: `+0x9` ← DMA `+0x8c` (`0x5ff400`), `+0x19` ← `+0x9c` (`0x73af50`),
+`+0x29` ← `+0xac` (`0x5ff410`). The DMA reader `0x5ff420` reads duration `+0x84`, two transforms, then three tag-`0x1c`
+string lists into `+0x8c`, `+0x9c`, `+0xac`. So in the `.ldb`, list 1 = **start**, list 2 = **reverse end**, list 3 =
+**end**.
+
+Data check (STRONGLY SUPPORTED, 21 retail levels, 5092 tracks): 1782 have a start list, 545 a reverse-end list,
+3792 an end list. Bunker door `open`: start plays `door_slide` and enables the exits; end chains `DO_Animate(delay)`;
+reverse end re-enables the trigger and disables the exits, which is what an inverted open (the door closing again)
+needs.
+
+Message use in the 25 retail `.ldb`: `DO_StopAnimation` 847, `DO_InvertAnimation` 368, `DO_EnableCollisions` 99,
+`DO_PauseAnimation` 39 (args `1`, `0.2`, `10000`), `DO_ResumeAnimation` 37 (case-insensitive counts).
+
+**Engine:** `scene.rs` `DoAnimState` + `SceneDynamicMesh::step_animation` follow the tick above. Start lists are
+queued and dispatched on the next `step_dynamic_anims`, which stands in for the lagged send.
+
+## `DO_EnableCollisions` (2026-11-02, static)
+
+VERIFIED: `0x6f4300` takes the bool (`0x74e5b0` = message `+0x30`); `0x6f43f0` stores it at DO `+0x4ae` and calls
+`0x6f4410`.
+
+**Initial value.** DO setup (`0x6f2c20`…) reads three bytes of its `X_LevelDBDynamicMesh` record through getters:
+`+0xa3` (`0x5ef500`) → DO `+0x4af`, `+0xa0` (`0x5ef4c0`) → `+0x4ae`, `+0xa1` (`0x5ef4d0`) → `+0x4ad`. The record's
+serializers (`0x5ef2d0` write, `0x5ef340` read; vtable slots 0/1 of both `X_LevelDBDynamicMesh` and
+`X_LevelDBImportDynamicMesh`) stream six bools to `+0xa0..+0xa5` in order, so `+0x4ae` starts as the **first** of
+the six `0e u8` flags that close each dynamic mesh in the `.ldb`. Across the 28 retail levels 5832 DOs carry
+the flag; logic-only helpers (`timer.DO`, `wait.DO`, `swing_door_dummy*`) mostly have it off; 702 of 854 DOs named `*door*` have it on.
+
+**Who reads `+0x4ae`.** Getter `0x6f49d0`. Callers take a DO and skip their contact handling when it returns 0:
+
+| Caller | Class (vtable slot) |
+|--------|---------------------|
+| `0x694fe0` | `X_Character` (8) |
+| `0x5078b0` | `MaxPayne_PlayerCamera` (36) |
+| `0x452c50` | `MaxPayne_StartPointTestCapsule` (31) |
+| `0x507c90`, `0x695390` | non-virtual, same pattern |
+| `0x6f4500` | the DO itself, together with `+0x142` |
+
+At setup the DO also pushes the flags into its spatial base at `+0x1e`: `0x64e130(+0x4ae)` → `+0x124`,
+`0x64e170(+0x4ae || +0x4ad)` → `+0x125`, `0x64da40(+0x4ad)` → `+0x126`. Pair tests such as `0x63e5e0` require
+`other.+0x125 && this.+0x124` (or the mirror). The message does **not** refresh these spatial bytes; only the
+`+0x4ae` getter sees runtime changes.
+
+**`+0x181..+0x184` is a debug colour, not collision state.** `0x6f4410` writes `(r, g, b)` from `+0x143`, `+0x4ae`,
+`+0x4ad`:
+
+| `+0x143` | `+0x4ae` | `+0x4ad` | `+0x181` | `+0x182` | `+0x183` |
+|:-:|:-:|:-:|:-:|:-:|:-:|
+| 0 | – | – | 0 | ff | 0 |
+| 1 | 1 | 1 | ff | 0 | ff |
+| 1 | 0 | 1 | 0 | 0 | ff |
+| 1 | 1 | 0 | ff | 0 | 0 |
+| 1 | 0 | 0 | 0 | ff | 0 |
+
+STRONGLY SUPPORTED: the base-object constructor `0x6dfbc9` zeroes `+0x181..+0x183` and sets `+0x184 = 0xff`
+(alpha); `X_LevelRuntimeTrigger` writes `0x80`/`0xff` shades (`0x71f57e`). Nothing in the game reads them as
+flags. **Ruled out:** the earlier leads `0x6d8834`/`0x6d8850`/`0x6d896d`/`0x6d97bd` are `X_Crosshair` methods
+(vtable `0x7d7404`) that use the same offsets on a different object.
+
+**Engine:** `SceneDynamicMesh::collisions` is seeded from the first flag and set by `DO_EnableCollisions`;
+`render3d::hits_wall` skips DOs with it off. HYPOTHESIS: `+0x4ad` (second flag) is a second contact class
+(projectiles or the camera); the engine ignores it.
+
+## `DO_EnableContinuousUpdate` (2026-11-02, static)
+
+VERIFIED: `0x6f4320` stores the bool at DO `+0x4af` and calls `0x6f4410` (colour refresh only). The initial value is
+the record's `+0xa3`, the **fourth** of the six `.ldb` flags (`0x5ef500`, stored at `0x6f2c76`). Getter `0x6f44c0`
+is `X_LevelRuntimeDynamicObject` vtable slot 12. Camera `AttachToDO` (`0x6f4360`) prints
+`Warning: DO "%s" doesn't have continuous update on while attaching camera to it` (`0x89ca6c`) when it is off,
+and attaches anyway.
+
+STRONGLY SUPPORTED: the flag lets a DO skip its per-frame transform update while idle; a camera riding it needs
+the update. **Engine:** no change. `render3d` recomputes every DO pose each frame, which equals "always on".
+
 ## Open (next climb)
 
-- Prove RTTI of `LocalCharacterInput+0x1b5` receiver (dynamic or store-site cast).
-- If only those two `+0xb0` sites exist, confirm in-game that DO_Animate objects are advanced via that character cache (dynamic).
-- Wire Pause/Resume/Stop/Invert **messages** to `+0xb8`/`+0xbc`/`0x6f40e0` (message RTTI blocks at `0x6f7xxx` are type-name registration).
+- ~~Prove RTTI of `LocalCharacterInput+0x1b5` receiver~~ — moot: the DO tick caller is `0x6e1a00` via vt `+0x1c` (above).
+- ~~Wire Pause/Resume/Stop/Invert messages~~ — done above.
+- ~~`DO_EnableCollisions(b)` meaning~~ — read below (section "`DO_EnableCollisions`").
+- ~~`EnableContinuousUpdate`~~ — read below.
+- Lag semantics: the end/start lists go through `X_LaggedMessage` with the overshoot as delay (`0x6e2c00`). Exact
+  delivery frame is UNKNOWN.
 - Curve tag `0x71`; runtime channel counts.
 - Matrix IO thunk ↔ `M_Matrix4x3Template` at runtime.
 - KF2: who vcalls VA `+0x48` — see KF2 note (static exhausted → dynamic).
