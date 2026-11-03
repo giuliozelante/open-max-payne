@@ -65,6 +65,9 @@ pub struct GpuRenderer {
     hud: wgpu::RenderPipeline,
     background_image: (wgpu::Texture, wgpu::BindGroup),
     overlay_image: (wgpu::Texture, wgpu::BindGroup),
+    sky_pipe: wgpu::RenderPipeline,
+    /// World sphere image group and whether a sphere is set (else the flat background).
+    sky: (wgpu::BindGroup, bool),
 }
 
 /// The window's swapchain plus the offscreen colour and depth targets at window size.
@@ -233,9 +236,36 @@ fn fullscreen_pipeline(
     })
 }
 
-const FULLSCREEN_SHADER: &str = r#"
-@group(0) @binding(0) var img: texture_2d<f32>;
-@group(0) @binding(1) var img_sampler: sampler;
+/// `paint_sky_strip` per pixel: the view direction through the pixel centre, then
+/// `sky_strip_uv`. Without a sphere, the flat two-tone background of the software path.
+const SKY_SHADER: &str = r#"
+struct Camera { pos: vec4f, right: vec4f, up: vec4f, fwd: vec4f, params: vec4f, params2: vec4f };
+@group(0) @binding(0) var<uniform> cam: Camera;
+@group(1) @binding(0) var img: texture_2d<f32>;
+@group(1) @binding(1) var img_sampler: sampler;
+@fragment
+fn fs_sky(v: V) -> @location(0) vec4f {
+    if cam.params2.y < 0.5 {
+        if v.uv.y < 0.5 {
+            return vec4f(vec3f(22.0, 28.0, 40.0) / 255.0, 1.0);
+        }
+        return vec4f(vec3f(30.0, 30.0, 34.0) / 255.0, 1.0);
+    }
+    let w = cam.params2.z;
+    let h = cam.params2.w;
+    let fov = cam.params.x * w * 0.5;
+    let cx = (v.uv.x * w - w * 0.5) / fov;
+    let cy = (h * 0.5 - v.uv.y * h) / fov;
+    let d = normalize(cam.right.xyz * cx + cam.up.xyz * cy + cam.fwd.xyz);
+    let u = fract(atan2(d.x, d.z) / 6.2831853 + 0.5);
+    let lat = max(asin(clamp(d.y, -1.0, 1.0)), 0.0);
+    let t = clamp(1.0 - lat / 1.5707963, 0.0, 0.999);
+    return textureSampleLevel(img, img_sampler, vec2f(u, t), 0.0);
+}
+"#;
+
+/// Fullscreen triangle vertex stage, shared by the image and sky shaders.
+const FULLSCREEN_VS: &str = r#"
 struct V { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 @vertex
 fn vs_full(@builtin(vertex_index) i: u32) -> V {
@@ -246,6 +276,11 @@ fn vs_full(@builtin(vertex_index) i: u32) -> V {
     o.uv = vec2f(x, y);
     return o;
 }
+"#;
+
+const FULLSCREEN_SHADER: &str = r#"
+@group(0) @binding(0) var img: texture_2d<f32>;
+@group(0) @binding(1) var img_sampler: sampler;
 @fragment
 fn fs_image(v: V) -> @location(0) vec4f {
     return textureSample(img, img_sampler, v.uv);
@@ -408,7 +443,7 @@ struct CameraUniform {
     fwd: [f32; 4],
     /// x = fov / half width, y = fov / half height, z = use lightmaps, w = far plane.
     params: [f32; 4],
-    /// x = near plane.
+    /// x = near plane, y = has sky, z/w = frame width/height (sky directions).
     params2: [f32; 4],
 }
 
@@ -835,7 +870,7 @@ impl GpuRenderer {
 
         let full_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fullscreen"),
-            source: wgpu::ShaderSource::Wgsl(FULLSCREEN_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{FULLSCREEN_VS}{FULLSCREEN_SHADER}").into()),
         });
         let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("image"),
@@ -880,6 +915,25 @@ impl GpuRenderer {
         };
         let background_image = frame_image();
         let overlay_image = frame_image();
+        let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sky"),
+            source: wgpu::ShaderSource::Wgsl(format!("{FULLSCREEN_VS}{SKY_SHADER}").into()),
+        });
+        let sky_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky"),
+            bind_group_layouts: &[Some(&camera_layout), Some(&image_layout)],
+            immediate_size: 0,
+        });
+        let sky_pipe = fullscreen_pipeline(
+            &device,
+            &sky_layout,
+            &sky_shader,
+            "fs_sky",
+            COLOR_FORMAT,
+            None,
+            true,
+        );
+        let sky_group = image_group(&device, &image_layout, &binder.blank, &binder.tex_sampler);
         Self {
             device,
             queue,
@@ -902,6 +956,8 @@ impl GpuRenderer {
             hud: overlay_pipe,
             background_image,
             overlay_image,
+            sky_pipe,
+            sky: (sky_group, false),
         }
     }
 
@@ -1048,7 +1104,7 @@ impl GpuRenderer {
                 if use_lightmaps { 1.0 } else { 0.0 },
                 FAR_Z,
             ],
-            params2: [NEAR_Z, 0.0, 0.0, 0.0],
+            params2: [NEAR_Z, if self.sky.1 { 1.0 } else { 0.0 }, w, h],
         };
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&camera));
@@ -1106,7 +1162,8 @@ impl GpuRenderer {
         }
     }
 
-    /// One window frame: `background` (the CPU sky) behind, the 3D scene when `view` is given,
+    /// One window frame: `background` (CPU pixels, e.g. wireframe) or the sky behind, the 3D
+    /// scene when `view` is given,
     /// `hud` on top (pixels equal to [`HUD_CLEAR`] are transparent), then a blit to the
     /// swapchain at window size.
     #[allow(clippy::too_many_arguments)]
@@ -1118,32 +1175,12 @@ impl GpuRenderer {
         view: Option<GpuView>,
         use_lightmaps: bool,
         characters: &[GpuCharacter],
-        background: &[u32],
+        background: Option<&[u32]>,
         hud: &[u32],
     ) {
         surface.resize(self, window_size.0, window_size.1);
         let frame = view.map(|v| self.prepare_scene(scene, v, use_lightmaps, characters));
-        let size = wgpu::Extent3d {
-            width: FRAME_W as u32,
-            height: FRAME_H as u32,
-            depth_or_array_layers: 1,
-        };
-        let layout = wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4 * FRAME_W as u32),
-            rows_per_image: Some(FRAME_H as u32),
-        };
-        for (image, pixels, transparent) in [
-            (&self.background_image.0, background, None),
-            (&self.overlay_image.0, hud, Some(HUD_CLEAR)),
-        ] {
-            self.queue.write_texture(
-                image.as_image_copy(),
-                &frame_rgba(pixels, transparent),
-                layout,
-                size,
-            );
-        }
+        self.upload_layers(background, hud);
         let output = match surface.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -1156,40 +1193,13 @@ impl GpuRenderer {
         let depth_view = surface.depth.create_view(&Default::default());
         let out_view = output.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("frame"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.background);
-            pass.set_bind_group(0, &self.background_image.1, &[]);
-            pass.draw(0..3, 0..1);
-            if let Some(frame) = &frame {
-                self.draw_scene(&mut pass, frame);
-            }
-            pass.set_pipeline(&self.hud);
-            pass.set_bind_group(0, &self.overlay_image.1, &[]);
-            pass.draw(0..3, 0..1);
-        }
+        self.encode_frame(
+            &mut encoder,
+            &color_view,
+            &depth_view,
+            frame.as_ref(),
+            background.is_some(),
+        );
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("blit"),
@@ -1308,6 +1318,158 @@ impl GpuRenderer {
                 .write_buffer(buffer, 0, bytemuck::cast_slice(&verts));
         }
         draws
+    }
+}
+
+impl GpuRenderer {
+    /// The level's world sphere strip (`sky_strip_uv`), or `None` for the flat background.
+    pub fn set_sky(&mut self, sky: Option<&crate::scene::DecodedTexture>) {
+        let view = sky
+            .filter(|t| t.width > 0 && t.height > 0)
+            .map(|t| upload(&self.device, &self.queue, t.width, t.height, &t.pixels));
+        let group = image_group(
+            &self.device,
+            &self.image_layout,
+            view.as_ref().unwrap_or(&self.binder.blank),
+            &self.binder.tex_sampler,
+        );
+        self.sky = (group, view.is_some());
+    }
+
+    /// Upload `background` (when given) and `hud` into their frame images.
+    fn upload_layers(&self, background: Option<&[u32]>, hud: &[u32]) {
+        let size = wgpu::Extent3d {
+            width: FRAME_W as u32,
+            height: FRAME_H as u32,
+            depth_or_array_layers: 1,
+        };
+        let layout = wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * FRAME_W as u32),
+            rows_per_image: Some(FRAME_H as u32),
+        };
+        let mut layers = vec![(&self.overlay_image.0, hud, Some(HUD_CLEAR))];
+        if let Some(bg) = background {
+            layers.push((&self.background_image.0, bg, None));
+        }
+        for (image, pixels, transparent) in layers {
+            self.queue.write_texture(
+                image.as_image_copy(),
+                &frame_rgba(pixels, transparent),
+                layout,
+                size,
+            );
+        }
+    }
+
+    /// Background (the CPU image, or the sky behind a scene), the scene, then the HUD.
+    fn encode_frame(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        frame: Option<&SceneFrame>,
+        cpu_background: bool,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("frame"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: color,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        if cpu_background {
+            pass.set_pipeline(&self.background);
+            pass.set_bind_group(0, &self.background_image.1, &[]);
+            pass.draw(0..3, 0..1);
+        } else if frame.is_some() {
+            pass.set_pipeline(&self.sky_pipe);
+            pass.set_bind_group(0, &self.camera_group, &[]);
+            pass.set_bind_group(1, &self.sky.0, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        if let Some(frame) = frame {
+            self.draw_scene(&mut pass, frame);
+        }
+        pass.set_pipeline(&self.hud);
+        pass.set_bind_group(0, &self.overlay_image.1, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// The composed frame (sky or `background`, scene, HUD) at frame size, read back.
+    pub fn compose_frame(
+        &mut self,
+        scene: &LdbScene,
+        view: Option<GpuView>,
+        use_lightmaps: bool,
+        characters: &[GpuCharacter],
+        background: Option<&[u32]>,
+        hud: &[u32],
+    ) -> Vec<u32> {
+        let frame = view.map(|v| self.prepare_scene(scene, v, use_lightmaps, characters));
+        self.upload_layers(background, hud);
+        let color = self.color.create_view(&Default::default());
+        let depth = self.depth.create_view(&Default::default());
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.encode_frame(
+            &mut encoder,
+            &color,
+            &depth,
+            frame.as_ref(),
+            background.is_some(),
+        );
+        let (w, h) = (FRAME_W as u32, FRAME_H as u32);
+        encoder.copy_texture_to_buffer(
+            self.color.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.color_out,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * w),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        self.color_out
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        let out = match self.color_out.slice(..).get_mapped_range() {
+            Ok(bytes) => bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| (u32::from(c[0]) << 16) | (u32::from(c[1]) << 8) | u32::from(c[2]))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        self.color_out.unmap();
+        out
     }
 }
 
@@ -1608,6 +1770,57 @@ mod tests {
                 sw_fb[center]
             );
         }
+    }
+
+    fn gradient_sky() -> crate::scene::DecodedTexture {
+        let (width, height) = (64u32, 16u32);
+        crate::scene::DecodedTexture {
+            path: "sky.tga".into(),
+            flag: 0,
+            width,
+            height,
+            pixels: (0..width * height)
+                .map(|i| ((i % width) * 4) << 16 | ((i / width) * 16) << 8 | 0x40)
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn gpu_sky_matches_the_software_sky() {
+        let scene = crate::render3d::test_empty_scene();
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: gpu_sky_matches_the_software_sky skipped");
+            return;
+        };
+        let sky = gradient_sky();
+        gpu.set_sky(Some(&sky));
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let view = crate::render3d::test_view([0.0, 1.0, 0.0], [0.6, 0.3, 0.74]);
+        let cpu = crate::render3d::test_software_sky(&sky, view);
+        let hud = vec![HUD_CLEAR; w * h];
+        let gpu_frame = gpu.compose_frame(&scene, Some(view), true, &[], None, &hud);
+        let same = cpu.iter().zip(&gpu_frame).filter(|(a, b)| a == b).count();
+        // Nearest-texel boundaries may land one texel apart; everything else matches.
+        assert!(same as f32 / (w * h) as f32 > 0.97, "sky agreement {same}");
+    }
+
+    #[test]
+    fn without_a_sky_the_frame_has_the_flat_two_tone_background() {
+        let scene = crate::render3d::test_empty_scene();
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!(
+                "no GPU adapter: without_a_sky_the_frame_has_the_flat_two_tone_background skipped"
+            );
+            return;
+        };
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let view = crate::render3d::test_view([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+        let mut hud = vec![HUD_CLEAR; w * h];
+        hud[(h / 2) * w + 7] = 0x00ff_dd66;
+        let frame = gpu.compose_frame(&scene, Some(view), true, &[], None, &hud);
+        assert_eq!(frame[w * 10 + 10], 0x0016_1c28, "upper half");
+        assert_eq!(frame[w * (h - 10) + 10], 0x001e_1e22, "lower half");
+        assert_eq!(frame[(h / 2) * w + 7], 0x00ff_dd66, "HUD pixel on top");
     }
 
     #[test]

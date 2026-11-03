@@ -260,6 +260,9 @@ pub fn run_3d_walkthrough(
     let mut gpu = winit_window
         .as_ref()
         .and_then(|front| crate::gpu::GpuRenderer::for_window(&scene, front));
+    if let Some((renderer, _)) = gpu.as_mut() {
+        renderer.set_sky(sky.as_ref());
+    }
     if gpu.is_none() && winit_window.is_some() {
         winit_window = None;
         soft_window = Some(open_soft()?);
@@ -579,7 +582,10 @@ pub fn run_3d_walkthrough(
 
         let fov_scale = (H as f32) * 0.85;
         // World sphere (house = sunset) or the flat ceiling when the level names none.
-        if let Some(ref tex) = sky {
+        // The hardware renderer draws the sky itself unless it shows the CPU frame (wireframe).
+        let cpu_frame = gpu.is_none() || wireframe;
+        if !cpu_frame {
+        } else if let Some(ref tex) = sky {
             paint_sky_strip(tex, cam_right, cam_up, cam_fwd, fov_scale, &mut fb);
         } else {
             for y in 0..H {
@@ -767,7 +773,7 @@ pub fn run_3d_walkthrough(
                 scene_view,
                 use_lightmaps,
                 &characters,
-                &background,
+                wireframe.then_some(background.as_slice()),
                 &fb,
             ),
             (_, _, Some(soft)) => soft
@@ -1862,6 +1868,17 @@ pub(crate) fn test_software_character(
         &mut zb,
     );
     (fb, zb)
+}
+
+/// The software sky for `view` (the hardware renderer's reference).
+#[cfg(test)]
+pub(crate) fn test_software_sky(
+    tex: &DecodedTexture,
+    (_, right, up, fwd): crate::gpu::GpuView,
+) -> Vec<u32> {
+    let mut fb = vec![0u32; W * H];
+    paint_sky_strip(tex, right, up, fwd, (H as f32) * 0.85, &mut fb);
+    fb
 }
 
 /// Software render of the static meshes only (the hardware renderer's reference).
