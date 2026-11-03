@@ -1139,7 +1139,7 @@ impl Drop for SoundChannels {
 }
 
 /// `ffplay` without a window; `-loop 0` repeats a looping cue until it is killed.
-fn sound_player_args(wav: &Path, looping: bool) -> Vec<String> {
+pub(crate) fn sound_player_args(wav: &Path, looping: bool) -> Vec<String> {
     let mut args: Vec<String> = ["-nodisp", "-autoexit", "-loglevel", "quiet"]
         .map(String::from)
         .to_vec();
