@@ -94,6 +94,59 @@ pub fn show_novel_session(screen: &mut Screen, chrome: &[u8], pages: &[NovelShow
     stop_voice(&mut voice);
 }
 
+/// The mode music (`a_playmusic` in `menu.txt` `[OnInit]`), looping until another cue replaces it.
+/// Dropping it stops the music.
+#[derive(Default)]
+pub struct Music {
+    cue: Option<String>,
+    child: Option<Child>,
+}
+
+impl Music {
+    /// Play `mode`'s music (`menumode`, `graphicnovelmode`); a mode without music stops it,
+    /// as `LevelOnInitMessages` does when a level starts (`a_playmusic("")`).
+    pub fn play_mode(&mut self, game_dir: &std::path::Path, mode: &str) {
+        let cue = crate::read_game_bytes(game_dir, r"\data\menu\menu.txt")
+            .and_then(|bytes| crate::mode_music_cue(&String::from_utf8_lossy(&bytes), mode));
+        self.play(game_dir, cue.as_deref());
+    }
+
+    fn play(&mut self, game_dir: &std::path::Path, cue: Option<&str>) {
+        if self.cue.as_deref() == cue {
+            return;
+        }
+        stop_voice(&mut self.child);
+        self.cue = cue.map(str::to_string);
+        let Some(cue) = cue else {
+            return;
+        };
+        let wav = crate::read_game_bytes(game_dir, r"\data\database\music\music.txt")
+            .and_then(|bytes| crate::music_win_path(&String::from_utf8_lossy(&bytes), cue))
+            .and_then(|win| crate::read_game_bytes(game_dir, &win));
+        let Some(wav) = wav else {
+            eprintln!("music {cue}: not found");
+            return;
+        };
+        let path = std::env::temp_dir().join(format!("omp-music-{}-{cue}.wav", std::process::id()));
+        if std::fs::write(&path, wav).is_err() {
+            return;
+        }
+        self.child = Command::new("ffplay")
+            .args(crate::render3d::sound_player_args(&path, true))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok();
+    }
+}
+
+impl Drop for Music {
+    fn drop(&mut self) {
+        stop_voice(&mut self.child);
+    }
+}
+
 pub(crate) fn start_voice(wav: &[u8]) -> Option<Child> {
     if wav.len() < 12 || &wav[..4] != b"RIFF" {
         return None;

@@ -657,12 +657,14 @@ fn launch_startup(game_dir: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let mut music = maxfx_engine::menu_ui::Music::default();
+    music.play_mode(game_dir, "menumode");
     let Some(level_id) = maxfx_engine::menu_ui::run_main_menu(&mut screen, &menu) else {
         println!("quit");
         return ExitCode::SUCCESS;
     };
     println!("start level {level_id}");
-    if let Err(e) = play_level(&mut screen, game_dir, &level_id, true) {
+    if let Err(e) = play_level(&mut screen, &mut music, game_dir, &level_id, true) {
         eprintln!("error: {e}");
         return ExitCode::FAILURE;
     }
@@ -673,6 +675,7 @@ fn launch_startup(game_dir: &Path) -> ExitCode {
 /// switch to the graphic novel, then the comic page, then the next level. Space skips the intro.
 fn play_level(
     screen: &mut maxfx_engine::frontend::Screen,
+    music: &mut maxfx_engine::menu_ui::Music,
     game_dir: &Path,
     level_id: &str,
     allow_handoff: bool,
@@ -689,8 +692,12 @@ fn play_level(
         if !pages.is_empty() {
             println!("opening pages {}", pages.join(", "));
             let (chrome, shown) = maxfx_engine::load_novel_session(game_dir, &pages);
+            music.play_mode(game_dir, "graphicnovelmode");
             maxfx_engine::menu_ui::show_novel_session(screen, &chrome, &shown);
         }
+        // `LevelOnInitMessages`: a level starts in silence; the startup intro keeps the menu
+        // theme, as the retail menu plays it over the same rooftop.
+        music.play_mode(game_dir, "gamemode");
     }
     let mut scene = maxfx_engine::scene::parse_ldb_scene(&bytes)
         .ok_or_else(|| format!("{win} did not decode"))?;
@@ -719,8 +726,9 @@ fn play_level(
         );
         let (chrome, shown) =
             maxfx_engine::load_novel_session(game_dir, std::slice::from_ref(&hand.novel_page));
+        music.play_mode(game_dir, "graphicnovelmode");
         maxfx_engine::menu_ui::show_novel_session(screen, &chrome, &shown);
-        return play_level(screen, game_dir, &hand.next_level, false);
+        return play_level(screen, music, game_dir, &hand.next_level, false);
     }
     Ok(())
 }

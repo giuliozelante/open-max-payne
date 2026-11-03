@@ -2582,6 +2582,44 @@ pub fn load_sound_catalogs(game_dir: &Path) -> BTreeMap<String, String> {
 
 /// Filename inside `[cue]` in `sounds/story.txt`. `empty` reads `[Empty]`.
 pub fn story_sound_filename(text: &str, cue: &str) -> Option<String> {
+    sound_cue_value(text, cue, "filename")
+}
+
+/// `maxpayne_{mode}->a_playmusic( cue )` from `data\menu\menu.txt` `[OnInit]`
+/// (`menumode` → `max_payne`, `graphicnovelmode` → `graphic_novel`).
+pub fn mode_music_cue(menu_txt: &str, mode: &str) -> Option<String> {
+    let receiver = format!("maxpayne_{}->a_playmusic(", mode.to_ascii_lowercase());
+    menu_txt.lines().find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        let at = lower.find(&receiver)? + receiver.len();
+        let cue = line[at..]
+            .split(')')
+            .next()?
+            .trim()
+            .trim_matches('"')
+            .trim();
+        (!cue.is_empty()).then(|| cue.to_string())
+    })
+}
+
+/// `[cue]` `Filename` in `data\database\music\music.txt`, as an archive path.
+pub fn music_win_path(music_txt: &str, cue: &str) -> Option<String> {
+    let file = sound_cue_value(music_txt, cue, "filename")?;
+    let file = file.trim_matches('"').replace('/', "\\");
+    Some(format!(
+        "\\data\\database\\music\\{}",
+        file.trim_start_matches('\\')
+    ))
+}
+
+/// `Looping = YES` inside `[cue]` (siren and engine loops in `sounds/dynamic.txt`).
+pub fn sound_cue_looping(text: &str, cue: &str) -> bool {
+    sound_cue_value(text, cue, "looping")
+        .is_some_and(|v| v.eq_ignore_ascii_case("yes") || v.eq_ignore_ascii_case("true"))
+}
+
+/// First non-empty `key = value` inside `[cue]`, across its `[Properties]`/`[Default]`/`[Sound]` parts.
+fn sound_cue_value(text: &str, cue: &str, wanted: &str) -> Option<String> {
     let header = format!("[{}]", cue.trim());
     let mut grab = false;
     for line in text.lines() {
@@ -2602,7 +2640,7 @@ pub fn story_sound_filename(text: &str, cue: &str) -> Option<String> {
             }
         }
         if let Some((key, value)) = assign_pair(line) {
-            if key.eq_ignore_ascii_case("filename") && !value.is_empty() {
+            if key.eq_ignore_ascii_case(wanted) && !value.is_empty() {
                 return Some(value);
             }
         }
@@ -3853,6 +3891,38 @@ mod tests {
         let mut frame = vec![0u32; 2];
         bgra_to_frame(&bytes, &mut frame);
         assert_eq!(frame, vec![0x0030_2010, 0x0003_0201]);
+    }
+
+    #[test]
+    fn sound_cue_looping_reads_the_cue_block_only() {
+        let text = "[a_loop]\n{\n[Sound]\nFilename = x.wav;\nLooping = YES;\n}\n[b]\n{\n[Sound]\nFilename = y.wav;\n}\n";
+        assert!(sound_cue_looping(text, "A_Loop"));
+        assert!(!sound_cue_looping(text, "b"));
+        assert!(!sound_cue_looping(text, "missing"));
+    }
+
+    #[test]
+    fn menu_init_names_the_music_of_each_mode() {
+        let menu = "[OnInit]\n{\n\t[Message] String = \"maxpayne_menumode->a_playmusic( max_payne );\";\n\t[Message] String = \"maxpayne_graphicnovelmode->a_playmusic( graphic_novel );\";\n}\n";
+        assert_eq!(
+            mode_music_cue(menu, "menumode").as_deref(),
+            Some("max_payne")
+        );
+        assert_eq!(
+            mode_music_cue(menu, "graphicnovelmode").as_deref(),
+            Some("graphic_novel")
+        );
+        assert_eq!(mode_music_cue(menu, "gamemode"), None);
+    }
+
+    #[test]
+    fn music_cues_map_to_wavs_in_the_music_database() {
+        let music = "#define\tMUSIC_FADETIME\t\t1.0\n[max_payne]\t\t//  1. Max Payne Theme\nFilename \t= \"wavs\\max_theme.wav\";\nFadeInTime\t= MUSIC_FADETIME ;\nLooping\t\t= true;\n\n[just_forget]\nFilename\t= \"wavs\\just_forget_about_it.wav\";\n";
+        assert_eq!(
+            music_win_path(music, "max_payne").as_deref(),
+            Some(r"\data\database\music\wavs\max_theme.wav")
+        );
+        assert_eq!(music_win_path(music, "nope"), None);
     }
 
     #[test]
