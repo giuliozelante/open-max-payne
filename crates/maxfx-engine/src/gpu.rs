@@ -36,6 +36,8 @@ pub struct StaticBatch {
     pub depth_bias: f32,
     /// Dynamic mesh index, `None` for static room geometry.
     pub mesh: Option<usize>,
+    /// Alpha-blended after the alpha test (`BlendedAlphaTest`).
+    pub blended: bool,
     pub verts: Vec<GpuVertex>,
 }
 
@@ -48,6 +50,9 @@ pub struct GpuRenderer {
     queue: wgpu::Queue,
     opaque: wgpu::RenderPipeline,
     overlay: wgpu::RenderPipeline,
+    /// The same two depth modes, alpha-blended (BlendedAlphaTest batches).
+    opaque_blend: wgpu::RenderPipeline,
+    overlay_blend: wgpu::RenderPipeline,
     camera_buf: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
     /// `[0]` static geometry (identity), `[1 + i]` dynamic mesh `i`.
@@ -432,6 +437,7 @@ fn upload(
 struct GpuDraw {
     mesh: Option<usize>,
     writes_z: bool,
+    blended: bool,
     vertices: wgpu::Buffer,
     count: u32,
     group: wgpu::BindGroup,
@@ -489,11 +495,13 @@ impl ModelUniform {
 struct BatchUniform {
     /// x = alpha reference / 255 (-1 = none), y = depth bias, z = has texture, w = has lightmap.
     params: [f32; 4],
+    /// x = blended (texel alpha goes to the blend stage).
+    params2: [f32; 4],
 }
 
 const SHADER: &str = r#"
 struct Camera { pos: vec4f, right: vec4f, up: vec4f, fwd: vec4f, params: vec4f, params2: vec4f };
-struct Batch { params: vec4f };
+struct Batch { params: vec4f, params2: vec4f };
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(1) @binding(0) var<uniform> batch: Batch;
 @group(1) @binding(1) var tex: texture_2d<f32>;
@@ -565,7 +573,8 @@ fn fs(i: Out) -> Frag {
         rgb = base.rgb * textureSample(lmap, lmap_sampler, clamp(i.luv, vec2f(0.0), vec2f(1.0))).rgb;
     }
     var f: Frag;
-    f.color = vec4f(rgb, 1.0);
+    // Blended batches (BlendedAlphaTest) hand the texel alpha to the blend stage.
+    f.color = vec4f(rgb, select(1.0, base.a, batch.params2.x > 0.5));
     f.depth = clamp((i.vz - batch.params.y) / cam.params.w, 0.0, 1.0);
     return f;
 }
@@ -712,12 +721,12 @@ impl GpuRenderer {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &attributes,
         })];
-        let targets = [Some(wgpu::ColorTargetState {
-            format: COLOR_FORMAT,
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
-        let pipeline = |writes_z: bool| {
+        let pipeline = |writes_z: bool, blended: bool| {
+            let targets = [Some(wgpu::ColorTargetState {
+                format: COLOR_FORMAT,
+                blend: blended.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })];
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("static"),
                 layout: Some(&layout),
@@ -746,8 +755,10 @@ impl GpuRenderer {
                 cache: None,
             })
         };
-        let opaque = pipeline(true);
-        let overlay = pipeline(false);
+        let opaque = pipeline(true, false);
+        let overlay = pipeline(false, false);
+        let opaque_blend = pipeline(true, true);
+        let overlay_blend = pipeline(false, true);
 
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera"),
@@ -829,6 +840,7 @@ impl GpuRenderer {
                     if tex.is_some() { 1.0 } else { 0.0 },
                     if lmap.is_some() { 1.0 } else { 0.0 },
                 ],
+                params2: [if batch.blended { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
             };
             let group = binder.batch_group(&device, &queue, uniform, tex, lmap);
             let vertices = device.create_buffer(&wgpu::BufferDescriptor {
@@ -841,6 +853,7 @@ impl GpuRenderer {
             draws.push(GpuDraw {
                 mesh: batch.mesh,
                 writes_z: batch.writes_z,
+                blended: batch.blended,
                 vertices,
                 count: batch.verts.len() as u32,
                 group,
@@ -948,6 +961,8 @@ impl GpuRenderer {
             queue,
             opaque,
             overlay,
+            opaque_blend,
+            overlay_blend,
             camera_buf,
             camera_group,
             models,
@@ -1141,13 +1156,18 @@ impl GpuRenderer {
     /// (the order of render_poly_batch).
     fn draw_scene(&self, pass: &mut wgpu::RenderPass, frame: &SceneFrame) {
         pass.set_bind_group(0, &self.camera_group, &[]);
-        for writes_z in [true, false] {
-            pass.set_pipeline(if writes_z {
-                &self.opaque
-            } else {
-                &self.overlay
+        for (writes_z, blended) in [(true, false), (true, true), (false, false), (false, true)] {
+            pass.set_pipeline(match (writes_z, blended) {
+                (true, false) => &self.opaque,
+                (true, true) => &self.opaque_blend,
+                (false, false) => &self.overlay,
+                (false, true) => &self.overlay_blend,
             });
-            for draw in self.draws.iter().filter(|d| d.writes_z == writes_z) {
+            for draw in self
+                .draws
+                .iter()
+                .filter(|d| d.writes_z == writes_z && d.blended == blended)
+            {
                 let model = match draw.mesh {
                     Some(i) if !frame.visible.get(i).copied().unwrap_or(false) => continue,
                     Some(i) => i + 1,
@@ -1159,7 +1179,9 @@ impl GpuRenderer {
                 pass.draw(0..draw.count, 0..1);
             }
             // Characters write depth like the software path (rasterize_tri with write_z).
-            if let (true, Some((buffer, _))) = (writes_z, self.characters.vertices.as_ref()) {
+            if let (true, false, Some((buffer, _))) =
+                (writes_z, blended, self.characters.vertices.as_ref())
+            {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 for d in &frame.characters {
                     pass.set_bind_group(1, &self.characters.materials[&d.mesh][d.material], &[]);
@@ -1251,6 +1273,7 @@ impl GpuRenderer {
                         });
                         let uniform = BatchUniform {
                             params: [-1.0, 0.0, if view.is_some() { 1.0 } else { 0.0 }, 0.0],
+                            params2: [0.0; 4],
                         };
                         self.binder.batch_group(
                             &self.device,
@@ -1493,6 +1516,7 @@ type BatchKey = (
     bool,
     i32,
     Option<usize>,
+    bool,
 );
 
 fn add_polys(
@@ -1515,6 +1539,7 @@ fn add_polys(
                     b.writes_z,
                     detail,
                     b.mesh,
+                    b.blended,
                 ),
                 i,
             )
@@ -1529,6 +1554,7 @@ fn add_polys(
         let texture = material.and_then(|m| m.texture_index);
         let alpha_reference = material.and_then(|m| m.alpha_reference);
         let lightmap = (poly.lightmap_id >= 0).then_some(poly.lightmap_id as usize);
+        let blended = alpha_reference.is_some() && material.is_some_and(|m| m.blended);
         let key = (
             texture,
             lightmap,
@@ -1536,6 +1562,7 @@ fn add_polys(
             policy.writes_z,
             policy.detail_offset,
             mesh,
+            blended,
         );
         let at = *index.entry(key).or_insert_with(|| {
             batches.push(StaticBatch {
@@ -1545,6 +1572,7 @@ fn add_polys(
                 writes_z: policy.writes_z,
                 depth_bias: policy.detail_offset as f32 * DETAIL_OFFSET_M,
                 mesh,
+                blended,
                 verts: Vec::new(),
             });
             batches.len() - 1
@@ -1632,6 +1660,7 @@ mod tests {
                 texture_path: String::new(),
                 texture_index: None,
                 alpha_reference: None,
+                blended: false,
             },
         );
         let batches = build_static_batches(&scene);
@@ -1766,6 +1795,7 @@ mod tests {
                 [0.0; 3],
                 hit_flash,
                 &[],
+                [0.0; 3],
             );
             let character = GpuCharacter {
                 mesh: &rig.mesh,
@@ -1861,6 +1891,50 @@ mod tests {
         );
         // The background keeps every pixel opaque.
         assert!(frame_rgba(&hud, None).chunks(4).all(|c| c[3] == 0xff));
+    }
+
+    #[test]
+    fn gpu_blended_plate_matches_the_software_blend() {
+        // A white texel at alpha 128 on a BlendedAlphaTest material, over a black frame.
+        let mut scene = crate::render3d::test_empty_scene();
+        scene.textures.push(crate::scene::DecodedTexture {
+            path: "plate".into(),
+            flag: 4,
+            width: 1,
+            height: 1,
+            pixels: vec![0x80ff_ffff],
+        });
+        scene.materials.insert(
+            1,
+            SceneMaterial {
+                id: 1,
+                category: "externalwall".into(),
+                texture_path: String::new(),
+                texture_index: Some(0),
+                alpha_reference: Some(15),
+                blended: true,
+            },
+        );
+        let mut plate = crate::render3d::test_glass_quad(false);
+        plate.polys[0].material_id = 1;
+        scene.dynamic_meshes.push(plate);
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: gpu_blended_plate_matches_the_software_blend skipped");
+            return;
+        };
+        let view = crate::render3d::test_view([-4.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        let (sw_fb, _) = crate::render3d::test_software_dynamic(&scene, view);
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let mut fb = vec![0u32; w * h];
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
+        let center = (h / 2) * w + w / 2;
+        assert!(sw_fb[center] != 0, "the plate must draw");
+        let gap = (0..3)
+            .map(|k| ((fb[center] >> (8 * k)) & 0xff).abs_diff((sw_fb[center] >> (8 * k)) & 0xff))
+            .max()
+            .unwrap_or(0);
+        assert!(gap <= 1, "{:06x} vs {:06x}", fb[center], sw_fb[center]);
     }
 
     #[test]
