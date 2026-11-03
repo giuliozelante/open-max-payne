@@ -1887,7 +1887,7 @@ pub(crate) fn apply_fog(fb: &mut [u32], zb: &[f32], fog: Option<LevelFog>) {
 }
 
 /// Mix `rgba` over every `0x00RRGGBB` pixel by its alpha.
-fn blend_screen(fb: &mut [u32], rgba: [u8; 4]) {
+pub(crate) fn blend_screen(fb: &mut [u32], rgba: [u8; 4]) {
     let a = u32::from(rgba[3]);
     if a == 0 {
         return;

@@ -601,6 +601,26 @@ fn frame_rgba(pixels: &[u32], transparent: Option<u32>) -> Vec<u8> {
         .collect()
 }
 
+/// The HUD layer with the screen fade on it: clear pixels carry the fade colour at its alpha
+/// (alpha-blended over the scene), drawn HUD pixels get the fade mixed in and stay opaque.
+fn overlay_rgba(hud: &[u32], fade: Option<[u8; 4]>) -> Vec<u8> {
+    let Some(fade) = fade else {
+        return frame_rgba(hud, Some(HUD_CLEAR));
+    };
+    let mut faded = hud.to_vec();
+    crate::render3d::blend_screen(&mut faded, fade);
+    hud.iter()
+        .zip(&faded)
+        .flat_map(|(&p, &f)| {
+            if p == HUD_CLEAR {
+                fade
+            } else {
+                [(f >> 16) as u8, (f >> 8) as u8, f as u8, 255]
+            }
+        })
+        .collect()
+}
+
 /// HUD pixels with this value are transparent in [`GpuRenderer::present`].
 pub const HUD_CLEAR: u32 = 0xff00_0000;
 
@@ -1234,7 +1254,7 @@ impl GpuRenderer {
     ) {
         surface.resize(self, window_size.0, window_size.1);
         let frame = view.map(|v| self.prepare_scene(scene, v, use_lightmaps, characters));
-        self.upload_layers(background, hud);
+        self.upload_layers(background, hud, scene.screen_fade.map(|fade| fade.color()));
         let output = match surface.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -1384,8 +1404,8 @@ impl GpuRenderer {
         self.sky = (group, view.is_some());
     }
 
-    /// Upload `background` (when given) and `hud` into their frame images.
-    fn upload_layers(&self, background: Option<&[u32]>, hud: &[u32]) {
+    /// Upload `background` (when given) and `hud`, with the screen fade on it, into their frame images.
+    fn upload_layers(&self, background: Option<&[u32]>, hud: &[u32], fade: Option<[u8; 4]>) {
         let size = wgpu::Extent3d {
             width: FRAME_W as u32,
             height: FRAME_H as u32,
@@ -1396,14 +1416,16 @@ impl GpuRenderer {
             bytes_per_row: Some(4 * FRAME_W as u32),
             rows_per_image: Some(FRAME_H as u32),
         };
-        let mut layers = vec![(&self.overlay_image.0, hud, Some(HUD_CLEAR))];
+        self.queue.write_texture(
+            self.overlay_image.0.as_image_copy(),
+            &overlay_rgba(hud, fade),
+            layout,
+            size,
+        );
         if let Some(bg) = background {
-            layers.push((&self.background_image.0, bg, None));
-        }
-        for (image, pixels, transparent) in layers {
             self.queue.write_texture(
-                image.as_image_copy(),
-                &frame_rgba(pixels, transparent),
+                self.background_image.0.as_image_copy(),
+                &frame_rgba(bg, None),
                 layout,
                 size,
             );
@@ -1471,7 +1493,7 @@ impl GpuRenderer {
         hud: &[u32],
     ) -> Vec<u32> {
         let frame = view.map(|v| self.prepare_scene(scene, v, use_lightmaps, characters));
-        self.upload_layers(background, hud);
+        self.upload_layers(background, hud, scene.screen_fade.map(|fade| fade.color()));
         let color = self.color.create_view(&Default::default());
         let depth = self.depth.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -1902,6 +1924,21 @@ mod tests {
         assert_eq!(frame[w * 10 + 10], 0x0016_1c28, "upper half");
         assert_eq!(frame[w * (h - 10) + 10], 0x001e_1e22, "lower half");
         assert_eq!(frame[(h / 2) * w + 7], 0x00ff_dd66, "HUD pixel on top");
+    }
+
+    #[test]
+    fn screen_fade_goes_into_the_hud_overlay() {
+        // `MPHM_FadeToColor` covers scene and HUD, as `render3d::blend_screen` does in software.
+        let hud = [HUD_CLEAR, 0x00ff_dd66];
+        assert_eq!(overlay_rgba(&hud, None), frame_rgba(&hud, Some(HUD_CLEAR)));
+        assert_eq!(
+            overlay_rgba(&hud, Some([0, 0, 0, 255])),
+            vec![0, 0, 0, 255, 0, 0, 0, 255]
+        );
+        assert_eq!(
+            overlay_rgba(&hud, Some([255, 255, 255, 128])),
+            vec![255, 255, 255, 128, 0xff, 0xee, 0xb3, 255]
+        );
     }
 
     #[test]
