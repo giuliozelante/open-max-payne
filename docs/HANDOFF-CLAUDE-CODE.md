@@ -229,6 +229,11 @@ cd studio && ./build.sh
   winedbg's stdout is lost there. That is why it uses `--file` plus the `cmd` redirect. End the script with `detach`.
   Per-app `AppDefaults\…\Explorer\Desktop` registry keys had no effect under winedbg (tried, reverted).
   The desktop still looks fullscreen, probably because it follows the game's resolution.
+- Debug-run lessons (2026-11-02): pass `-skipstartup` after the exe path (the intro can't always be skipped).
+  DLLs are rebased: `e2_d3d8_driver_mfc` loaded at `0x1c00000` under winedbg and at `0x1b00000` without it,
+  so check `info share` and rebase driver addresses. Attaching (`winedbg --file s.txt <pid>`) loops on a page
+  fault in the attach thread under wow64, so launch under the debugger instead. The main menu loads a level (static
+  point lights fire there), so gate on something in-level only. The first lit `SetMaterial` (driver `+0x179c5`) works.
 - [ ] Production caller of KF VA apply `0x57cb70`
 - [ ] Exact type in `LocalCharacterInput+0x1b5` on animating-DO frames
 - [ ] Pause/Resume/Stop/Invert message → vt wiring
