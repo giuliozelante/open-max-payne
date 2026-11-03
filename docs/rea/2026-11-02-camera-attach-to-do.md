@@ -22,15 +22,20 @@ HYPOTHESIS: arg 0 is the camera's weight in percent. 100 attaches and 0 detaches
 ## Engine
 
 `LdbScene::attached_camera` is the receiver DO for a positive weight and `None` for 0. While attached, `render3d`
-takes the eye from the DO's world pose. Forward is the DO's **−z** axis and up its y axis. Right is up × forward,
-matching the player camera.
+takes the eye from the DO's world pose. Forward is the DO's **+z** axis and up its y axis, as for the startup
+flyover. Right is up × forward, matching the player camera. The player keeps moving underneath; retail disables
+controls with a separate `GM_SetPlayerControls`.
 
-STRONGLY SUPPORTED, −z: every cutscene camera DO checked (`::street02::camera1`, `::finito::camera2`,
-`::Bathroom::camera2`, the startup `altitude::camera`, P3L6 `altitude::camera1`) is the same 24-poly model, a
-frustum from the pivot at z = 0 widening to z = −1.25 (18 vertices at the wide end). Offline frames from
-`::street02::camera1` agree: −z looks down the street at the parked car, +z stares up at the hotel wall. P3L6's
-camera on the altitude mover shows the same split. This is the 3ds Max camera convention. The player keeps moving
-underneath; retail disables controls with a separate `GM_SetPlayerControls`.
+STRONGLY SUPPORTED, +z (2026-11-03): offline frames of the four house cutscene cameras along +z show their
+intended shots. `::entrance05::camera1` gives a high establishing view of the living room (its five tracks are
+static; the intro fades in on it with `STRING_MAXHOUSE_YEARS_AGO`), `::startroom::camera2` the hallway,
+`::entrance06::camera2` the mirror, and `::Bathroom::camera2` the bathroom with the blood on the floor. Along −z
+each of them faces a wall from close up.
+
+**Superseded:** an earlier version of this note chose −z because the 24-poly camera model widens toward local −z
+and because single static frames of `::street02::camera1` and P3L6 `altitude::camera1` looked better along −z.
+Those frames were taken before the cameras' tracks run, and the model's shape does not set the view axis. The
+four house cameras outweigh them.
 
 `GM_SetPlayerControls(bool)` (61 uses) clears or sets `LdbScene::player_controls`. While it is off,
 `render3d` ignores movement, jump, interact and fire; look keys stay live. HYPOTHESIS from the name and the
@@ -44,8 +49,8 @@ handler has not been read. `MPHM_FlashToColor` (4 args, 101 uses) is not handled
 ## Open
 
 - The view pose has been checked only in offline engine frames, not against a retail frame.
-- The startup flyover (`camera_flyover`) uses **+z** for a fixed forward vector and ignores the rotation of its
-  two `cam_rotator` ancestors. Offline frames along +z dolly forward down the street, which reads plausibly, so
-  this note does not settle its direction. UNKNOWN until the rotators are applied.
+- The startup flyover (`camera_flyover`) also uses +z; it still ignores the rotation of its two `cam_rotator`
+  ancestors.
+- `::street02::camera1` and P3L6 `altitude::camera1` along +z once their tracks run.
 - Blend between weights (does 50 mix the views?), arg 1, field of view (`GM_ChangeFOV`).
 - `CAM_AnimateInPlace` (184) and `CAM_AnimateParented` (64).

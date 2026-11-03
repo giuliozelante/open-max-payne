@@ -1046,13 +1046,13 @@ fn dynamic_world(
 /// Eye position, right, up, forward.
 type View = ([f32; 3], [f32; 3], [f32; 3], [f32; 3]);
 
-/// Eye, right, up and forward of the `CAM_AttachToDO` mesh: forward is its -z axis (camera models
-/// widen toward local -z), up its y axis, right = up × forward like the player camera.
+/// Eye, right, up and forward of the `CAM_AttachToDO` mesh: forward is its +z axis (as the
+/// startup flyover), up its y axis, right = up × forward like the player camera.
 fn attached_view(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>) -> Option<View> {
     let idx = scene.attached_camera?;
     scene.dynamic_meshes.get(idx)?;
     let (mat, pos) = dynamic_world(scene, idx, rooms);
-    let fwd = normalize(xform_dir(mat, [0.0, 0.0, -1.0]));
+    let fwd = normalize(xform_dir(mat, [0.0, 0.0, 1.0]));
     let up = normalize(xform_dir(mat, [0.0, 1.0, 0.0]));
     let right = [
         up[1] * fwd[2] - up[2] * fwd[1],
@@ -1813,12 +1813,13 @@ mod tests {
     }
 
     #[test]
-    fn attached_camera_looks_down_the_do_negative_z_axis() {
-        // Retail camera DOs are frustum models widening from the pivot toward local -z
-        // (`::street02::camera1.DO`: z in -1.25..0), the 3ds Max camera convention.
+    fn attached_camera_looks_along_the_do_z_axis() {
+        // The four house cutscene cameras (`::entrance05::camera1`, `::startroom::camera2`,
+        // `::entrance06::camera2`, `::Bathroom::camera2`) frame their rooms along +z; along -z
+        // they face a wall (offline frames, docs/rea/2026-11-02-camera-attach-to-do.md).
         let mut scene = empty_scene();
         let mut cam = glass_quad(false);
-        // Yaw 90 degrees: local z points along world +x, so the view looks along -x.
+        // Yaw 90 degrees: local z points along world +x.
         cam.world_mat = [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0];
         cam.local_start_mat = cam.world_mat;
         cam.world_pos = [2.0, 1.5, -3.0];
@@ -1830,9 +1831,9 @@ mod tests {
         let (pos, right, up, fwd) = attached_view(&scene, &rooms).expect("attached");
         let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
         assert!(close(pos, [2.0, 1.5, -3.0]), "{pos:?}");
-        assert!(close(fwd, [-1.0, 0.0, 0.0]), "{fwd:?}");
+        assert!(close(fwd, [1.0, 0.0, 0.0]), "{fwd:?}");
         assert!(close(up, [0.0, 1.0, 0.0]), "{up:?}");
-        assert!(close(right, [0.0, 0.0, 1.0]), "{right:?}");
+        assert!(close(right, [0.0, 0.0, -1.0]), "{right:?}");
     }
 
     #[test]
