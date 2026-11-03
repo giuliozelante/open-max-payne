@@ -241,6 +241,11 @@ cp -a "$WORK/x_data.accept.ras" "$GAME/x_data.ras"
 
 `particles.txt` maps `[fire_medium]` → `fire\fire_medium.rps` (case-insensitive in RAS).
 
+## Emitter lights
+
+Companion object `0x40`/2 carries the emitter's point light (Use Light, Light Color, Light Falloff):
+`docs/rea/2026-11-03-particle-lights.md`, Rust `openpfx::light::rps_lights`.
+
 ## Next
 
 1. In-level smoke of bitmap-root Fire_Medium (procedure above)

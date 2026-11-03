@@ -642,6 +642,10 @@ pub struct LdbScene {
     pub sound_stops: Vec<String>,
     /// `camerapaths.txt` blocks `player->CAM_AnimateInPlace` asked for, oldest first.
     pub camera_shakes: Vec<String>,
+    /// Particle effects `PS_StartEffect` started. Dispatch only enqueues them.
+    pub effect_queue: Vec<QueuedEffect>,
+    /// Emitters whose effects `PS_StopAllEmissions` stopped since the last frame.
+    pub effect_stops: Vec<String>,
     /// Dynamic mesh the view is attached to by `CAM_AttachToDO`, if any.
     pub attached_camera: Option<usize>,
     /// Cleared by `GM_SetPlayerControls(false)` during cutscenes.
@@ -679,7 +683,7 @@ impl ScreenFade {
 }
 
 /// One `A_Play3DSound` accepted by a mesh or trigger that this scene actually stores.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QueuedSound {
     pub category: String,
     pub cue: String,
@@ -688,6 +692,17 @@ pub struct QueuedSound {
     pub emitter: String,
     /// `Looping = YES`: plays until its emitter is stopped or the level ends.
     pub looping: bool,
+    /// Distance model of a `3DSound = YES` cue; `None` plays at full volume.
+    pub range: Option<crate::SoundRange>,
+}
+
+/// One `PS_StartEffect(effect, ...)` on a mesh, trigger or FSM this scene stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedEffect {
+    /// `particles.txt` block name.
+    pub effect: String,
+    /// Full name of the object that emits it.
+    pub emitter: String,
 }
 
 /// One `Receiver->Verb(args);` call stored on an anim, FSM, or trigger.
@@ -869,6 +884,27 @@ impl LdbScene {
                 self.camera_shakes.push(block.to_string());
                 true
             }
+            "ps_starteffect" => {
+                let Some(effect) = msg.args.first().map(|a| a.trim()).filter(|a| !a.is_empty())
+                else {
+                    return false;
+                };
+                let Some(emitter) = self.sound_emitter(context_name, msg.receiver) else {
+                    return false;
+                };
+                self.effect_queue.push(QueuedEffect {
+                    effect: effect.to_string(),
+                    emitter,
+                });
+                true
+            }
+            "ps_stopallemissions" => match self.sound_emitter(context_name, msg.receiver) {
+                Some(emitter) => {
+                    self.effect_stops.push(emitter);
+                    true
+                }
+                None => false,
+            },
             "a_stopall3dsounds" => match self.sound_emitter(context_name, msg.receiver) {
                 Some(emitter) => {
                     self.sound_stops.push(emitter);
@@ -995,31 +1031,41 @@ impl LdbScene {
         let Some(emitter) = self.sound_emitter(context_name, receiver) else {
             return false;
         };
+        let mut sound = QueuedSound {
+            category: category.to_string(),
+            cue: cue.to_string(),
+            filename: None,
+            emitter,
+            looping: false,
+            range: None,
+        };
         let catalog_loaded = self
             .sound_catalogs
             .keys()
             .any(|key| key.eq_ignore_ascii_case(category));
-        let filename = self
-            .sound_catalogs
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(category))
-            .and_then(|(_, text)| crate::story_sound_filename(text, cue));
-        if catalog_loaded && filename.is_none() {
+        if !self.resolve_sound(&mut sound) && catalog_loaded {
             return false;
         }
-        let looping = self
+        // An unloaded catalog is read when the sound plays (`render3d::resolve_queued_sounds`).
+        self.sound_queue.push(sound);
+        true
+    }
+
+    /// Fill `sound`'s file, looping and distance model from its loaded catalog.
+    /// `false` when the catalog is not loaded or has no such cue.
+    pub fn resolve_sound(&self, sound: &mut QueuedSound) -> bool {
+        let Some(text) = self
             .sound_catalogs
             .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(category))
-            .is_some_and(|(_, text)| crate::sound_cue_looping(text, cue));
-        self.sound_queue.push(QueuedSound {
-            category: category.to_string(),
-            cue: cue.to_string(),
-            filename,
-            emitter,
-            looping,
-        });
-        true
+            .find(|(key, _)| key.eq_ignore_ascii_case(&sound.category))
+            .map(|(_, text)| text)
+        else {
+            return false;
+        };
+        sound.filename = crate::story_sound_filename(text, &sound.cue);
+        sound.looping = crate::sound_cue_looping(text, &sound.cue);
+        sound.range = crate::sound_cue_3d(text, &sound.cue);
+        sound.filename.is_some()
     }
 
     /// Full name of the trigger, mesh or FSM `receiver` names, if this scene stores it.
@@ -1038,6 +1084,37 @@ impl LdbScene {
         };
         self.fsm_index(fsm_name)
             .map(|index| self.fsms[index].name.clone())
+    }
+
+    /// Current world position of an emitter named by `sound_emitter`, room origin not added.
+    pub fn emitter_world_pos(&self, emitter: &str) -> Option<[f32; 3]> {
+        let find_mesh = |name: &str| {
+            self.dynamic_meshes
+                .iter()
+                .position(|mesh| mesh.name.eq_ignore_ascii_case(name))
+        };
+        if let Some(index) = find_mesh(emitter) {
+            return Some(self.dynamic_world_pose(index).1);
+        }
+        if let Some(trigger) = self
+            .triggers
+            .iter()
+            .find(|trigger| trigger.name.eq_ignore_ascii_case(emitter))
+        {
+            return Some(trigger.pos);
+        }
+        let fsm = self
+            .fsms
+            .iter()
+            .find(|fsm| fsm.name.eq_ignore_ascii_case(emitter))?;
+        // FSM positions are world positions at load; carry them with the parent mesh like a child DO.
+        let Some(parent) = parent_name(&fsm.name).and_then(|name| find_mesh(&name)) else {
+            return Some(fsm.pos);
+        };
+        let mesh = &self.dynamic_meshes[parent];
+        let own = ([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], fsm.pos);
+        let rest = invert_pose((mesh.world_mat, mesh.world_pos));
+        Some(compose_pose(compose_pose(own, rest), self.dynamic_world_pose(parent)).1)
     }
 
     /// Advance the screen fade; a finished fade to a transparent colour goes away.
@@ -2563,6 +2640,8 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         sound_queue: Vec::new(),
         sound_stops: Vec::new(),
         camera_shakes: Vec::new(),
+        effect_queue: Vec::new(),
+        effect_stops: Vec::new(),
         attached_camera: None,
         player_controls: true,
         screen_fade: None,
@@ -2668,6 +2747,8 @@ mod tests {
             sound_queue: Vec::new(),
             sound_stops: Vec::new(),
             camera_shakes: Vec::new(),
+            effect_queue: Vec::new(),
+            effect_stops: Vec::new(),
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
@@ -3337,7 +3418,7 @@ mod tests {
         scene.dynamic_meshes.push(siren);
         scene.sound_catalogs.insert(
             "dynamic".into(),
-            "[Police_Wail_Siren_Close_Loop]\n{\n[Sound]\nFilename = dynamic\\cars\\Police_Wail_Siren_Close.wav;\nLooping = YES;\n}\n[door_wood_locked]\n{\n[Sound]\nFilename = dynamic\\door\\door_wood_locked3.wav;\n}\n"
+            "[Police_Wail_Siren_Close_Loop]\n{\n[Sound]\nFilename = dynamic\\cars\\Police_Wail_Siren_Close.wav;\n3DSound = YES;\nHotspot = 2;\nFallOff = 50;\nLooping = YES;\n}\n[door_wood_locked]\n{\n[Sound]\nFilename = dynamic\\door\\door_wood_locked3.wav;\n}\n"
                 .into(),
         );
         let ctx = "::startroom::car";
@@ -3351,6 +3432,15 @@ mod tests {
         ));
         assert_eq!(scene.sound_queue[0].emitter, "::startroom::car::siren");
         assert!(scene.sound_queue[0].looping);
+        assert_eq!(
+            scene.sound_queue[0].range,
+            Some(crate::SoundRange {
+                hotspot: 2.0,
+                falloff: 50.0,
+                volume: 1.0,
+            })
+        );
+        assert_eq!(scene.sound_queue[1].range, None);
         assert!(!scene.sound_queue[1].looping);
         assert!(scene.dispatch_message(ctx, "::startroom::car::siren->a_stopall3dsounds(\"\");"));
         assert_eq!(
@@ -3388,6 +3478,49 @@ mod tests {
         ));
         assert_eq!(scene.sound_queue[0].emitter, fsm);
         assert_eq!(scene.sound_stops, vec![fsm.to_string()]);
+    }
+
+    #[test]
+    fn ps_start_effect_queues_on_the_emitter_and_stop_all_emissions_stops_it() {
+        let mut scene = door_fsm_scene();
+        scene.fsms[0].name = "::startroom::police_car1::siren".into();
+        let fsm = "::startroom::police_car1::siren";
+        assert!(scene.dispatch_message(
+            "::startroom",
+            "::startroom::police_car1::siren->ps_starteffect(light_policecar, \"\");"
+        ));
+        assert!(scene.dispatch_message(fsm, "this->PS_StopAllEmissions(\"\");"));
+        assert_eq!(
+            scene.effect_queue,
+            [QueuedEffect {
+                effect: "light_policecar".into(),
+                emitter: fsm.into(),
+            }]
+        );
+        assert_eq!(scene.effect_stops, [fsm.to_string()]);
+    }
+
+    #[test]
+    fn a_floating_fsm_emitter_follows_its_parent_mesh() {
+        let mut scene = door_fsm_scene();
+        let mut open = track("open", [0.0, 0.0, 3.0]);
+        open.end_mat = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        scene.dynamic_meshes[0] = door_mesh(vec![open]);
+        scene.fsms[0].name = "::startroom::door::siren".into();
+        scene.fsms[0].pos = [1.0, 1.0, 2.0];
+        assert_eq!(
+            scene.emitter_world_pos("::startroom::door::siren"),
+            Some([1.0, 1.0, 2.0])
+        );
+        scene.dynamic_meshes[0].toggled = true;
+        assert_eq!(
+            scene.emitter_world_pos("::startroom::door::siren"),
+            Some([1.0, 1.0, 5.0])
+        );
+        assert_eq!(
+            scene.emitter_world_pos("::startroom::door.DO"),
+            Some([1.0, 0.0, 5.0])
+        );
     }
 
     #[test]
