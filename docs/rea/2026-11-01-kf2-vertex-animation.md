@@ -228,8 +228,22 @@ Callers: `0x57b00a` and `0x57b0fe`, both in VA setup (`0x57ad20` is the copy con
 from another VA). `0x57b890` clears it.
 
 **Engine comparison:** the engine also inverts a bind pose, but from `Pose.kf2` at t = 0, in model space.
-UNKNOWN: whether the skeleton's pose at setup is the `Pose.kf2` frame or the nodes' load-time transforms from the
-character `.kf2`. The two agree only if the model was exported in its pose clip. **Capture tooling:** attaching with winedbg crashes the game here; launch under winedbg and gate
+~~UNKNOWN: whether the skeleton's pose at setup is the `Pose.kf2` frame or the nodes' load-time transforms.~~
+
+**Bind clip = `Widepose.kf2` (2026-11-03).** VERIFIED (game data): `default_skeleton.txt` `[Skeleton]` sets
+`[Animation] Index = CHARANIM_POSE; Filename = anim\widepose.kf2;` (slot 0, "Default"). STRONGLY SUPPORTED
+(data fit): the skins were exported in that pose. Centroids of vertices weighted > 0.9 to one bone, against the
+joint in each clip (`max_payne`, `young_max_payne`, `C1_All_Johnny` agree):
+
+| Bone | Mesh centroid | `Widepose` joint | `Pose` joint |
+|------|---------------|------------------|--------------|
+| `toe-l` | x −0.18 | x −0.17 | x −0.09 |
+| `hand-l` | (−0.49, 0.80) | (−0.47, 0.88) | (−0.70, 1.05) |
+
+`Pose.kf2` raises both arms about 0.39 rad and narrows the legs, so using it as bind drove the arms into the
+torso. The engine took `Pose.kf2` because its loaders matched the first archive entry with any wanted name instead
+of honouring the name order; both now honour it. Not checked: whether the setup at `0x57d510` samples the
+`CHARANIM_POSE` clip or the nodes' load-time transforms; the data fit is the same either way. **Capture tooling:** attaching with winedbg crashes the game here; launch under winedbg and gate
 the breakpoints on a later event instead.
 
 ## Open
