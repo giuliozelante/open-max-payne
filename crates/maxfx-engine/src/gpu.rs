@@ -36,6 +36,8 @@ pub struct StaticBatch {
     pub depth_bias: f32,
     /// Dynamic mesh index, `None` for static room geometry.
     pub mesh: Option<usize>,
+    /// Room of static geometry (`render3d::static_meshes_in_view`), `None` for dynamic meshes.
+    pub room: Option<i32>,
     /// Alpha-blended after the alpha test (`BlendedAlphaTest`).
     pub blended: bool,
     pub verts: Vec<GpuVertex>,
@@ -485,6 +487,7 @@ fn upload(
 
 struct GpuDraw {
     mesh: Option<usize>,
+    room: Option<i32>,
     writes_z: bool,
     blended: bool,
     vertices: wgpu::Buffer,
@@ -941,6 +944,7 @@ impl GpuRenderer {
             queue.write_buffer(&vertices, 0, bytemuck::cast_slice(&batch.verts));
             draws.push(GpuDraw {
                 mesh: batch.mesh,
+                room: batch.room,
                 writes_z: batch.writes_z,
                 blended: batch.blended,
                 vertices,
@@ -1175,7 +1179,7 @@ impl GpuRenderer {
 pub fn build_dynamic_batches(scene: &LdbScene) -> Vec<StaticBatch> {
     let mut batches = Vec::new();
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
-        add_polys(scene, &dm.polys, [0.0; 3], Some(idx), &mut batches);
+        add_polys(scene, &dm.polys, [0.0; 3], Some(idx), None, &mut batches);
     }
     batches
 }
@@ -1190,6 +1194,8 @@ struct CharacterDraw {
 /// Per-frame scene state: which dynamic meshes draw, and the character draws.
 struct SceneFrame {
     visible: Vec<bool>,
+    /// Rooms whose static batches are drawn (`render3d::static_meshes_in_view`).
+    rooms_in_view: std::collections::BTreeSet<i32>,
     characters: Vec<CharacterDraw>,
 }
 
@@ -1247,8 +1253,12 @@ impl GpuRenderer {
                     .write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
             }
         }
+        let rooms_in_view = crate::render3d::static_meshes_in_view(scene, scene.attached_camera)
+            .filter_map(|sm| sm.room_id)
+            .collect();
         SceneFrame {
             visible,
+            rooms_in_view,
             characters: character_draws,
         }
     }
@@ -1269,6 +1279,9 @@ impl GpuRenderer {
                 .iter()
                 .filter(|d| d.writes_z == writes_z && d.blended == blended)
             {
+                if draw.room.is_some_and(|r| !frame.rooms_in_view.contains(&r)) {
+                    continue;
+                }
                 let model = match draw.mesh {
                     Some(i) if !frame.visible.get(i).copied().unwrap_or(false) => continue,
                     Some(i) => i + 1,
@@ -1623,12 +1636,19 @@ impl GpuRenderer {
 pub fn build_static_batches(scene: &LdbScene) -> Vec<StaticBatch> {
     let mut batches = Vec::new();
     for sm in &scene.static_meshes {
-        add_polys(scene, &sm.polys, sm.world_origin, None, &mut batches);
+        add_polys(
+            scene,
+            &sm.polys,
+            sm.world_origin,
+            None,
+            sm.room_id,
+            &mut batches,
+        );
     }
     batches
 }
 
-/// Texture, lightmap, alpha reference, writes depth, detail offset, dynamic mesh.
+/// Texture, lightmap, alpha reference, writes depth, detail offset, dynamic mesh, blended, room.
 type BatchKey = (
     Option<usize>,
     Option<usize>,
@@ -1637,6 +1657,7 @@ type BatchKey = (
     i32,
     Option<usize>,
     bool,
+    Option<i32>,
 );
 
 fn add_polys(
@@ -1644,6 +1665,7 @@ fn add_polys(
     polys: &[crate::scene::ScenePoly],
     o: [f32; 3],
     mesh: Option<usize>,
+    room: Option<i32>,
     batches: &mut Vec<StaticBatch>,
 ) {
     let mut index: BTreeMap<BatchKey, usize> = batches
@@ -1660,6 +1682,7 @@ fn add_polys(
                     detail,
                     b.mesh,
                     b.blended,
+                    b.room,
                 ),
                 i,
             )
@@ -1683,6 +1706,7 @@ fn add_polys(
             policy.detail_offset,
             mesh,
             blended,
+            room,
         );
         let at = *index.entry(key).or_insert_with(|| {
             batches.push(StaticBatch {
@@ -1692,6 +1716,7 @@ fn add_polys(
                 writes_z: policy.writes_z,
                 depth_bias: policy.detail_offset as f32 * DETAIL_OFFSET_M,
                 mesh,
+                room,
                 blended,
                 verts: Vec::new(),
             });
@@ -2255,6 +2280,47 @@ mod tests {
             "{close} of {}",
             covered.len()
         );
+    }
+
+    #[test]
+    fn a_level_camera_sees_only_its_room_group() {
+        // startup_level: the opening water scene (::start, ::help) overlaps the street
+        // (::startroom, ::teleport01) in space. Street cameras showed the water scene's floor.
+        let mut scene = scene_with(vec![quad(7, -1)], [0.0; 3]);
+        scene.static_meshes[0].room_id = Some(2);
+        let room = |id: i32| crate::scene::SceneRoom {
+            id,
+            name: format!("::room{id}"),
+            static_meshes: Vec::new(),
+            exits: Vec::new(),
+            dynamic_meshes: Vec::new(),
+            world_origin: [0.0; 3],
+        };
+        scene.rooms = vec![room(1), room(2)];
+        let mut cam = crate::render3d::test_glass_quad(true);
+        cam.room_id = 1;
+        scene.dynamic_meshes.push(cam);
+        let view = crate::render3d::test_view([-4.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        let covered = |zb: &[f32]| zb.iter().filter(|z| z.is_finite()).count();
+        // The free player camera does not track its room: every room is drawn.
+        let (_, sw_zb) = crate::render3d::test_software_static(&scene, view);
+        assert!(covered(&sw_zb) > 1000, "free camera");
+        scene.attached_camera = Some(0);
+        let (_, sw_zb) = crate::render3d::test_software_static(&scene, view);
+        assert_eq!(covered(&sw_zb), 0, "software, camera in room 1");
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: a_level_camera_sees_only_its_room_group GPU half skipped");
+            return;
+        };
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let mut fb = vec![0u32; w * h];
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
+        assert_eq!(covered(&zb), 0, "gpu, camera in room 1");
+        scene.attached_camera = None;
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
+        assert!(covered(&zb) > 1000, "gpu, free camera");
     }
 
     #[test]

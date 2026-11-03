@@ -723,7 +723,7 @@ pub fn run_3d_walkthrough(
             scene_view = Some((cam_pos, cam_right, cam_up, cam_fwd));
         } else {
             let mut tris = Vec::new();
-            for sm in &scene.static_meshes {
+            for sm in static_meshes_in_view(&scene, scene.attached_camera) {
                 queue_poly_batch(
                     &sm.polys,
                     IDENT_MAT,
@@ -1817,15 +1817,18 @@ pub fn render_frame(
 ) -> Result<(usize, usize, Vec<u32>), String> {
     let rooms: BTreeMap<i32, [f32; 3]> =
         scene.rooms.iter().map(|r| (r.id, r.world_origin)).collect();
-    let (pos, right, up, fwd) = match camera {
-        Some(name) => {
-            let idx = scene
+    let camera_idx = match camera {
+        Some(name) => Some(
+            scene
                 .dynamic_meshes
                 .iter()
                 .position(|m| m.name.eq_ignore_ascii_case(name))
-                .ok_or_else(|| format!("no dynamic mesh named {name}"))?;
-            camera_view(scene, idx, &rooms)
-        }
+                .ok_or_else(|| format!("no dynamic mesh named {name}"))?,
+        ),
+        None => None,
+    };
+    let (pos, right, up, fwd) = match camera_idx {
+        Some(idx) => camera_view(scene, idx, &rooms),
         None => {
             let pos = spawn_pos(scene, &rooms, scene.spawn_jumppoint_index(None));
             let (sy, cy) = std::f32::consts::PI.sin_cos();
@@ -1843,7 +1846,7 @@ pub fn render_frame(
     let fov_scale = (H as f32) * 0.85;
     const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
     let mut tris = Vec::new();
-    for sm in &scene.static_meshes {
+    for sm in static_meshes_in_view(scene, camera_idx) {
         queue_poly_batch(
             &sm.polys,
             IDENT_MAT,
@@ -1876,6 +1879,25 @@ pub fn write_ppm(path: &Path, w: usize, h: usize, fb: &[u32]) -> std::io::Result
         out.extend_from_slice(&[(px >> 16) as u8, (px >> 8) as u8, *px as u8]);
     }
     std::fs::write(path, out)
+}
+
+/// Static room meshes a view shows. A level camera (`camera`, a dynamic mesh) sees the exit
+/// group of its room (`LdbScene::room_group`): `startup_level`'s opening water scene overlaps
+/// its street in space. The free player camera does not track its room, so it sees every room.
+pub(crate) fn static_meshes_in_view(
+    scene: &LdbScene,
+    camera: Option<usize>,
+) -> impl Iterator<Item = &crate::scene::SceneStaticMesh> {
+    let group = camera
+        .and_then(|i| scene.dynamic_meshes.get(i))
+        .map(|dm| scene.room_group(dm.room_id));
+    scene
+        .static_meshes
+        .iter()
+        .filter(move |sm| match (&group, sm.room_id) {
+            (Some(group), Some(room)) => group.contains(&room),
+            _ => true,
+        })
 }
 
 /// The HUD crosshair is hidden while a cutscene camera owns the view.
@@ -2975,7 +2997,7 @@ pub(crate) fn test_software_static(
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
     const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-    for sm in &scene.static_meshes {
+    for sm in static_meshes_in_view(scene, scene.attached_camera) {
         render_poly_batch(
             &sm.polys,
             IDENT_MAT,

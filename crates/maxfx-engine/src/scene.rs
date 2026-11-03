@@ -788,6 +788,28 @@ fn script_bool(arg: Option<&str>) -> Option<bool> {
 }
 
 impl LdbScene {
+    /// `room` and every room reachable from it through exits (portals). HYPOTHESIS: retail draws
+    /// what portal traversal reaches from the camera's room; this is its upper bound, without
+    /// clipping each portal against the view.
+    pub fn room_group(&self, room: i32) -> std::collections::BTreeSet<i32> {
+        let mut group = std::collections::BTreeSet::from([room]);
+        let mut queue = VecDeque::from([room]);
+        while let Some(id) = queue.pop_front() {
+            let Some(r) = self.rooms.iter().find(|r| r.id == id) else {
+                continue;
+            };
+            for name in &r.exits {
+                let targets = self.exits.iter().filter(|e| &e.name == name);
+                for target in targets.map(|e| e.target_room_id) {
+                    if group.insert(target) {
+                        queue.push_back(target);
+                    }
+                }
+            }
+        }
+        group
+    }
+
     /// Masked materials take their category's `AlphaReference` from `materials.txt`.
     pub fn apply_material_surfaces(&mut self, surfaces: &BTreeMap<String, MaterialSurface>) {
         for material in self.materials.values_mut() {
@@ -3135,6 +3157,55 @@ mod tests {
         let combat = actor(&["::babys_room::e1->C_SetStateMachine(mobstercombat);"]);
         assert!(combat.pursues());
         assert!(!combat.starts_dead());
+    }
+
+    fn room(id: i32, exits: &[&str]) -> SceneRoom {
+        SceneRoom {
+            id,
+            name: format!("::room{id}"),
+            static_meshes: Vec::new(),
+            exits: exits.iter().map(|e| e.to_string()).collect(),
+            dynamic_meshes: Vec::new(),
+            world_origin: [0.0; 3],
+        }
+    }
+
+    fn exit(name: &str, target_room_id: i32) -> ScenePortalExit {
+        ScenePortalExit {
+            name: name.into(),
+            corners: Vec::new(),
+            normal: [0.0; 3],
+            relative_offset: [0.0; 3],
+            target_room_id,
+            target_exit_name: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_room_group_follows_exits_transitively() {
+        // startup_level: ::startroom <-> ::teleport01 and ::start <-> ::help are two groups that
+        // overlap in space; neither reaches the other.
+        let mut scene = bare_scene(
+            vec![
+                room(0, &["a0"]),
+                room(1, &["a1"]),
+                room(2, &["b2"]),
+                room(3, &["b3", "c3"]),
+                room(4, &[]),
+            ],
+            Vec::new(),
+        );
+        scene.exits = vec![
+            exit("a0", 1),
+            exit("a1", 0),
+            exit("b2", 3),
+            exit("b3", 2),
+            exit("c3", 4),
+        ];
+        let ids = |g: std::collections::BTreeSet<i32>| g.into_iter().collect::<Vec<_>>();
+        assert_eq!(ids(scene.room_group(1)), [0, 1]);
+        assert_eq!(ids(scene.room_group(2)), [2, 3, 4]);
+        assert_eq!(ids(scene.room_group(9)), [9]);
     }
 
     #[test]
