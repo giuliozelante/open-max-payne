@@ -36,6 +36,9 @@ pub struct SceneMaterial {
     /// `Some(AlphaReference)` when the texture carries an alpha mask (`P_Map(colour, alpha)`,
     /// `0x5dc3d8`); its alpha is in the top byte. `None` is opaque.
     pub alpha_reference: Option<u8>,
+    /// Masked texels blend by their alpha after the alpha test (`materials.txt`
+    /// `BlendedAlphaTest`, surface record `+0x20`); `Leaves` stays a hard cut-out.
+    pub blended: bool,
 }
 
 /// Draw and character-collision rules from `data/database/materials.txt`.
@@ -737,6 +740,7 @@ impl LdbScene {
                 .find(|(name, _)| name.eq_ignore_ascii_case(&material.category))
             {
                 material.alpha_reference = Some(surface.alpha_reference.clamp(0, 255) as u8);
+                material.blended = surface.blended_alpha_test;
             }
         }
     }
@@ -1826,6 +1830,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     texture_path,
                     texture_index,
                     alpha_reference: None,
+                    blended: false,
                 },
             );
         }
@@ -2855,6 +2860,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn masked_materials_take_blending_from_their_category() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let material = |id: i32, category: &str| SceneMaterial {
+            id,
+            category: category.into(),
+            texture_path: String::new(),
+            texture_index: Some(0),
+            alpha_reference: Some(0),
+            blended: false,
+        };
+        scene.materials.insert(1, material(1, "leaves"));
+        scene.materials.insert(2, material(2, "glass"));
+        let surfaces = parse_material_surfaces(
+            "[Leaves]\nAlphaReference = 128;\nBlendedAlphaTest = FALSE;\n[Glass]\nAlphaReference = 15;\n",
+        );
+        scene.apply_material_surfaces(&surfaces);
+        assert!(!scene.materials[&1].blended, "Leaves is a hard cut-out");
+        assert!(
+            scene.materials[&2].blended,
+            "BlendedAlphaTest defaults to TRUE"
+        );
+    }
+
     fn actor(scripts: &[&str]) -> SceneCharacter {
         SceneCharacter {
             name: "actor".into(),
@@ -3047,6 +3076,7 @@ mod tests {
                     texture_path: String::new(),
                     texture_index: None,
                     alpha_reference: alpha,
+                    blended: false,
                 },
             );
         }
