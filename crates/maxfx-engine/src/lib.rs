@@ -4,6 +4,7 @@ pub mod frontend;
 pub mod gpu;
 pub mod kf2;
 pub mod menu_ui;
+pub mod particles;
 pub mod render3d;
 pub mod scene;
 
