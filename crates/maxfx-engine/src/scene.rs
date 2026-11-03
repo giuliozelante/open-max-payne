@@ -1815,11 +1815,15 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         i += n2 * 13; // vertex normals
         let _editor_pos = read_xform_pos(data, &mut i)?;
         let polys = read_mesh_polys_resolved(data, &mut i, &verts, &static_points)?;
-        // Optional non-empty mesh attribs (`0x1f` + count + (id, vec3)*count)
+        // Mesh attribs (`0x1f` + count + (id, vec3)*count), may be empty
         if data.get(i) == Some(&0x1f) {
             let mut p = i + 1;
             if let Some(acnt) = read_i32(data, &mut p) {
-                if acnt > 0 && data.get(p) != Some(&0x25) {
+                // An empty list belongs to this mesh too. After the last mesh the light
+                // count follows it (Part1_Level6 @0x65a854, Startup_level @0x135ec82).
+                if acnt == 0 {
+                    i = p;
+                } else if acnt > 0 && data.get(p) != Some(&0x25) {
                     i = p;
                     for _ in 0..acnt {
                         read_i32(data, &mut i)?;

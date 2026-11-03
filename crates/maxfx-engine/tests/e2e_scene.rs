@@ -27,6 +27,11 @@ fn push_xform(buf: &mut Vec<u8>, pos: [f32; 3]) {
 /// Build a complete synthetic `.ldb` binary that exercises all 14 `ImportLevel` sections
 /// through `parse_ldb_scene` to exact EOF.
 fn build_synthetic_full_ldb() -> Vec<u8> {
+    build_synthetic_ldb_with_lights(&[0x14, 0])
+}
+
+/// [`build_synthetic_full_ldb`] with `lights` in place of section 8.
+fn build_synthetic_ldb_with_lights(lights: &[u8]) -> Vec<u8> {
     let mut b = Vec::new();
 
     // Geometry preamble: section 1 (`0x1c 0x12`, count=3, flag=0) + 3 vec3s
@@ -153,8 +158,8 @@ fn build_synthetic_full_ldb() -> Vec<u8> {
     b.extend_from_slice(&1.0f32.to_le_bytes());
     b.extend_from_slice(&[0x14, 0]);
 
-    // 8. Directional lights = 0 (`14 00`)
-    b.extend_from_slice(&[0x14, 0]);
+    // 8. Directional lights (default: 0, `14 00`)
+    b.extend_from_slice(lights);
 
     // 9. Jumppoints = 1
     b.extend_from_slice(&[0x14, 1]);
@@ -325,4 +330,24 @@ fn e2e_byod_retail_levels_decode_to_eof_when_present() {
             assert_eq!(johnny_m.faces.len(), 1004);
         }
     }
+}
+
+#[test]
+fn e2e_lights_after_an_empty_mesh_attrib_list_keep_later_sections() {
+    // Part1_Level6 @0x65a854: the last static mesh ends with an empty attrib list
+    // (`1f 14 00`), then the light count and `Light::0` records.
+    let mut tail = vec![LDB_IMPORT_MATERIAL_LIST_TAG, 0x14, 0, 0x14, 1];
+    push_mf_str(&mut tail, "Light::0");
+    push_mf_str(&mut tail, "");
+    push_xform(&mut tail, [0.0, 2.0, 0.0]);
+    push_xform(&mut tail, [0.0, 2.0, 0.0]);
+    tail.extend_from_slice(&[0x14, 0]);
+    push_mf_str(&mut tail, "");
+    tail.push(0x19);
+    tail.extend(std::iter::repeat_n(0u8, 36));
+    tail.push(0x09);
+    tail.extend_from_slice(&5.0f32.to_le_bytes());
+    let scene = parse_ldb_scene(&build_synthetic_ldb_with_lights(&tail)).expect("scene");
+    let names: Vec<&str> = scene.jumppoints.iter().map(|j| j.name.as_str()).collect();
+    assert_eq!(names, ["::StartRoom::Jumppoint 00"]);
 }
