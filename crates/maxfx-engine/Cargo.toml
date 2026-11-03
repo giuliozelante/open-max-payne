@@ -18,3 +18,7 @@ openras = { path = "../openras" }
 thiserror = "2"
 minifb = "0.28"
 jpeg-decoder = "0.3"
+wgpu = "30.0.1"
+pollster = "1.0.1"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+winit = "0.30.13"

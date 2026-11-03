@@ -31,9 +31,17 @@ fn main() -> ExitCode {
             Some("--window") => want_window = true,
             Some("--frame") => frame_out = args.next(),
             Some("--camera") => frame_camera = args.next(),
+            Some("--renderer") => match args.next().as_deref() {
+                Some("sw") => maxfx_engine::render3d::use_software_renderer(true),
+                Some("hw") => maxfx_engine::render3d::use_software_renderer(false),
+                other => {
+                    eprintln!("--renderer takes hw or sw, got {other:?}");
+                    return ExitCode::FAILURE;
+                }
+            },
             Some("-h" | "--help") => {
                 eprintln!(
-                    "usage: maxfx-engine [--window] [--frame out.ppm [--camera NAME.DO]] <game-dir|archive.ras|archive.mpm|level.ldb|.ai>"
+                    "usage: maxfx-engine [--window] [--renderer hw|sw] [--frame out.ppm [--camera NAME.DO]] <game-dir|archive.ras|archive.mpm|level.ldb|.ai>"
                 );
                 return ExitCode::SUCCESS;
             }

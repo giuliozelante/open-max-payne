@@ -20,11 +20,27 @@ use std::process::Child;
 
 const W: usize = 960;
 const H: usize = 600;
-const NEAR_Z: f32 = 0.15;
-const FAR_Z: f32 = 220.0;
+/// `--renderer sw` or `OPENMAXFX_RENDERER=sw` selects the software rasterizer; anything else
+/// asks for the hardware renderer and falls back to software when no GPU is available.
+static SOFTWARE_RENDERER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn use_software_renderer(software: bool) {
+    SOFTWARE_RENDERER.store(software, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn hardware_renderer() -> bool {
+    let env_sw = std::env::var("OPENMAXFX_RENDERER").is_ok_and(|v| v.eq_ignore_ascii_case("sw"));
+    !(env_sw || SOFTWARE_RENDERER.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Frame size shared with the hardware renderer.
+pub(crate) const FRAME_W: usize = W;
+pub(crate) const FRAME_H: usize = H;
+pub(crate) const NEAR_Z: f32 = 0.15;
+pub(crate) const FAR_Z: f32 = 220.0;
 const EYE_HEIGHT: f32 = 1.65;
 /// One `DetailOffset` step from `materials.txt`, in metres toward the camera.
-const DETAIL_OFFSET_M: f32 = 0.02;
+pub(crate) const DETAIL_OFFSET_M: f32 = 0.02;
 /// `data/database/shooting.h` `#define BERETTA_BULLETDAMAGE 5`.
 const BERETTA_BULLET_DAMAGE: i32 = 5;
 
@@ -76,17 +92,31 @@ pub fn run_3d_walkthrough(
     world_sphere: Option<&str>,
     shot: Option<CameraFlyover>,
 ) -> Result<(), String> {
-    let mut window = Window::new(
-        title,
-        W,
-        H,
-        WindowOptions {
-            resize: false,
-            ..WindowOptions::default()
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    window.set_target_fps(60);
+    // Hardware: a resizable winit window with a wgpu swapchain. Software (or no GPU): minifb.
+    let mut winit_window = if hardware_renderer() {
+        crate::frontend::WinitFrontend::new(title, W as u32, H as u32).ok()
+    } else {
+        None
+    };
+    let open_soft = || -> Result<Window, String> {
+        let mut window = Window::new(
+            title,
+            W,
+            H,
+            WindowOptions {
+                resize: false,
+                ..WindowOptions::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        window.set_target_fps(60);
+        Ok(window)
+    };
+    let mut soft_window = if winit_window.is_none() {
+        Some(open_soft()?)
+    } else {
+        None
+    };
 
     let (catalog_player, johnny_rig) = load_character_rigs(level_path);
     let player_rig = player_skin
@@ -228,13 +258,44 @@ pub fn run_3d_walkthrough(
     scene.apply_startup_hides();
     scene.apply_startup_enables();
     scene.apply_startup_sends();
+    // Built after the material surfaces, so batches follow the draw policies.
+    let mut gpu = winit_window
+        .as_ref()
+        .and_then(|front| crate::gpu::GpuRenderer::for_window(&scene, front));
+    if let Some((renderer, _)) = gpu.as_mut() {
+        renderer.set_sky(sky.as_ref());
+    }
+    if gpu.is_none() && winit_window.is_some() {
+        winit_window = None;
+        soft_window = Some(open_soft()?);
+    }
+    println!(
+        "  3D Engine: renderer = {}",
+        if gpu.is_some() {
+            "hardware (wgpu)"
+        } else {
+            "software"
+        }
+    );
     let mut break_voice: Option<Child> = None;
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
+    let mut background = vec![0u32; W * H];
     let base_dt = 1.0 / 60.0f32;
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
+    loop {
+        if let Some(front) = winit_window.as_mut() {
+            front.pump();
+        }
+        let window: &dyn crate::frontend::Frontend = match (&winit_window, &soft_window) {
+            (Some(front), _) => front,
+            (None, Some(soft)) => soft,
+            (None, None) => break,
+        };
+        if !window.is_open() || window.is_key_down(Key::Escape) {
+            break;
+        }
         if let Some(shot) = shot.as_ref() {
             if shot_clock >= shot.duration || window.is_key_pressed(Key::Space, KeyRepeat::No) {
                 break;
@@ -533,7 +594,10 @@ pub fn run_3d_walkthrough(
 
         let fov_scale = (H as f32) * 0.85;
         // World sphere (house = sunset) or the flat ceiling when the level names none.
-        if let Some(ref tex) = sky {
+        // The hardware renderer draws the sky itself unless it shows the CPU frame (wireframe).
+        let cpu_frame = gpu.is_none() || wireframe;
+        if !cpu_frame {
+        } else if let Some(ref tex) = sky {
             paint_sky_strip(tex, cam_right, cam_up, cam_fwd, fov_scale, &mut fb);
         } else {
             for y in 0..H {
@@ -545,12 +609,87 @@ pub fn run_3d_walkthrough(
         const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
         // 1. Render static room meshes (with inward-normal backface culling)
-        for sm in &scene.static_meshes {
-            render_poly_batch(
-                &sm.polys,
-                IDENT_MAT,
-                sm.world_origin,
+        let mut characters = Vec::new();
+        let mut scene_view = None;
+        if gpu.is_some() && !wireframe {
+            for en in &enemies {
+                if let Some(erig) = bodies.get(en.rig_index) {
+                    let moving = en.walk_phase > 0.0;
+                    let time = if moving { en.walk_phase } else { anim_clock };
+                    let verts = character_world_verts(
+                        erig,
+                        en.world_pos,
+                        en.yaw,
+                        time,
+                        moving,
+                        en.health <= 0,
+                    );
+                    let light = character_vertex_light(
+                        &erig.mesh,
+                        &verts,
+                        en.world_pos,
+                        en.hit_flash > 0.0,
+                        &world_lights,
+                    );
+                    characters.push(crate::gpu::GpuCharacter {
+                        mesh: &erig.mesh,
+                        verts,
+                        light,
+                    });
+                }
+            }
+            if let (true, false, Some(prig)) = (third_person, fly_mode, player_rig.as_ref()) {
+                let time = if player_moving {
+                    walk_phase
+                } else {
+                    anim_clock
+                };
+                let verts = character_world_verts(
+                    prig,
+                    player_feet,
+                    player_mesh_yaw(yaw),
+                    time,
+                    player_moving,
+                    false,
+                );
+                let light =
+                    character_vertex_light(&prig.mesh, &verts, player_feet, false, &world_lights);
+                characters.push(crate::gpu::GpuCharacter {
+                    mesh: &prig.mesh,
+                    verts,
+                    light,
+                });
+            }
+            scene_view = Some((cam_pos, cam_right, cam_up, cam_fwd));
+        } else {
+            let mut tris = Vec::new();
+            for sm in &scene.static_meshes {
+                queue_poly_batch(
+                    &sm.polys,
+                    IDENT_MAT,
+                    sm.world_origin,
+                    &scene,
+                    cam_pos,
+                    cam_right,
+                    cam_up,
+                    cam_fwd,
+                    fov_scale,
+                    use_lightmaps,
+                    wireframe,
+                    true,
+                    &mut fb,
+                    &mut tris,
+                );
+            }
+            flush_tris(&tris, &mut fb, &mut zb, raster_threads());
+        }
+
+        // 2. Render dynamic meshes (doors, breakables, furniture, vans, cameras); the hardware
+        // renderer already drew them in step 1.
+        if gpu.is_none() || wireframe {
+            draw_dynamic_meshes(
                 &scene,
+                &room_origins,
                 cam_pos,
                 cam_right,
                 cam_up,
@@ -558,29 +697,15 @@ pub fn run_3d_walkthrough(
                 fov_scale,
                 use_lightmaps,
                 wireframe,
-                true,
                 &mut fb,
                 &mut zb,
             );
         }
 
-        // 2. Render dynamic meshes (doors, breakables, furniture, vans, cameras)
-        draw_dynamic_meshes(
-            &scene,
-            &room_origins,
-            cam_pos,
-            cam_right,
-            cam_up,
-            cam_fwd,
-            fov_scale,
-            use_lightmaps,
-            wireframe,
-            &mut fb,
-            &mut zb,
-        );
-
-        // 3. Render each character with the skin the level named.
-        for en in &enemies {
+        // 3. Render each character with the skin the level named (the hardware renderer drew
+        // them in step 1).
+        let cpu_characters = gpu.is_none() || wireframe;
+        for en in enemies.iter().filter(|_| cpu_characters) {
             if let Some(erig) = bodies.get(en.rig_index) {
                 render_kfs_character(
                     erig,
@@ -608,7 +733,7 @@ pub fn run_3d_walkthrough(
         }
 
         // 4. Render Player (`Payne_Max_L0.KFS`) in 3rd-person view
-        if third_person && !fly_mode {
+        if third_person && !fly_mode && cpu_characters {
             if let Some(ref prig) = player_rig {
                 render_kfs_character(
                     prig,
@@ -633,6 +758,13 @@ pub fn run_3d_walkthrough(
                     &mut zb,
                 );
             }
+        }
+
+        // Hardware: everything drawn so far (sky, wireframe geometry) is the background; the HUD
+        // below goes to a transparent overlay above the GPU scene.
+        if gpu.is_some() {
+            background.copy_from_slice(&fb);
+            fb.fill(crate::gpu::HUD_CLEAR);
         }
 
         // 5. Render muzzle flash / bullet tracer when firing
@@ -660,13 +792,26 @@ pub fn run_3d_walkthrough(
             fb[(cy_scr as i32 + d) as usize * W + cx] = cross_col;
         }
 
-        if let Some(fade) = scene.screen_fade {
-            blend_screen(&mut fb, fade.color());
+        match (gpu.as_mut(), winit_window.as_ref(), soft_window.as_mut()) {
+            (Some((renderer, surface)), Some(front), _) => renderer.present(
+                surface,
+                front.size(),
+                &scene,
+                scene_view,
+                use_lightmaps,
+                &characters,
+                wireframe.then_some(background.as_slice()),
+                &fb,
+            ),
+            (_, _, Some(soft)) => {
+                if let Some(fade) = scene.screen_fade {
+                    blend_screen(&mut fb, fade.color());
+                }
+                soft.update_with_buffer(&fb, W, H)
+                    .map_err(|e| e.to_string())?
+            }
+            _ => break,
         }
-
-        window
-            .update_with_buffer(&fb, W, H)
-            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -871,7 +1016,7 @@ fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32
     false
 }
 
-fn poly_policy(scene: &LdbScene, material_id: i32) -> MaterialPolicy {
+pub(crate) fn poly_policy(scene: &LdbScene, material_id: i32) -> MaterialPolicy {
     scene
         .materials
         .get(&material_id)
@@ -900,6 +1045,11 @@ fn chase_eye(player: [f32; 3], cam_fwd: [f32; 3], dist: f32) -> [f32; 3] {
     ]
 }
 
+/// Visible and not a script helper (`_Tip_`, `Start_FSM.DO`).
+pub(crate) fn dynamic_mesh_drawn(dm: &crate::scene::SceneDynamicMesh) -> bool {
+    !dm.hidden && !dm.name.contains("_Tip_") && !dm.name.ends_with("Start_FSM.DO")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_dynamic_meshes(
     scene: &LdbScene,
@@ -914,15 +1064,13 @@ fn draw_dynamic_meshes(
     fb: &mut [u32],
     zb: &mut [f32],
 ) {
+    let mut tris = Vec::new();
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
-        if dm.hidden {
-            continue;
-        }
-        if dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
+        if !dynamic_mesh_drawn(dm) {
             continue;
         }
         let (mat, origin) = dynamic_world(scene, idx, room_origins);
-        render_poly_batch(
+        queue_poly_batch(
             &dm.polys,
             mat,
             origin,
@@ -936,9 +1084,10 @@ fn draw_dynamic_meshes(
             wireframe,
             false,
             fb,
-            zb,
+            &mut tris,
         );
     }
+    flush_tris(&tris, fb, zb, raster_threads());
 }
 
 /// Closest dynamic mesh that has hit points and whose posed bounds meet the ray.
@@ -1038,7 +1187,7 @@ fn catalog_root(path: &Path) -> PathBuf {
     }
 }
 
-fn dynamic_world(
+pub(crate) fn dynamic_world(
     scene: &LdbScene,
     idx: usize,
     rooms: &BTreeMap<i32, [f32; 3]>,
@@ -1098,8 +1247,9 @@ pub fn render_frame(
     let mut zb = vec![f32::INFINITY; W * H];
     let fov_scale = (H as f32) * 0.85;
     const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let mut tris = Vec::new();
     for sm in &scene.static_meshes {
-        render_poly_batch(
+        queue_poly_batch(
             &sm.polys,
             IDENT_MAT,
             sm.world_origin,
@@ -1113,9 +1263,10 @@ pub fn render_frame(
             false,
             true,
             &mut fb,
-            &mut zb,
+            &mut tris,
         );
     }
+    flush_tris(&tris, &mut fb, &mut zb, raster_threads());
     draw_dynamic_meshes(
         scene, &rooms, pos, right, up, fwd, fov_scale, true, false, &mut fb, &mut zb,
     );
@@ -1319,6 +1470,75 @@ fn point_in_xz_tri(px: f32, pz: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> b
     !(has_neg && has_pos)
 }
 
+/// Character vertices posed (or laid flat when dead) and placed in the world.
+pub(crate) fn character_world_verts(
+    rig: &CharacterRig,
+    world_pos: [f32; 3],
+    yaw: f32,
+    anim_time: f32,
+    moving: bool,
+    dead: bool,
+) -> Vec<[f32; 3]> {
+    let (sy, cy) = yaw.sin_cos();
+    let mesh = &rig.mesh;
+    let anim = if moving {
+        rig.walk.as_ref().or(rig.idle.as_ref())
+    } else {
+        rig.idle.as_ref().or(rig.walk.as_ref())
+    };
+    let posed = if dead {
+        mesh.vertices.clone()
+    } else {
+        pose_mesh(mesh, rig.skin.as_ref(), rig.bind.as_ref(), anim, anim_time)
+    };
+    posed
+        .iter()
+        .map(|&[lx, ly, lz]| {
+            let (px, py, pz) = if dead {
+                // Lie flat on the floor when dead
+                (lx, 0.18 + lz.abs() * 0.5, ly - 0.85)
+            } else {
+                (lx, ly, lz)
+            };
+            [
+                world_pos[0] + px * cy + pz * sy,
+                world_pos[1] + py,
+                world_pos[2] - px * sy + pz * cy,
+            ]
+        })
+        .collect()
+}
+
+/// Per-vertex diffuse of a posed character: the retail point-light selection and D3D diffuse
+/// (#37), or a flat 1.35 while a hit flash lasts.
+pub(crate) fn character_vertex_light(
+    mesh: &crate::kf2::KfsMesh,
+    world: &[[f32; 3]],
+    world_pos: [f32; 3],
+    hit_flash: bool,
+    lights: &[ScenePointLight],
+) -> Vec<[f32; 3]> {
+    if hit_flash {
+        return vec![[1.35; 3]; world.len()];
+    }
+    let normals = smooth_normals(world, &mesh.faces);
+    let radius = world
+        .iter()
+        .map(|p| {
+            ((p[0] - world_pos[0]).powi(2)
+                + (p[1] - world_pos[1]).powi(2)
+                + (p[2] - world_pos[2]).powi(2))
+            .sqrt()
+        })
+        .fold(0.0f32, f32::max);
+    let picked = select_object_lights(lights, world_pos, radius);
+    world
+        .iter()
+        .zip(&normals)
+        .map(|(p, n)| vertex_diffuse(*p, *n, &picked))
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_kfs_character(
     rig: &CharacterRig,
@@ -1340,33 +1560,12 @@ fn render_kfs_character(
 ) {
     let half_w = W as f32 * 0.5;
     let half_h = H as f32 * 0.5;
-    let (sy, cy) = yaw.sin_cos();
     let mesh = &rig.mesh;
-    let anim = if moving {
-        rig.walk.as_ref().or(rig.idle.as_ref())
-    } else {
-        rig.idle.as_ref().or(rig.walk.as_ref())
-    };
-    let posed = if dead {
-        mesh.vertices.clone()
-    } else {
-        pose_mesh(mesh, rig.skin.as_ref(), rig.bind.as_ref(), anim, anim_time)
-    };
+    let world = character_world_verts(rig, world_pos, yaw, anim_time, moving, dead);
 
     // Pre-transform character vertices into camera space
-    let mut cam_pts = Vec::with_capacity(posed.len());
-    let mut world_pts = Vec::with_capacity(posed.len());
-    for &[lx, ly, lz] in &posed {
-        let (px, py, pz) = if dead {
-            // Lie flat on the floor when dead
-            (lx, 0.18 + lz.abs() * 0.5, ly - 0.85)
-        } else {
-            (lx, ly, lz)
-        };
-        let wx = world_pos[0] + px * cy + pz * sy;
-        let wy = world_pos[1] + py;
-        let wz = world_pos[2] - px * sy + pz * cy;
-        world_pts.push([wx, wy, wz]);
+    let mut cam_pts = Vec::with_capacity(world.len());
+    for &[wx, wy, wz] in &world {
         let dx = wx - cam_pos[0];
         let dy = wy - cam_pos[1];
         let dz = wz - cam_pos[2];
@@ -1376,26 +1575,8 @@ fn render_kfs_character(
         cam_pts.push([cx, cy_c, cz]);
     }
 
-    let vertex_light: Vec<[f32; 3]> = if hit_flash {
-        vec![[1.35; 3]; world_pts.len()]
-    } else {
-        let normals = smooth_normals(&world_pts, &mesh.faces);
-        let radius = world_pts
-            .iter()
-            .map(|p| {
-                ((p[0] - world_pos[0]).powi(2)
-                    + (p[1] - world_pos[1]).powi(2)
-                    + (p[2] - world_pos[2]).powi(2))
-                .sqrt()
-            })
-            .fold(0.0f32, f32::max);
-        let picked = select_object_lights(lights, world_pos, radius);
-        world_pts
-            .iter()
-            .zip(&normals)
-            .map(|(p, n)| vertex_diffuse(*p, *n, &picked))
-            .collect()
-    };
+    let vertex_light = character_vertex_light(mesh, &world, world_pos, hit_flash, lights);
+    let mut tris = Vec::new();
     for face in &mesh.faces {
         let [i0, i1, i2] = face.indices;
         let c0 = cam_pts[i0];
@@ -1467,23 +1648,22 @@ fn render_kfs_character(
                     fb, proj[0].sx, proj[0].sy, proj[k].sx, proj[k].sy, 0x00ff8844,
                 );
             } else {
-                rasterize_tri(
-                    fb,
-                    zb,
-                    proj[0],
-                    proj[k],
-                    proj[k + 1],
+                tris.push(QueuedTri {
+                    p: [proj[0], proj[k], proj[k + 1]],
                     tex,
-                    None,
-                    None,
-                    true,
-                    0.0,
-                );
+                    alpha_reference: None,
+                    lmap: None,
+                    write_z: true,
+                    depth_bias: 0.0,
+                });
             }
         }
     }
+    flush_tris(&tris, fb, zb, raster_threads());
 }
 
+/// Queue and draw one batch at once (the reference path the tests compare against).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn render_poly_batch(
     polys: &[ScenePoly],
@@ -1500,6 +1680,45 @@ fn render_poly_batch(
     cull_backfaces: bool,
     fb: &mut [u32],
     zb: &mut [f32],
+) {
+    let mut tris = Vec::new();
+    queue_poly_batch(
+        polys,
+        mat,
+        origin,
+        scene,
+        cam_pos,
+        cam_right,
+        cam_up,
+        cam_fwd,
+        fov_scale,
+        use_lightmaps,
+        wireframe,
+        cull_backfaces,
+        fb,
+        &mut tris,
+    );
+    flush_tris(&tris, fb, zb, raster_threads());
+}
+
+/// Project, clip and queue `polys` (opaque first, then non-z-writing), as `render_poly_batch`
+/// draws them. Wireframe lines go straight to `fb`.
+#[allow(clippy::too_many_arguments)]
+fn queue_poly_batch<'a>(
+    polys: &[ScenePoly],
+    mat: [f32; 9],
+    origin: [f32; 3],
+    scene: &'a LdbScene,
+    cam_pos: [f32; 3],
+    cam_right: [f32; 3],
+    cam_up: [f32; 3],
+    cam_fwd: [f32; 3],
+    fov_scale: f32,
+    use_lightmaps: bool,
+    wireframe: bool,
+    cull_backfaces: bool,
+    fb: &mut [u32],
+    tris: &mut Vec<QueuedTri<'a>>,
 ) {
     for opaque in [true, false] {
         for poly in polys {
@@ -1522,19 +1741,19 @@ fn render_poly_batch(
                 wireframe,
                 cull_backfaces,
                 fb,
-                zb,
+                tris,
             );
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_poly(
+fn draw_poly<'a>(
     poly: &ScenePoly,
     policy: MaterialPolicy,
     mat: [f32; 9],
     origin: [f32; 3],
-    scene: &LdbScene,
+    scene: &'a LdbScene,
     cam_pos: [f32; 3],
     cam_right: [f32; 3],
     cam_up: [f32; 3],
@@ -1544,7 +1763,7 @@ fn draw_poly(
     wireframe: bool,
     cull_backfaces: bool,
     fb: &mut [u32],
-    zb: &mut [f32],
+    tris: &mut Vec<QueuedTri<'a>>,
 ) {
     let half_w = W as f32 * 0.5;
     let half_h = H as f32 * 0.5;
@@ -1576,7 +1795,7 @@ fn draw_poly(
         None
     };
 
-    let shade = ((wn[0] * 0.35 + wn[1] * 0.75 + wn[2] * 0.55).abs() * 0.55 + 0.45).clamp(0.35, 1.0);
+    let shade = poly_shade(wn);
     let mut cam_verts = Vec::with_capacity(poly.vertices.len());
     let mut all_behind = true;
     let mut all_far = true;
@@ -1643,20 +1862,21 @@ fn draw_poly(
             draw_line(fb, p1.sx, p1.sy, p2.sx, p2.sy, 0x0066ccff);
             draw_line(fb, p2.sx, p2.sy, p0.sx, p0.sy, 0x0066ccff);
         } else {
-            rasterize_tri(
-                fb,
-                zb,
-                p0,
-                p1,
-                p2,
+            tris.push(QueuedTri {
+                p: [p0, p1, p2],
                 tex,
                 alpha_reference,
                 lmap,
-                policy.writes_z,
-                policy.detail_offset as f32 * DETAIL_OFFSET_M,
-            );
+                write_z: policy.writes_z,
+                depth_bias: policy.detail_offset as f32 * DETAIL_OFFSET_M,
+            });
         }
     }
+}
+
+/// Flat shade for polygons without a lightmap, from the world normal.
+pub(crate) fn poly_shade(wn: [f32; 3]) -> f32 {
+    ((wn[0] * 0.35 + wn[1] * 0.75 + wn[2] * 0.55).abs() * 0.55 + 0.45).clamp(0.35, 1.0)
 }
 
 fn clip_near_plane(verts: &[CamVert]) -> Vec<CamVert> {
@@ -1686,19 +1906,55 @@ fn clip_near_plane(verts: &[CamVert]) -> Vec<CamVert> {
     out
 }
 
-#[allow(clippy::too_many_arguments)]
-fn rasterize_tri(
-    fb: &mut [u32],
-    zb: &mut [f32],
-    p0: ProjVert,
-    p1: ProjVert,
-    p2: ProjVert,
-    tex: Option<&DecodedTexture>,
+/// One projected triangle waiting for [`flush_tris`].
+#[derive(Clone, Copy)]
+struct QueuedTri<'a> {
+    p: [ProjVert; 3],
+    tex: Option<&'a DecodedTexture>,
     alpha_reference: Option<u8>,
-    lmap: Option<&DecodedLightmap>,
+    lmap: Option<&'a DecodedLightmap>,
     write_z: bool,
     depth_bias: f32,
-) {
+}
+
+/// Rasterise `tris` in order. With more than one thread the frame is split into row bands and
+/// each band runs the whole list in order, so every pixel sees the same sequence as a serial
+/// pass and the result is identical.
+fn flush_tris(tris: &[QueuedTri], fb: &mut [u32], zb: &mut [f32], threads: usize) {
+    if threads <= 1 || tris.len() < 16 {
+        for t in tris {
+            raster_band(t, fb, zb, 0, H);
+        }
+        return;
+    }
+    let rows = H.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (band, (fb_band, zb_band)) in fb
+            .chunks_mut(rows * W)
+            .zip(zb.chunks_mut(rows * W))
+            .enumerate()
+        {
+            let y0 = band * rows;
+            let y1 = (y0 + rows).min(H);
+            scope.spawn(move || {
+                for t in tris {
+                    raster_band(t, fb_band, zb_band, y0, y1);
+                }
+            });
+        }
+    });
+}
+
+/// Worker threads for the software rasterizer.
+fn raster_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get().min(16))
+}
+
+/// Rasterise rows `y0..y1` of `t` into band buffers whose row 0 is frame row `y0`.
+fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usize) {
+    let [p0, p1, p2] = t.p;
+    let (tex, alpha_reference, lmap, write_z, depth_bias) =
+        (t.tex, t.alpha_reference, t.lmap, t.write_z, t.depth_bias);
     let area = (p1.sx - p0.sx) * (p2.sy - p0.sy) - (p2.sx - p0.sx) * (p1.sy - p0.sy);
     if area.abs() < 1e-3 {
         return;
@@ -1707,15 +1963,16 @@ fn rasterize_tri(
 
     let min_x = p0.sx.min(p1.sx).min(p2.sx).floor().max(0.0) as usize;
     let max_x = p0.sx.max(p1.sx).max(p2.sx).ceil().min((W - 1) as f32) as usize;
-    let min_y = p0.sy.min(p1.sy).min(p2.sy).floor().max(0.0) as usize;
-    let max_y = p0.sy.max(p1.sy).max(p2.sy).ceil().min((H - 1) as f32) as usize;
-    if min_x > max_x || min_y > max_y {
+    let min_y = (p0.sy.min(p1.sy).min(p2.sy).floor().max(0.0) as usize).max(y0);
+    let max_y =
+        (p0.sy.max(p1.sy).max(p2.sy).ceil().min((H - 1) as f32) as usize).min(y1.saturating_sub(1));
+    if min_x > max_x || min_y > max_y || y1 <= y0 {
         return;
     }
 
     for y in min_y..=max_y {
         let py = y as f32 + 0.5;
-        let row = y * W;
+        let row = (y - y0) * W;
         for x in min_x..=max_x {
             let px = x as f32 + 0.5;
             let w0 = ((p1.sx - px) * (p2.sy - py) - (p2.sx - px) * (p1.sy - py)) * inv_area;
@@ -1903,6 +2160,126 @@ fn draw_line(fb: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, col: u32) {
 }
 
 #[cfg(test)]
+pub(crate) fn test_empty_scene() -> LdbScene {
+    tests::empty_scene()
+}
+
+/// View looking along `fwd` with world up, right = up × forward (the player camera's basis).
+#[cfg(test)]
+pub(crate) fn test_view(pos: [f32; 3], fwd: [f32; 3]) -> crate::gpu::GpuView {
+    let up = [0.0, 1.0, 0.0];
+    let right = [
+        up[1] * fwd[2] - up[2] * fwd[1],
+        up[2] * fwd[0] - up[0] * fwd[2],
+        up[0] * fwd[1] - up[1] * fwd[0],
+    ];
+    (pos, right, up, fwd)
+}
+
+#[cfg(test)]
+pub(crate) fn test_glass_quad(hidden: bool) -> crate::scene::SceneDynamicMesh {
+    tests::glass_quad(hidden)
+}
+
+/// Software render of the dynamic meshes only (the hardware renderer's reference).
+#[cfg(test)]
+pub(crate) fn test_software_dynamic(
+    scene: &LdbScene,
+    (pos, right, up, fwd): crate::gpu::GpuView,
+) -> (Vec<u32>, Vec<f32>) {
+    let mut fb = vec![0u32; W * H];
+    let mut zb = vec![f32::INFINITY; W * H];
+    let rooms: BTreeMap<i32, [f32; 3]> =
+        scene.rooms.iter().map(|r| (r.id, r.world_origin)).collect();
+    draw_dynamic_meshes(
+        scene,
+        &rooms,
+        pos,
+        right,
+        up,
+        fwd,
+        (H as f32) * 0.85,
+        true,
+        false,
+        &mut fb,
+        &mut zb,
+    );
+    (fb, zb)
+}
+
+/// Software render of one character facing +z at `pos` (the hardware renderer's reference).
+#[cfg(test)]
+pub(crate) fn test_software_character(
+    rig: &CharacterRig,
+    pos: [f32; 3],
+    hit_flash: bool,
+    (cam, right, up, fwd): crate::gpu::GpuView,
+) -> (Vec<u32>, Vec<f32>) {
+    let mut fb = vec![0u32; W * H];
+    let mut zb = vec![f32::INFINITY; W * H];
+    render_kfs_character(
+        rig,
+        pos,
+        0.0,
+        0.0,
+        false,
+        false,
+        hit_flash,
+        &[],
+        cam,
+        right,
+        up,
+        fwd,
+        (H as f32) * 0.85,
+        false,
+        &mut fb,
+        &mut zb,
+    );
+    (fb, zb)
+}
+
+/// The software sky for `view` (the hardware renderer's reference).
+#[cfg(test)]
+pub(crate) fn test_software_sky(
+    tex: &DecodedTexture,
+    (_, right, up, fwd): crate::gpu::GpuView,
+) -> Vec<u32> {
+    let mut fb = vec![0u32; W * H];
+    paint_sky_strip(tex, right, up, fwd, (H as f32) * 0.85, &mut fb);
+    fb
+}
+
+/// Software render of the static meshes only (the hardware renderer's reference).
+#[cfg(test)]
+pub(crate) fn test_software_static(
+    scene: &LdbScene,
+    (pos, right, up, fwd): crate::gpu::GpuView,
+) -> (Vec<u32>, Vec<f32>) {
+    let mut fb = vec![0u32; W * H];
+    let mut zb = vec![f32::INFINITY; W * H];
+    const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    for sm in &scene.static_meshes {
+        render_poly_batch(
+            &sm.polys,
+            IDENT_MAT,
+            sm.world_origin,
+            scene,
+            pos,
+            right,
+            up,
+            fwd,
+            (H as f32) * 0.85,
+            true,
+            false,
+            true,
+            &mut fb,
+            &mut zb,
+        );
+    }
+    (fb, zb)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::scene::{SceneDynamicMesh, SceneMaterial, ScenePoly, SceneVertex};
@@ -2037,7 +2414,7 @@ mod tests {
         assert_eq!(tex.height, 256);
     }
 
-    fn empty_scene() -> LdbScene {
+    pub(super) fn empty_scene() -> LdbScene {
         LdbScene {
             textures: Vec::new(),
             materials: BTreeMap::new(),
@@ -2128,6 +2505,16 @@ mod tests {
     }
 
     #[test]
+    fn do_with_collisions_disabled_does_not_block() {
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(glass_quad(false));
+        let rooms = BTreeMap::new();
+        assert!(hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+        scene.dynamic_meshes[0].collisions = false;
+        assert!(!hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+    }
+
+    #[test]
     fn attached_camera_looks_along_the_do_z_axis() {
         // The four house cutscene cameras (`::entrance05::camera1`, `::startroom::camera2`,
         // `::entrance06::camera2`, `::Bathroom::camera2`) frame their rooms along +z; along -z
@@ -2189,13 +2576,77 @@ mod tests {
     }
 
     #[test]
-    fn do_with_collisions_disabled_does_not_block() {
-        let mut scene = empty_scene();
-        scene.dynamic_meshes.push(glass_quad(false));
-        let rooms = BTreeMap::new();
-        assert!(hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
-        scene.dynamic_meshes[0].collisions = false;
-        assert!(!hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+    fn parallel_band_raster_matches_serial_raster_exactly() {
+        // Overlapping quads at several depths, some with an alpha-masked texture and some
+        // that do not write depth: any change in per-pixel order would change the result.
+        let tex = DecodedTexture {
+            path: "t.tga".into(),
+            flag: 0,
+            width: 8,
+            height: 8,
+            pixels: (0..64u32)
+                .map(|i| {
+                    if i % 3 == 0 {
+                        0x0012_3456
+                    } else {
+                        0xff00_0000 | (i * 0x0003_0507)
+                    }
+                })
+                .collect(),
+        };
+        let mut tris = Vec::new();
+        for k in 0..40 {
+            let x = 40.0 + (k * 37 % 700) as f32;
+            let y = 20.0 + (k * 53 % 450) as f32;
+            let z = 1.0 + (k % 7) as f32;
+            let v = |sx: f32, sy: f32, u: f32, vv: f32| ProjVert {
+                sx,
+                sy,
+                inv_z: 1.0 / z,
+                u_over_z: u / z,
+                v_over_z: vv / z,
+                lu_over_z: 0.0,
+                lv_over_z: 0.0,
+                light_over_z: [0.7 / z; 3],
+            };
+            for (a, b, c) in [
+                (
+                    v(x, y, 0.0, 0.0),
+                    v(x + 260.0, y, 1.0, 0.0),
+                    v(x + 260.0, y + 180.0, 1.0, 1.0),
+                ),
+                (
+                    v(x, y, 0.0, 0.0),
+                    v(x + 260.0, y + 180.0, 1.0, 1.0),
+                    v(x, y + 180.0, 0.0, 1.0),
+                ),
+            ] {
+                tris.push(QueuedTri {
+                    p: [a, b, c],
+                    tex: (k % 2 == 0).then_some(&tex),
+                    alpha_reference: (k % 4 == 0).then_some(128),
+                    lmap: None,
+                    write_z: k % 3 != 0,
+                    depth_bias: 0.0,
+                });
+            }
+        }
+        let run = |threads: usize| {
+            let mut fb = vec![0u32; W * H];
+            let mut zb = vec![f32::INFINITY; W * H];
+            flush_tris(&tris, &mut fb, &mut zb, threads);
+            (fb, zb)
+        };
+        let (fb1, zb1) = run(1);
+        let (fb8, zb8) = run(8);
+        assert!(fb1.iter().any(|&p| p != 0), "the quads must draw");
+        assert!(fb1 == fb8, "colour differs between serial and parallel");
+        assert!(
+            zb1.iter()
+                .zip(&zb8)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "depth differs between serial and parallel"
+        );
     }
 
     #[test]
@@ -2282,7 +2733,7 @@ mod tests {
         );
     }
 
-    fn glass_quad(hidden: bool) -> SceneDynamicMesh {
+    pub(super) fn glass_quad(hidden: bool) -> SceneDynamicMesh {
         SceneDynamicMesh {
             name: "::Bathroom::glass01.DO".into(),
             room_id: 0,

@@ -17,7 +17,7 @@ Product spec: [docs/specs/2026-10-30-open-max-payne.md](docs/specs/2026-10-30-op
 | **1.05 patcher** | `maxfx-patcher` — HTTPS + SHA-256 allowlist; refuses SFX installers |
 | **`openras` (Rust)** | **Complete** — RASMaker `-x/-v/-a/-m/-p/-c` + `RA->` 12-byte LZSS header (`rl.dll` `0x10012fa0`); extracts all retail `x_level*.ras` |
 | **`openpfx` (Rust)** | **Alpha** — `dump-pse`, `dump-rps`, `export-root` (`export`), `validate-rps` (`PS_ParticleSystem` `0x60`/`5` gates) |
-| **`maxfx-engine`** | **3D Walkthrough + Tools** — 100% `.ldb` scene decoder (textures, `256²` lightmaps, rooms, portals, static & dynamic meshes, FSMs, triggers, items, characters), interactive 3D walkthrough (`--window`), headless single-frame PPM render (`--frame out.ppm [--camera NAME.DO]`), and `.kf2`/`.skd` chunk inspector |
+| **`maxfx-engine`** | **3D Walkthrough + Tools** — 100% `.ldb` scene decoder (textures, `256²` lightmaps, rooms, portals, static & dynamic meshes, FSMs, triggers, items, characters), interactive 3D walkthrough (`--window`; `--renderer hw` wgpu hardware renderer by default, `--renderer sw` software fallback), headless single-frame PPM render (`--frame out.ppm [--camera NAME.DO]`), and `.kf2`/`.skd` chunk inspector |
 | **Studio (Tauri)** | Native GUI front door: **RASMaker**, **Play**, **MaxED 3D**, **ParticleFX**, and **ActorFX** tabs |
 | **`.sh` runtime** | Linux convenience only — not required on Windows |
 | **Blender KF2** | Specification / early architecture (stub add-on) |
