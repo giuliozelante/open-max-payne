@@ -2981,7 +2981,7 @@ pub fn play_intro_video(path: &Path, screen: &mut frontend::Screen) -> Result<()
 struct GameSource {
     game_dir: PathBuf,
     ras_paths: Vec<PathBuf>,
-    opened: Vec<RasArchive>,
+    opened: Vec<openras::archive::RasIndex>,
     cursor: usize,
 }
 
@@ -2995,23 +2995,25 @@ impl GameSource {
         }
     }
 
+    /// Loose `data/` first, then the archives in order. Archives are indexed, not decoded: a
+    /// lookup reads only the member it returns.
     fn read(&mut self, win_path: &str) -> Option<Vec<u8>> {
         if let Some(bytes) = loose_bytes(&self.game_dir, win_path) {
             return Some(bytes);
         }
-        for arc in &self.opened {
-            if let Some(bytes) = archive_member(arc, win_path) {
-                return Some(bytes.to_vec());
+        for index in &self.opened {
+            if let Ok(Some(bytes)) = index.read_member(win_path) {
+                return Some(bytes);
             }
         }
         while self.cursor < self.ras_paths.len() {
             let path = self.ras_paths[self.cursor].clone();
             self.cursor += 1;
-            let Ok(arc) = RasArchive::read(&path) else {
+            let Ok(index) = openras::archive::RasIndex::open(&path) else {
                 continue;
             };
-            let hit = archive_member(&arc, win_path).map(|b| b.to_vec());
-            self.opened.push(arc);
+            let hit = index.read_member(win_path).ok().flatten();
+            self.opened.push(index);
             if hit.is_some() {
                 return hit;
             }
@@ -3061,6 +3063,7 @@ fn ras_candidates(game_dir: &Path) -> Vec<PathBuf> {
     data
 }
 
+#[cfg(test)]
 fn archive_member<'a>(arc: &'a RasArchive, win_path: &str) -> Option<&'a [u8]> {
     let mut want = win_path.replace('/', "\\");
     if !want.starts_with('\\') {
