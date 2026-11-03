@@ -818,7 +818,11 @@ fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32
         }
     }
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
-        if dm.hidden || dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
+        if dm.hidden
+            || !dm.collisions
+            || dm.name.contains("_Tip_")
+            || dm.name.ends_with("Start_FSM.DO")
+        {
             continue;
         }
         let (xform, origin) = dynamic_world(scene, idx, rooms);
@@ -1981,6 +1985,7 @@ mod tests {
             local_start_pos: [0.0; 3],
             toggled: false,
             hidden: false,
+            collisions: true,
             hitpoints: None,
             polys: vec![quad],
             anims: Vec::new(),
@@ -1992,6 +1997,16 @@ mod tests {
         let rooms = BTreeMap::new();
         assert!(hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
         scene.dynamic_meshes[0].polys[0].material_id = 2;
+        assert!(!hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+    }
+
+    #[test]
+    fn do_with_collisions_disabled_does_not_block() {
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(glass_quad(false));
+        let rooms = BTreeMap::new();
+        assert!(hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+        scene.dynamic_meshes[0].collisions = false;
         assert!(!hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
     }
 
@@ -2089,6 +2104,7 @@ mod tests {
             local_start_pos: [0.0; 3],
             toggled: false,
             hidden,
+            collisions: true,
             hitpoints: None,
             polys: vec![ScenePoly {
                 vertices: vec![
