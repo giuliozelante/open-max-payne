@@ -419,7 +419,17 @@ pub struct SceneJumppoint {
     pub name: String,
     pub room_id: i32,
     pub pos: [f32; 3],
+    /// Orientation of the first transform (columns, like `SceneDynamicMesh::world_mat`).
+    pub mat: [f32; 9],
     pub jp_type: i32,
+}
+
+impl SceneJumppoint {
+    /// Player yaw (forward = `(sin, 0, cos)`) along the jumppoint's +z axis, the same forward
+    /// convention as the cutscene cameras.
+    pub fn yaw(&self) -> f32 {
+        self.mat[6].atan2(self.mat[8])
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1727,7 +1737,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         for _ in 0..jcnt {
             let name = read_str(data, &mut i)?;
             let _parent = read_str(data, &mut i)?;
-            let pos = read_xform_pos(data, &mut i)?;
+            let (mat, pos) = read_xform(data, &mut i)?;
             let _x2 = read_xform_pos(data, &mut i)?;
             let room_id = read_i32(data, &mut i)?;
             let _unk = read_str(data, &mut i)?;
@@ -1736,6 +1746,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                 name,
                 room_id,
                 pos,
+                mat,
                 jp_type,
             });
         }
@@ -2373,12 +2384,14 @@ mod tests {
                     name: "Jumppoint 00".into(),
                     room_id: 4,
                     pos: [9.0, 0.0, 0.0],
+                    mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
                     jp_type: 0,
                 },
                 SceneJumppoint {
                     name: "Jumppoint 00".into(),
                     room_id: 0,
                     pos: [1.0, 0.0, 2.0],
+                    mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
                     jp_type: 0,
                 },
             ],
@@ -2386,6 +2399,27 @@ mod tests {
         let idx = scene.spawn_jumppoint_index(Some("::StartRoom::Jumppoint 00"));
         assert_eq!(idx, 1);
         assert_eq!(scene.jumppoints[idx].pos, [1.0, 0.0, 2.0]);
+    }
+
+    #[test]
+    fn jumppoint_yaw_faces_its_z_axis() {
+        // The house start (`::startroom::Jumppoint 00`, z = +Z) faces into the room, away from
+        // the door; `Part1_Level2b`'s start has z = -Z. Player yaw: forward = (sin, 0, cos).
+        let mut jp = SceneJumppoint {
+            name: "::startroom::Jumppoint 00".into(),
+            room_id: 0,
+            pos: [0.0; 3],
+            mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            jp_type: 0,
+        };
+        assert!(jp.yaw().abs() < 1e-6);
+        jp.mat = [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0];
+        assert!((jp.yaw().abs() - std::f32::consts::PI).abs() < 1e-6);
+        // z = (0.30, 0, -0.95), the Part1_Level1b start.
+        jp.mat = [-0.95, 0.0, -0.30, 0.0, 1.0, 0.0, 0.30, 0.0, -0.95];
+        let (s, c) = jp.yaw().sin_cos();
+        // Inputs are rounded to two decimals, so compare at that precision.
+        assert!((s - 0.30).abs() < 1e-2 && (c + 0.95).abs() < 1e-2);
     }
 
     #[test]
