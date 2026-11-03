@@ -2563,26 +2563,27 @@ pub fn read_game_bytes(game_dir: &Path, win_path: &str) -> Option<Vec<u8>> {
 
 /// Raw SharedDB text for `breakable` and `dynamic`, from loose `data/` or `x_data.ras`.
 pub fn load_sound_catalogs(game_dir: &Path) -> BTreeMap<String, String> {
+    ["breakable", "dynamic"]
+        .into_iter()
+        .filter_map(|category| {
+            load_sound_catalog(game_dir, category).map(|text| (category.to_string(), text))
+        })
+        .collect()
+}
+
+/// `\data\database\sounds\{category}.txt` with `soundid.h` in front (its `#include`).
+pub fn load_sound_catalog(game_dir: &Path, category: &str) -> Option<String> {
     let mut src = GameSource::open(game_dir);
-    let mut catalogs = BTreeMap::new();
-    // Both catalogs start with `#include <..\soundid.h>` (the `ID_DOOR_*` ranges).
+    let win_path = format!(
+        "\\data\\database\\sounds\\{}.txt",
+        category.to_ascii_lowercase()
+    );
+    let text = String::from_utf8(src.read(&win_path)?).ok()?;
     let header = src
         .read(r"\data\database\soundid.h")
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
-    for (category, win_path) in [
-        ("breakable", r"\data\database\sounds\breakable.txt"),
-        ("dynamic", r"\data\database\sounds\dynamic.txt"),
-    ] {
-        let Some(bytes) = src.read(win_path) else {
-            continue;
-        };
-        let Ok(text) = String::from_utf8(bytes) else {
-            continue;
-        };
-        catalogs.insert(category.to_string(), format!("{header}\n{text}"));
-    }
-    catalogs
+    Some(format!("{header}\n{text}"))
 }
 
 /// Filename inside `[cue]` in `sounds/story.txt`. `empty` reads `[Empty]`.
@@ -4199,6 +4200,13 @@ mod tests {
                 volume: 1.0,
             })
         );
+        let enemy = load_sound_catalog(game, "Enemy").expect("enemy catalog");
+        assert_eq!(
+            story_sound_filename(&enemy, "mobster_alert").as_deref(),
+            Some(r"enemy\mobster\mobster_alert_01a.wav")
+        );
+        assert!(sound_cue_3d(&enemy, "mobster_alert").is_some_and(|r| r.volume > 0.0));
+        assert_eq!(load_sound_catalog(game, "no_such_catalog"), None);
         let win = story_wav_win_path(r"breakable\glass\break_glass_medium.wav");
         assert_eq!(
             win,

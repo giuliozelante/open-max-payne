@@ -1259,6 +1259,28 @@ pub(crate) fn sound_player_args(wav: &Path, looping: bool, volume: u32) -> Vec<S
     args
 }
 
+/// Load the catalog of each queued cue whose category is not loaded yet, then resolve the cue.
+fn resolve_queued_sounds(scene: &mut LdbScene, game_dir: &Path) {
+    for index in 0..scene.sound_queue.len() {
+        if scene.sound_queue[index].filename.is_some() {
+            continue;
+        }
+        let category = scene.sound_queue[index].category.to_ascii_lowercase();
+        if !scene
+            .sound_catalogs
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case(&category))
+        {
+            // An empty text marks a missing catalog, so it is read once.
+            let text = crate::load_sound_catalog(game_dir, &category).unwrap_or_default();
+            scene.sound_catalogs.insert(category, text);
+        }
+        let mut sound = scene.sound_queue[index].clone();
+        scene.resolve_sound(&mut sound);
+        scene.sound_queue[index] = sound;
+    }
+}
+
 /// Gain of `voice` heard at `listener`: full for a non-positional cue or an emitter with no position.
 fn voice_gain(
     voice: &Voice,
@@ -1318,6 +1340,7 @@ fn play_queued_sounds(
             VoiceAction::Start => voice.start(gain),
         }
     }
+    resolve_queued_sounds(scene, game_dir);
     for sound in std::mem::take(&mut scene.sound_queue) {
         let Some(filename) = sound.filename.as_deref() else {
             continue;
@@ -2748,6 +2771,33 @@ mod tests {
         assert_eq!(voice_action(Some(0.3), 0.16), VoiceAction::Keep);
         assert_eq!(voice_action(Some(0.3), 0.61), VoiceAction::Start);
         assert_eq!(voice_action(Some(0.3), 0.14), VoiceAction::Start);
+    }
+
+    #[test]
+    fn retail_level_catalogs_load_when_a_cue_needs_them() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        if crate::read_game_bytes(&game, r"\data\database\sounds\enemy.txt").is_none() {
+            return;
+        }
+        let mut scene = LdbScene::default();
+        let mut thug = glass_quad(false);
+        thug.name = "::bar::thug.DO".into();
+        scene.dynamic_meshes.push(thug);
+        assert!(scene.dispatch_message(
+            "::bar",
+            "::bar::thug.DO->A_Play3DSound(enemy, mobster_alert, \"\");"
+        ));
+        assert_eq!(scene.sound_queue[0].filename, None);
+        resolve_queued_sounds(&mut scene, &game);
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"enemy\mobster\mobster_alert_01a.wav")
+        );
+        assert!(scene.sound_queue[0].range.is_some());
+        assert!(scene.sound_catalogs.contains_key("enemy"));
     }
 
     #[test]

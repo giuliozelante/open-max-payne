@@ -1020,36 +1020,41 @@ impl LdbScene {
         let Some(emitter) = self.sound_emitter(context_name, receiver) else {
             return false;
         };
+        let mut sound = QueuedSound {
+            category: category.to_string(),
+            cue: cue.to_string(),
+            filename: None,
+            emitter,
+            looping: false,
+            range: None,
+        };
         let catalog_loaded = self
             .sound_catalogs
             .keys()
             .any(|key| key.eq_ignore_ascii_case(category));
-        let filename = self
-            .sound_catalogs
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(category))
-            .and_then(|(_, text)| crate::story_sound_filename(text, cue));
-        if catalog_loaded && filename.is_none() {
+        if !self.resolve_sound(&mut sound) && catalog_loaded {
             return false;
         }
-        let looping = self
+        // An unloaded catalog is read when the sound plays (`render3d::resolve_queued_sounds`).
+        self.sound_queue.push(sound);
+        true
+    }
+
+    /// Fill `sound`'s file, looping and distance model from its loaded catalog.
+    /// `false` when the catalog is not loaded or has no such cue.
+    pub fn resolve_sound(&self, sound: &mut QueuedSound) -> bool {
+        let Some(text) = self
             .sound_catalogs
             .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(category))
-            .is_some_and(|(_, text)| crate::sound_cue_looping(text, cue));
-        self.sound_queue.push(QueuedSound {
-            category: category.to_string(),
-            cue: cue.to_string(),
-            filename,
-            emitter,
-            looping,
-            range: self
-                .sound_catalogs
-                .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case(category))
-                .and_then(|(_, text)| crate::sound_cue_3d(text, cue)),
-        });
-        true
+            .find(|(key, _)| key.eq_ignore_ascii_case(&sound.category))
+            .map(|(_, text)| text)
+        else {
+            return false;
+        };
+        sound.filename = crate::story_sound_filename(text, &sound.cue);
+        sound.looping = crate::sound_cue_looping(text, &sound.cue);
+        sound.range = crate::sound_cue_3d(text, &sound.cue);
+        sound.filename.is_some()
     }
 
     /// Full name of the trigger, mesh or FSM `receiver` names, if this scene stores it.

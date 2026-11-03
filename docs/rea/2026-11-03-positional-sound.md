@@ -40,8 +40,18 @@ smoothly:
 - **Loop in range:** the player is restarted when the gain halves or doubles, which is a 6 dB step.
   Smooth attenuation needs an in-process mixer. That means a new dependency, which needs approval first.
 
+## Catalogs
+
+`A_Play3DSound(category, cue, …)` names its catalog file: `data\database\sounds\{category}.txt`. Besides
+`dynamic` (3724 calls) and `breakable` (1599), the shipped levels use 25 more catalogs: `enemy` 306,
+`bunker` 206, `ambient` 148, `asgard` 118, and down to `aesir` 1. In total that is about 1360 calls. The
+exe holds a `*.txt` wildcard (`0x481ec0`), which suggests retail lists the directory. That is a
+HYPOTHESIS; the reference was not followed.
+
+The engine preloads `breakable` and `dynamic`. It loads any other catalog the first time a queued cue needs
+it (`load_sound_catalog`, with `soundid.h` in front), and a catalog that is missing is read only once.
+
 ## Open
 
 - Gain law and rolloff factor inside the falloff (read the `rl.dll` / DirectSound 3D setup).
 - Doppler (`setVelocity`), `FrequencyScaling` and `Pitch`.
-- Catalogs other than `breakable` and `dynamic` (level catalogs such as `maxhouse.txt`) are not loaded.
