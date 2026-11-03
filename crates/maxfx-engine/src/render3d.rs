@@ -1922,8 +1922,8 @@ mod tests {
         let mut cam = glass_quad(false);
         cam.name = "::Bathroom::camera2.DO".into();
         cam.polys.clear();
-        // Local -z along world +x, toward the glass at x = 0.
-        cam.world_mat = [0.0, 0.0, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0];
+        // Local +z (the view axis) along world +x, toward the glass at x = 0.
+        cam.world_mat = [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0];
         cam.local_start_mat = cam.world_mat;
         cam.world_pos = [-4.0, 1.0, 0.0];
         cam.local_start_pos = cam.world_pos;
