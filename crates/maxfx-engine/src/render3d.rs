@@ -13,7 +13,7 @@ use crate::scene::{
     decode_texture_blob, material_policy, DecodedLightmap, DecodedTexture, LdbScene,
     MaterialPolicy, ScenePointLight, ScenePoly, SceneVertex,
 };
-use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
+use minifb::{Key, KeyRepeat, MouseButton, MouseMode};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -28,7 +28,7 @@ pub fn use_software_renderer(software: bool) {
     SOFTWARE_RENDERER.store(software, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn hardware_renderer() -> bool {
+pub(crate) fn hardware_renderer() -> bool {
     let env_sw = std::env::var("OPENMAXFX_RENDERER").is_ok_and(|v| v.eq_ignore_ascii_case("sw"));
     !(env_sw || SOFTWARE_RENDERER.load(std::sync::atomic::Ordering::Relaxed))
 }
@@ -83,7 +83,9 @@ struct EnemyState {
     invulnerable: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_3d_walkthrough(
+    screen: &mut crate::frontend::Screen,
     mut scene: LdbScene,
     level_path: &Path,
     title: &str,
@@ -92,32 +94,7 @@ pub fn run_3d_walkthrough(
     world_sphere: Option<&str>,
     cinematic: bool,
 ) -> Result<(), String> {
-    // Hardware: a resizable winit window with a wgpu swapchain. Software (or no GPU): minifb.
-    let mut winit_window = if hardware_renderer() {
-        crate::frontend::WinitFrontend::new(title, W as u32, H as u32).ok()
-    } else {
-        None
-    };
-    let open_soft = || -> Result<Window, String> {
-        let mut window = Window::new(
-            title,
-            W,
-            H,
-            WindowOptions {
-                resize: false,
-                ..WindowOptions::default()
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        window.set_target_fps(60);
-        Ok(window)
-    };
-    let mut soft_window = if winit_window.is_none() {
-        Some(open_soft()?)
-    } else {
-        None
-    };
-
+    screen.set_title(title);
     let (catalog_player, johnny_rig) = load_character_rigs(level_path);
     let player_rig = player_skin
         .filter(|id| !id.is_empty())
@@ -264,15 +241,13 @@ pub fn run_3d_walkthrough(
         scene.player_controls = false;
     }
     // Built after the material surfaces, so batches follow the draw policies.
-    let mut gpu = winit_window
-        .as_ref()
-        .and_then(|front| crate::gpu::GpuRenderer::for_window(&scene, front));
+    // The session's window: its device and swapchain are rebuilt for this scene, not reopened.
+    let mut gpu = screen.take_gpu(&scene);
     if let Some((renderer, _)) = gpu.as_mut() {
         renderer.set_sky(sky.as_ref());
     }
-    if gpu.is_none() && winit_window.is_some() {
-        winit_window = None;
-        soft_window = Some(open_soft()?);
+    if gpu.is_none() {
+        screen.fall_back_to_software(title)?;
     }
     println!(
         "  3D Engine: renderer = {}",
@@ -290,14 +265,8 @@ pub fn run_3d_walkthrough(
     let base_dt = 1.0 / 60.0f32;
 
     loop {
-        if let Some(front) = winit_window.as_mut() {
-            front.pump();
-        }
-        let window: &dyn crate::frontend::Frontend = match (&winit_window, &soft_window) {
-            (Some(front), _) => front,
-            (None, Some(soft)) => soft,
-            (None, None) => break,
-        };
+        screen.pump();
+        let window: &dyn crate::frontend::Frontend = &*screen;
         if !window.is_open() || window.is_key_down(Key::Escape) {
             break;
         }
@@ -800,10 +769,10 @@ pub fn run_3d_walkthrough(
             fb[(cy_scr as i32 + d) as usize * W + cx] = cross_col;
         }
 
-        match (gpu.as_mut(), winit_window.as_ref(), soft_window.as_mut()) {
-            (Some((renderer, surface)), Some(front), _) => renderer.present(
+        match gpu.as_mut() {
+            Some((renderer, surface)) => renderer.present(
                 surface,
-                front.size(),
+                screen.size(),
                 &scene,
                 scene_view,
                 use_lightmaps,
@@ -811,16 +780,15 @@ pub fn run_3d_walkthrough(
                 wireframe.then_some(background.as_slice()),
                 &fb,
             ),
-            (_, _, Some(soft)) => {
+            None => {
                 if let Some(fade) = scene.screen_fade {
                     blend_screen(&mut fb, fade.color());
                 }
-                soft.update_with_buffer(&fb, W, H)
-                    .map_err(|e| e.to_string())?
+                screen.show(&fb)?
             }
-            _ => break,
         }
     }
+    screen.put_gpu(gpu);
     Ok(())
 }
 

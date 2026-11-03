@@ -2791,18 +2791,65 @@ pub fn startup_video_path(game_dir: &Path) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// Play the intro. Missing `ffplay` or a non-zero exit is an error string; the caller still opens the menu.
-pub fn play_intro_video(path: &Path) -> Result<(), String> {
-    let status = Command::new("ffplay")
-        .args(["-autoexit", "-loglevel", "error"])
-        .arg(path)
-        .status()
-        .map_err(|e| format!("ffplay: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("ffplay exited {status}"))
+/// `ffmpeg` BGRA bytes → `0RGB` frame pixels (minifb and the GPU blit both take `0RGB`).
+pub fn bgra_to_frame(bytes: &[u8], frame: &mut [u32]) {
+    for (px, b) in frame.iter_mut().zip(bytes.as_chunks::<4>().0) {
+        *px = u32::from(b[2]) << 16 | u32::from(b[1]) << 8 | u32::from(b[0]);
     }
+}
+
+/// Play the intro in `screen`: `ffmpeg -re` decodes 960 × 600 BGRA frames on a pipe, and
+/// `ffplay -nodisp` plays the sound. Escape, Space or Enter skips. A missing `ffmpeg` is an
+/// error string; the caller still opens the menu.
+pub fn play_intro_video(path: &Path, screen: &mut frontend::Screen) -> Result<(), String> {
+    use frontend::Frontend;
+    use minifb::{Key, KeyRepeat};
+    use std::io::Read;
+    use std::process::Stdio;
+    let (w, h) = (render3d::FRAME_W, render3d::FRAME_H);
+    let mut video = Command::new("ffmpeg")
+        .args(["-loglevel", "error", "-re", "-i"])
+        .arg(path)
+        .args(["-an", "-f", "rawvideo", "-pix_fmt", "bgra", "-vf"])
+        .arg(format!("scale={w}:{h}"))
+        .arg("-")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("ffmpeg: {e}"))?;
+    let audio = Command::new("ffplay")
+        .args(["-nodisp", "-autoexit", "-loglevel", "error"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok();
+    let mut pipe = video.stdout.take().ok_or("ffmpeg: no stdout")?;
+    let mut bytes = vec![0u8; w * h * 4];
+    let mut frame = vec![0u32; w * h];
+    let skip = [Key::Escape, Key::Space, Key::Enter];
+    while pipe.read_exact(&mut bytes).is_ok() {
+        bgra_to_frame(&bytes, &mut frame);
+        screen.pump();
+        if !screen.is_open()
+            || skip
+                .iter()
+                .any(|&k| screen.is_key_pressed(k, KeyRepeat::No))
+        {
+            break;
+        }
+        screen.show(&frame)?;
+    }
+    // Kill before closing the pipe, or a skipped video logs ffmpeg's broken-pipe errors.
+    let _ = video.kill();
+    drop(pipe);
+    let _ = video.wait();
+    if let Some(mut audio) = audio {
+        let _ = audio.kill();
+        let _ = audio.wait();
+    }
+    Ok(())
 }
 
 struct GameSource {
@@ -3798,6 +3845,14 @@ mod tests {
         assert_eq!(entries[0].world_sphere, None);
         assert_eq!(entries[1].player_skin.as_deref(), Some("young_max_payne"));
         assert_eq!(entries[1].world_sphere.as_deref(), Some("sunset"));
+    }
+
+    #[test]
+    fn bgra_video_bytes_become_0rgb_frame_pixels() {
+        let bytes = [0x10, 0x20, 0x30, 0xff, 0x01, 0x02, 0x03, 0x00];
+        let mut frame = vec![0u32; 2];
+        bgra_to_frame(&bytes, &mut frame);
+        assert_eq!(frame, vec![0x0030_2010, 0x0003_0201]);
     }
 
     #[test]

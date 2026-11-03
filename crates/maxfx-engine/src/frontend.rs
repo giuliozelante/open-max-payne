@@ -178,6 +178,163 @@ impl Frontend for WinitFrontend {
     }
 }
 
+type GpuPair = (crate::gpu::GpuRenderer, crate::gpu::GpuSurface);
+
+/// The one window a session draws into: intro video, menus, comic pages and every level
+/// (`docs/specs/2026-11-03-single-window.md`).
+pub enum Screen {
+    /// winit window; the wgpu device and swapchain once something has presented.
+    Hard {
+        front: WinitFrontend,
+        gpu: Option<Box<GpuPair>>,
+    },
+    /// minifb window: the software renderer, or the fallback without a GPU.
+    Soft(Box<Window>),
+}
+
+impl Screen {
+    /// A winit window when the hardware renderer is on, else (or if that fails) minifb.
+    pub fn open(title: &str) -> Result<Self, String> {
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        if crate::render3d::hardware_renderer() {
+            if let Ok(front) = WinitFrontend::new(title, w as u32, h as u32) {
+                return Ok(Screen::Hard { front, gpu: None });
+            }
+        }
+        Self::open_soft(title)
+    }
+
+    fn open_soft(title: &str) -> Result<Self, String> {
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let options = minifb::WindowOptions {
+            resize: false,
+            ..minifb::WindowOptions::default()
+        };
+        let mut window = Window::new(title, w, h, options).map_err(|e| e.to_string())?;
+        window.set_target_fps(60);
+        Ok(Screen::Soft(Box::new(window)))
+    }
+
+    /// Replace a winit window that has no usable GPU with a minifb one (once per session).
+    pub fn fall_back_to_software(&mut self, title: &str) -> Result<(), String> {
+        if matches!(self, Screen::Hard { .. }) {
+            *self = Self::open_soft(title)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_title(&mut self, title: &str) {
+        match self {
+            Screen::Hard { front, .. } => front.window.set_title(title),
+            Screen::Soft(window) => window.set_title(title),
+        }
+    }
+
+    /// Collect window events (minifb polls inside [`Screen::show`] instead).
+    pub fn pump(&mut self) {
+        if let Screen::Hard { front, .. } = self {
+            front.pump();
+        }
+    }
+
+    /// The device and swapchain rebuilt for `scene`, lent to the walkthrough. `None` without a
+    /// GPU or in software mode. Give it back with [`Screen::put_gpu`].
+    pub fn take_gpu(&mut self, scene: &crate::scene::LdbScene) -> Option<GpuPair> {
+        let Screen::Hard { front, gpu } = self else {
+            return None;
+        };
+        match gpu.take() {
+            Some(pair) => {
+                let (renderer, surface) = *pair;
+                Some((renderer.for_scene(scene), surface))
+            }
+            None => crate::gpu::GpuRenderer::for_window(scene, front),
+        }
+    }
+
+    pub fn put_gpu(&mut self, pair: Option<GpuPair>) {
+        if let Screen::Hard { gpu, .. } = self {
+            *gpu = pair.map(Box::new);
+        }
+    }
+
+    /// The hardware window's drawable size (the frame size in software mode).
+    pub fn size(&self) -> (u32, u32) {
+        match self {
+            Screen::Hard { front, .. } => front.size(),
+            Screen::Soft(_) => (
+                crate::render3d::FRAME_W as u32,
+                crate::render3d::FRAME_H as u32,
+            ),
+        }
+    }
+
+    /// Present one 960 × 600 `0RGB` frame (video, menu, comic page).
+    pub fn show(&mut self, frame: &[u32]) -> Result<(), String> {
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        match self {
+            Screen::Soft(window) => window
+                .update_with_buffer(frame, w, h)
+                .map_err(|e| e.to_string()),
+            Screen::Hard { front, gpu } => {
+                let empty = crate::scene::LdbScene::default();
+                if gpu.is_none() {
+                    *gpu = crate::gpu::GpuRenderer::for_window(&empty, front).map(Box::new);
+                }
+                let Some(pair) = gpu.as_mut() else {
+                    return Err("no GPU surface for the window".into());
+                };
+                let (renderer, surface) = &mut **pair;
+                let hud = vec![crate::gpu::HUD_CLEAR; w * h];
+                renderer.present(
+                    surface,
+                    front.size(),
+                    &empty,
+                    None,
+                    false,
+                    &[],
+                    Some(frame),
+                    &hud,
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Frontend for Screen {
+    fn is_open(&self) -> bool {
+        match self {
+            Screen::Hard { front, .. } => front.is_open(),
+            Screen::Soft(window) => window.is_open(),
+        }
+    }
+    fn is_key_down(&self, key: Key) -> bool {
+        match self {
+            Screen::Hard { front, .. } => front.is_key_down(key),
+            Screen::Soft(window) => window.is_key_down(key),
+        }
+    }
+    fn is_key_pressed(&self, key: Key, repeat: KeyRepeat) -> bool {
+        match self {
+            Screen::Hard { front, .. } => front.is_key_pressed(key, repeat),
+            Screen::Soft(window) => window.is_key_pressed(key, repeat),
+        }
+    }
+    fn get_mouse_down(&self, button: MouseButton) -> bool {
+        match self {
+            Screen::Hard { front, .. } => front.get_mouse_down(button),
+            Screen::Soft(window) => window.get_mouse_down(button),
+        }
+    }
+    fn get_mouse_pos(&self, mode: MouseMode) -> Option<(f32, f32)> {
+        match self {
+            Screen::Hard { front, .. } => front.get_mouse_pos(mode),
+            Screen::Soft(window) => window.get_mouse_pos(mode),
+        }
+    }
+}
+
 /// winit physical key → the minifb key the walkthrough checks.
 pub(crate) fn minifb_key(code: KeyCode) -> Option<Key> {
     Some(match code {
@@ -197,6 +354,8 @@ pub(crate) fn minifb_key(code: KeyCode) -> Option<Key> {
         KeyCode::ArrowLeft => Key::Left,
         KeyCode::ArrowRight => Key::Right,
         KeyCode::Space => Key::Space,
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Backspace => Key::Backspace,
         KeyCode::Tab => Key::Tab,
         KeyCode::Escape => Key::Escape,
         KeyCode::F1 => Key::F1,

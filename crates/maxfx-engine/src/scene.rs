@@ -618,7 +618,7 @@ pub struct SceneRoom {
     pub world_origin: [f32; 3],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LdbScene {
     pub textures: Vec<DecodedTexture>,
     pub materials: BTreeMap<i32, SceneMaterial>,
