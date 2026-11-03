@@ -1210,7 +1210,7 @@ impl GpuRenderer {
     ) -> SceneFrame {
         let character_draws = self.prepare_characters(characters);
         let (w, h) = (FRAME_W as f32, FRAME_H as f32);
-        let fov_scale = h * 0.85;
+        let fov_scale = crate::render3d::fov_scale(scene.fov_multiplier.value);
         let v4 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
         let camera = CameraUniform {
             pos: v4(pos),
