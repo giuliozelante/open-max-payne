@@ -881,6 +881,16 @@ impl LdbScene {
             }
             "fsm_randomize" => self.fsm_randomize(msg.receiver),
             "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
+            // `maxpayne_gamemode->A_PlaySound(maxhouse, P1L0a_cam)`: not positional.
+            "a_playsound" => {
+                let before = self.sound_queue.len();
+                let receiver = msg.receiver.to_string();
+                let queued = self.queue_sound(receiver, &msg.args);
+                if let Some(sound) = self.sound_queue.get_mut(before) {
+                    sound.range = None;
+                }
+                queued
+            }
             // Every retail call goes to `maxpayne_gamemode`; the game mode owns the music.
             "a_playmusic" => {
                 let cue = msg
@@ -1068,6 +1078,16 @@ impl LdbScene {
         let Some(emitter) = self.sound_emitter(context_name, receiver) else {
             return false;
         };
+        self.queue_sound(emitter, args)
+    }
+
+    /// Queue `(category, cue, …)` from `emitter`, resolved now if its catalog is loaded.
+    fn queue_sound(&mut self, emitter: String, args: &[&str]) -> bool {
+        let category = args.first().copied().unwrap_or("");
+        let cue = args.get(1).copied().unwrap_or("");
+        if category.is_empty() || cue.is_empty() {
+            return false;
+        }
         let mut sound = QueuedSound {
             category: category.to_string(),
             cue: cue.to_string(),
@@ -1119,8 +1139,18 @@ impl LdbScene {
         } else {
             receiver
         };
-        self.fsm_index(fsm_name)
-            .map(|index| self.fsms[index].name.clone())
+        if let Some(index) = self.fsm_index(fsm_name) {
+            return Some(self.fsms[index].name.clone());
+        }
+        // Speech: `player->A_Play3DSound(maxhouse, P1L0a_01, head)` and characters
+        // (`::teleport::Max->…`) talk too.
+        if receiver.eq_ignore_ascii_case("player") {
+            return Some("player".to_string());
+        }
+        self.characters
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(fsm_name))
+            .map(|c| c.name.clone())
     }
 
     /// Send `name`'s `OnDeath` messages. `false` when no character has that name.
@@ -1155,6 +1185,13 @@ impl LdbScene {
             .find(|trigger| trigger.name.eq_ignore_ascii_case(emitter))
         {
             return Some(trigger.pos);
+        }
+        if let Some(character) = self
+            .characters
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(emitter))
+        {
+            return Some(character.pos);
         }
         let fsm = self
             .fsms
@@ -3576,6 +3613,41 @@ mod tests {
         ));
         assert!(!scene.dispatch_message("::startroom::door", "player->cam_animateinplace();"));
         assert_eq!(scene.camera_shakes, ["shake_quick".to_string()]);
+    }
+
+    #[test]
+    fn the_player_and_characters_speak_and_the_game_mode_plays_flat_sounds() {
+        let mut scene = door_fsm_scene();
+        let mut max = actor(&[]);
+        max.name = "::teleport::Max".into();
+        max.pos = [1.0, 0.0, 2.0];
+        scene.characters.push(max);
+        scene.sound_catalogs.insert(
+            "maxhouse".into(),
+            "[P1L0a_01]\n{\n[Sound]\nFilename = ingame\\part1\\P1L0a_01.wav;\n3DSound = YES;\nHotspot = 2;\nFallOff = 20;\n}\n[P1L0a_cam]\n{\n[Sound]\nFilename = ingame\\part1\\cam.wav;\n3DSound = NO;\n}\n"
+                .into(),
+        );
+        assert!(scene.dispatch_message("::x", "player->A_Play3DSound(maxhouse, P1L0a_01, head);"));
+        assert!(scene.dispatch_message(
+            "::x",
+            "::teleport::Max->a_play3dsound(maxhouse, P1L0a_01, head);"
+        ));
+        assert!(scene.dispatch_message(
+            "::x",
+            "maxpayne_gamemode->A_PlaySound(maxhouse, P1L0a_cam);"
+        ));
+        let emitters: Vec<_> = scene
+            .sound_queue
+            .iter()
+            .map(|s| s.emitter.as_str())
+            .collect();
+        assert_eq!(emitters, ["player", "::teleport::Max", "maxpayne_gamemode"]);
+        assert_eq!(scene.sound_queue[2].range, None);
+        assert_eq!(
+            scene.emitter_world_pos("::teleport::Max"),
+            Some([1.0, 0.0, 2.0])
+        );
+        assert_eq!(scene.emitter_world_pos("player"), None);
     }
 
     #[test]

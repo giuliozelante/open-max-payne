@@ -1609,6 +1609,7 @@ fn emitter_room(scene: &LdbScene, emitter: &str) -> i32 {
         .map(|mesh| (&mesh.name, mesh.room_id))
         .chain(scene.triggers.iter().map(|t| (&t.name, t.room_id)))
         .chain(scene.fsms.iter().map(|fsm| (&fsm.name, fsm.room_id)))
+        .chain(scene.characters.iter().map(|c| (&c.name, c.room_id)))
         .find(|(name, _)| name.eq_ignore_ascii_case(emitter))
         .map_or(0, |(_, room)| room)
 }
@@ -3026,6 +3027,26 @@ mod tests {
         );
         assert!(scene.sound_queue[0].range.is_some());
         assert!(scene.sound_catalogs.contains_key("enemy"));
+    }
+
+    #[test]
+    fn retail_house_speech_resolves_to_a_wav() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        if crate::read_game_bytes(&game, r"\data\database\sounds\maxhouse.txt").is_none() {
+            return;
+        }
+        let mut scene = LdbScene::default();
+        assert!(scene.dispatch_message("::x", "player->A_Play3DSound(maxhouse, P1L0a_01, head);"));
+        resolve_queued_sounds(&mut scene, &game);
+        let file = scene.sound_queue[0]
+            .filename
+            .clone()
+            .expect("P1L0a_01 file");
+        let wav = crate::read_game_bytes(&game, &crate::story_wav_win_path(&file)).expect("wav");
+        assert!(wav.starts_with(b"RIFF"));
     }
 
     #[test]
