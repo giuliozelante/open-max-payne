@@ -561,6 +561,8 @@ pub struct SceneCharacter {
     pub room_id: i32,
     pub pos: [f32; 3],
     pub startup_scripts: Vec<String>,
+    /// MaxED `OnDeath` tab (`.ldb` list 2 of 4): sent when the character dies.
+    pub on_death: Vec<String>,
 }
 
 impl SceneCharacter {
@@ -642,6 +644,8 @@ pub struct LdbScene {
     pub sound_stops: Vec<String>,
     /// `camerapaths.txt` blocks `player->CAM_AnimateInPlace` asked for, oldest first.
     pub camera_shakes: Vec<String>,
+    /// `(block, character)` of each `CAM_AnimateParented`, oldest first.
+    pub death_cams: Vec<(String, String)>,
     /// Dynamic mesh the view is attached to by `CAM_AttachToDO`, if any.
     pub attached_camera: Option<usize>,
     /// Cleared by `GM_SetPlayerControls(false)` during cutscenes.
@@ -860,6 +864,28 @@ impl LdbScene {
             }
             "fsm_randomize" => self.fsm_randomize(msg.receiver),
             "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
+            // All 64 retail calls are enemy death cams (`Death_01..03`, `special_killed`).
+            "cam_animateparented" => {
+                let Some(block) = msg.args.first().map(|a| a.trim()).filter(|a| !a.is_empty())
+                else {
+                    return false;
+                };
+                let target = if msg.receiver.eq_ignore_ascii_case("this") {
+                    context_name
+                } else {
+                    msg.receiver
+                };
+                let Some(character) = self
+                    .characters
+                    .iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(target))
+                else {
+                    return false;
+                };
+                let entry = (block.to_string(), character.name.clone());
+                self.death_cams.push(entry);
+                true
+            }
             // Retail sends it to `player` only (313 of 313 calls in the shipped levels).
             "cam_animateinplace" => {
                 let Some(block) = msg.args.first().map(|a| a.trim()).filter(|a| !a.is_empty())
@@ -1038,6 +1064,22 @@ impl LdbScene {
         };
         self.fsm_index(fsm_name)
             .map(|index| self.fsms[index].name.clone())
+    }
+
+    /// Send `name`'s `OnDeath` messages. `false` when no character has that name.
+    pub fn kill_character(&mut self, name: &str) -> bool {
+        let Some(character) = self
+            .characters
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+        else {
+            return false;
+        };
+        let (name, messages) = (character.name.clone(), character.on_death.clone());
+        for message in &messages {
+            self.dispatch_message(&name, message);
+        }
+        true
     }
 
     /// Advance the screen fade; a finished fade to a transparent colour goes away.
@@ -2236,8 +2278,13 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
             let room_id = read_i32(data, &mut i)?;
             let _unk = read_str(data, &mut i)?;
             let skin = read_str(data, &mut i)?;
+            // MaxED tabs, by content over every shipped level: StartUp, OnDeath (all 99 death
+            // counters and death cams), OnActivate (149 alert shouts), then one UNKNOWN list.
+            // `startup_scripts` keeps all four: `pursues` reads the OnActivate combat switch.
             let mut startup_scripts = read_str_list(data, &mut i, 0x1c)?;
-            for _ in 0..3 {
+            let on_death = read_str_list(data, &mut i, 0x1c)?;
+            startup_scripts.extend(on_death.iter().cloned());
+            for _ in 0..2 {
                 startup_scripts.append(&mut read_str_list(data, &mut i, 0x1c)?);
             }
             characters.push(SceneCharacter {
@@ -2246,6 +2293,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                 room_id,
                 pos,
                 startup_scripts,
+                on_death,
             });
         }
     }
@@ -2563,6 +2611,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         sound_queue: Vec::new(),
         sound_stops: Vec::new(),
         camera_shakes: Vec::new(),
+        death_cams: Vec::new(),
         attached_camera: None,
         player_controls: true,
         screen_fade: None,
@@ -2668,6 +2717,7 @@ mod tests {
             sound_queue: Vec::new(),
             sound_stops: Vec::new(),
             camera_shakes: Vec::new(),
+            death_cams: Vec::new(),
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
@@ -2825,7 +2875,53 @@ mod tests {
             room_id: 1,
             pos: [0.0; 3],
             startup_scripts: scripts.iter().map(|s| (*s).to_string()).collect(),
+            on_death: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_dying_character_sends_on_death_and_its_counter_starts_the_death_cam() {
+        let mut scene = door_fsm_scene();
+        let mut e1 = actor(&[]);
+        e1.name = "::storage::e1".into();
+        e1.on_death = vec!["::storage::death_counter->fsm_Send(add1);".into()];
+        scene.characters.push(e1);
+        scene.fsms[0].name = "::storage::death_counter".into();
+        scene.fsms[0].state = "3".into();
+        scene.fsms[0].commands = vec![(
+            "add1".into(),
+            Vec::new(),
+            vec![(
+                "3".into(),
+                vec!["::storage::e1->CAM_AnimateParented(death_03);".into()],
+            )],
+        )];
+        assert!(scene.kill_character("::STORAGE::e1"));
+        assert_eq!(
+            scene.death_cams,
+            [("death_03".to_string(), "::storage::e1".to_string())]
+        );
+        assert!(!scene.kill_character("::storage::nobody"));
+    }
+
+    #[test]
+    fn retail_storage_enemy_on_death_feeds_the_death_counter() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        let Some(level) =
+            crate::read_game_bytes(&game, r"\data\database\levels\part2\Part2_Level3.ldb")
+        else {
+            return;
+        };
+        let scene = parse_ldb_scene(&level).expect("Part2_Level3");
+        let e1 = scene
+            .characters
+            .iter()
+            .find(|c| c.name == "::storage::e1")
+            .expect("e1");
+        assert_eq!(e1.on_death, ["::storage::death_counter->fsm_Send(add1);"]);
     }
 
     #[test]

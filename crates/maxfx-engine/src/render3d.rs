@@ -265,6 +265,8 @@ pub fn run_3d_walkthrough(
     .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
     .unwrap_or_default();
     let mut camera_shake: Option<CameraShake> = None;
+    // `CAM_AnimateParented`: the path and the character it follows.
+    let mut death_cam: Option<(CameraShake, String)> = None;
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
@@ -492,6 +494,9 @@ pub fn run_3d_walkthrough(
                     let en = &mut enemies[idx];
                     en.health -= 1;
                     en.hit_flash = 0.25;
+                    if en.health == 0 {
+                        scene.kill_character(&en.name);
+                    }
                     println!(
                         "  3D Engine: Hit {}! (health={})",
                         en.name,
@@ -554,6 +559,16 @@ pub fn run_3d_walkthrough(
         if let Some(shake) = camera_shake.as_mut() {
             shake.time += world_dt;
         }
+        for (block, target) in std::mem::take(&mut scene.death_cams) {
+            if let Some(anim) =
+                load_camera_path(&catalog_root(level_path), &camerapaths_txt, &block)
+            {
+                death_cam = Some((CameraShake { anim, time: 0.0 }, target));
+            }
+        }
+        if let Some((path, _)) = death_cam.as_mut() {
+            path.time += world_dt;
+        }
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
 
@@ -576,6 +591,14 @@ pub fn run_3d_walkthrough(
         };
         if let Some((pos, right, up, fwd)) = attached_view(&scene, &room_origins) {
             (cam_pos, cam_right, cam_up, cam_fwd) = (pos, right, up, fwd);
+        } else if let Some(view) = death_cam.as_ref().and_then(|(path, target)| {
+            let pose = path.pose()?;
+            let en = enemies
+                .iter()
+                .find(|en| en.name.eq_ignore_ascii_case(target))?;
+            Some(parented_view(en.world_pos, en.yaw, pose))
+        }) {
+            (cam_pos, cam_right, cam_up, cam_fwd) = view;
         } else if let Some(delta) = camera_shake.as_ref().and_then(CameraShake::delta) {
             (cam_pos, cam_right, cam_up, cam_fwd) =
                 shaken_view((cam_pos, cam_right, cam_up, cam_fwd), delta);
@@ -1227,19 +1250,40 @@ struct CameraShake {
 }
 
 impl CameraShake {
-    /// Camera-local `(rotation, offset)` now, or `None` once the path is over.
-    fn delta(&self) -> Option<([f32; 9], [f32; 3])> {
+    /// The path's `(rotation, position)` now, or `None` once the path is over.
+    fn pose(&self) -> Option<([f32; 9], [f32; 3])> {
         let bone = self.anim.bones.first()?;
-        let first = bone.keys.first()?;
         if self.time * 30.0 >= bone.duration as f32 {
             return None;
         }
-        let (mat, pos) = crate::kf2::sample_locals(&self.anim, self.time)
-            .remove(&bone.name.to_ascii_lowercase())?;
+        crate::kf2::sample_locals(&self.anim, self.time).remove(&bone.name.to_ascii_lowercase())
+    }
+
+    /// Camera-local `(rotation, offset)` now, or `None` once the path is over.
+    fn delta(&self) -> Option<([f32; 9], [f32; 3])> {
+        let first = self.anim.bones.first()?.keys.first()?;
+        let (mat, pos) = self.pose()?;
         // Offset from the first key, so the path starts on the player camera. Every retail shake
         // starts with an identity rotation, so the key rotation is used as is.
         Some((mat, [0, 1, 2].map(|k| pos[k] - first.pos[k])))
     }
+}
+
+/// The view of a camera-path pose `(rotation, offset)` in the frame of a character standing at
+/// `feet` and facing `yaw` (its +z), with the path's x right, y up and z forward.
+fn parented_view(feet: [f32; 3], yaw: f32, pose: ([f32; 9], [f32; 3])) -> View {
+    let (sy, cy) = yaw.sin_cos();
+    let world = |v: [f32; 3]| [v[0] * cy + v[2] * sy, v[1], v[2] * cy - v[0] * sy];
+    let (mat, offset) = pose;
+    let at = world(offset);
+    let fwd = world(xform_dir(mat, [0.0, 0.0, 1.0]));
+    let up = world(xform_dir(mat, [0.0, 1.0, 0.0]));
+    let right = [
+        up[1] * fwd[2] - up[2] * fwd[1],
+        up[2] * fwd[0] - up[0] * fwd[2],
+        up[0] * fwd[1] - up[1] * fwd[0],
+    ];
+    ([0, 1, 2].map(|k| feet[k] + at[k]), right, up, fwd)
 }
 
 /// Start the path of the last `CAM_AnimateInPlace` block; it replaces a running one.
@@ -1250,13 +1294,21 @@ fn start_camera_shakes(
     shake: &mut Option<CameraShake>,
 ) {
     for block in std::mem::take(&mut scene.camera_shakes) {
-        let anim = crate::camera_path_file(camerapaths_txt, &block)
-            .and_then(|path| crate::read_game_bytes(game_dir, &path))
-            .and_then(|bytes| crate::kf2::parse_kf2_anim(&bytes));
-        if let Some(anim) = anim {
+        if let Some(anim) = load_camera_path(game_dir, camerapaths_txt, &block) {
             *shake = Some(CameraShake { anim, time: 0.0 });
         }
     }
+}
+
+/// The `Camera01` KF2 path of a `camerapaths.txt` block.
+fn load_camera_path(
+    game_dir: &Path,
+    camerapaths_txt: &str,
+    block: &str,
+) -> Option<crate::kf2::Kf2Anim> {
+    crate::camera_path_file(camerapaths_txt, block)
+        .and_then(|path| crate::read_game_bytes(game_dir, &path))
+        .and_then(|bytes| crate::kf2::parse_kf2_anim(&bytes))
 }
 
 /// The view moved by a camera-local `(rotation, offset)`: x along right, y up, z forward.
@@ -2480,6 +2532,22 @@ mod tests {
     }
 
     #[test]
+    fn a_death_cam_sits_in_the_frame_of_its_character() {
+        let back = [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0];
+        let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|k| (a[k] - b[k]).abs() < 1e-5);
+        let (eye, _, up, fwd) = parented_view([10.0, 0.0, 0.0], 0.0, (back, [0.0, 0.5, 2.0]));
+        assert!(close(eye, [10.0, 0.5, 2.0]), "eye={eye:?}");
+        assert!(close(fwd, [0.0, 0.0, -1.0]), "fwd={fwd:?}");
+        assert!(close(up, [0.0, 1.0, 0.0]), "up={up:?}");
+        let half_turn = std::f32::consts::FRAC_PI_2;
+        let (eye, right, _, fwd) =
+            parented_view([10.0, 0.0, 0.0], half_turn, (back, [0.0, 0.5, 2.0]));
+        assert!(close(eye, [12.0, 0.5, 0.0]), "eye={eye:?}");
+        assert!(close(fwd, [-1.0, 0.0, 0.0]), "fwd={fwd:?}");
+        assert!(close(right, [0.0, 0.0, 1.0]), "right={right:?}");
+    }
+
+    #[test]
     fn shaken_view_moves_and_turns_the_eye_in_camera_space() {
         let view = (
             [1.0, 2.0, 3.0],
@@ -2675,6 +2743,7 @@ mod tests {
             sound_queue: Vec::new(),
             sound_stops: Vec::new(),
             camera_shakes: Vec::new(),
+            death_cams: Vec::new(),
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
