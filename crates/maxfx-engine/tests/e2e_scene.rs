@@ -27,6 +27,11 @@ fn push_xform(buf: &mut Vec<u8>, pos: [f32; 3]) {
 /// Build a complete synthetic `.ldb` binary that exercises all 14 `ImportLevel` sections
 /// through `parse_ldb_scene` to exact EOF.
 fn build_synthetic_full_ldb() -> Vec<u8> {
+    build_synthetic_ldb_with_lights(&[0x14, 0])
+}
+
+/// [`build_synthetic_full_ldb`] with `lights` in place of section 8.
+fn build_synthetic_ldb_with_lights(lights: &[u8]) -> Vec<u8> {
     let mut b = Vec::new();
 
     // Geometry preamble: section 1 (`0x1c 0x12`, count=3, flag=0) + 3 vec3s
@@ -153,8 +158,8 @@ fn build_synthetic_full_ldb() -> Vec<u8> {
     b.extend_from_slice(&1.0f32.to_le_bytes());
     b.extend_from_slice(&[0x14, 0]);
 
-    // 8. Directional lights = 0 (`14 00`)
-    b.extend_from_slice(&[0x14, 0]);
+    // 8. Directional lights (default: 0, `14 00`)
+    b.extend_from_slice(lights);
 
     // 9. Jumppoints = 1
     b.extend_from_slice(&[0x14, 1]);
@@ -211,6 +216,45 @@ fn e2e_synthetic_ldb_scene_decodes_to_exact_eof() {
     assert_eq!(scene.jumppoints.len(), 1);
     assert_eq!(scene.rooms.len(), 1);
     assert_eq!(scene.rooms[0].name, "::StartRoom");
+}
+
+/// The synthetic level with one empty dynamic mesh whose six trailing flags are `flags`.
+fn synthetic_ldb_with_one_do(flags: [u8; 6]) -> Vec<u8> {
+    let mut b = build_synthetic_full_ldb();
+    // Dynamic mesh count 0, then the level items header (`14 0e`).
+    let marker = [0x14, 0, 0x14, 14, 0x14, 0, 0x14, 0, 0x14, 1];
+    let at = b
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("dynamic mesh count");
+    let mut dm = vec![0x14, 1];
+    push_mf_str(&mut dm, "::StartRoom::timer.DO");
+    dm.extend_from_slice(&[0x11, 0, 0x1c, 0x14, 0]); // no points, no extra records
+    push_xform(&mut dm, [0.0; 3]);
+    dm.extend_from_slice(&[0x14, 0, 0x14, 0, 0x1f, 0x14, 0]); // no polys, no attribs
+    push_mf_str(&mut dm, "");
+    push_xform(&mut dm, [0.0; 3]);
+    push_xform(&mut dm, [0.0; 3]);
+    dm.extend_from_slice(&[0x14, 0]); // room
+    push_mf_str(&mut dm, "");
+    dm.extend_from_slice(&[0x14, 0]); // no animations
+    for f in flags {
+        dm.extend_from_slice(&[0x0e, f]);
+    }
+    dm.extend_from_slice(&[0x14, 0, 0x14, 0, 0x14, 0]);
+    b.splice(at..at + 2, dm);
+    b
+}
+
+#[test]
+fn e2e_dynamic_mesh_collisions_come_from_the_first_record_flag() {
+    // X_LevelDBDynamicMesh serializes six bools in order to +0xa0..+0xa5 (0x5ef340);
+    // DO setup copies +0xa0 to the DO's collisions flag +0x4ae (0x6f2c7c).
+    let on = parse_ldb_scene(&synthetic_ldb_with_one_do([1, 0, 0, 0, 0, 0])).expect("on");
+    let off = parse_ldb_scene(&synthetic_ldb_with_one_do([0, 1, 1, 1, 1, 1])).expect("off");
+    assert_eq!(on.dynamic_meshes.len(), 1);
+    assert!(on.dynamic_meshes[0].collisions);
+    assert!(!off.dynamic_meshes[0].collisions);
 }
 
 #[test]
@@ -286,4 +330,24 @@ fn e2e_byod_retail_levels_decode_to_eof_when_present() {
             assert_eq!(johnny_m.faces.len(), 1004);
         }
     }
+}
+
+#[test]
+fn e2e_lights_after_an_empty_mesh_attrib_list_keep_later_sections() {
+    // Part1_Level6 @0x65a854: the last static mesh ends with an empty attrib list
+    // (`1f 14 00`), then the light count and `Light::0` records.
+    let mut tail = vec![LDB_IMPORT_MATERIAL_LIST_TAG, 0x14, 0, 0x14, 1];
+    push_mf_str(&mut tail, "Light::0");
+    push_mf_str(&mut tail, "");
+    push_xform(&mut tail, [0.0, 2.0, 0.0]);
+    push_xform(&mut tail, [0.0, 2.0, 0.0]);
+    tail.extend_from_slice(&[0x14, 0]);
+    push_mf_str(&mut tail, "");
+    tail.push(0x19);
+    tail.extend(std::iter::repeat_n(0u8, 36));
+    tail.push(0x09);
+    tail.extend_from_slice(&5.0f32.to_le_bytes());
+    let scene = parse_ldb_scene(&build_synthetic_ldb_with_lights(&tail)).expect("scene");
+    let names: Vec<&str> = scene.jumppoints.iter().map(|j| j.name.as_str()).collect();
+    assert_eq!(names, ["::StartRoom::Jumppoint 00"]);
 }

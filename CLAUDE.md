@@ -50,6 +50,7 @@ cargo test -p openras <test_name_substring>
 cargo run -p openras -- list /path/to/mod.mpm   # RASMaker-compatible flags -x/-v/-a/-m/-p/-c
 cargo run -p openpfx -- dump-pse|dump-rps|export|validate-rps ...
 cargo run -p maxfx-engine -- --window [--renderer hw|sw] ...  # 3D walkthrough over BYOD .ldb (hw = wgpu)
+cargo run -p maxfx-engine -- --frame out.ppm [--camera NAME.DO] level.ldb  # headless frame for visual checks
 
 # Studio (Tauri 2 + Vite/TS, bun)
 cd studio && bun install && ./build.sh          # build.sh sources rust-env.sh (bash); never source it from fish
@@ -63,7 +64,7 @@ cd studio && bun install && ./build.sh          # build.sh sources rust-env.sh (
   PSE dump / PSE→RPS export. Format specs: `docs/specs/{ras,rps,kf2}_format.md`.
 - **`maxfx-engine`**: lib + bin. `scene.rs` decodes level `.ldb` (textures, lightmaps, rooms,
   portals, meshes, FSMs, triggers); `kf2.rs` KF2/SKD/KFS animation + skinning; `render3d.rs`
-  windowed walkthrough (software rasterizer + `gpu.rs` wgpu hardware path for static geometry); `menu_ui.rs` startup/menu/comic flow. Most logic + tests in `lib.rs`.
+  windowed walkthrough (band-parallel software rasterizer, or the `gpu.rs` wgpu renderer with a winit window via `frontend.rs`); `menu_ui.rs` startup/menu/comic flow. Most logic + tests in `lib.rs`.
 - **Play**: `maxfx-play` picks backend from `OPENMAXFX_PLAY` (default Wine + retail
   `MaxPayne.exe`; `native` → `maxfx-engine` located via `OPENMAXFX_ENGINE`/`PATH`, with
   `OPENMAXFX_ENGINE_WINDOW`, `OPENMAXFX_ENGINE_PROBE`). `maxfx-patcher` applies 1.05

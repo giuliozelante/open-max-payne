@@ -22,6 +22,8 @@ pub struct GpuVertex {
     /// First vertex of the source polygon (back-face test, as in `draw_poly`).
     pub cull_ref: [f32; 3],
     pub normal: [f32; 3],
+    /// Per-vertex diffuse, used when the model asks for it (characters, #37).
+    pub light: [f32; 3],
 }
 
 /// Triangles that share a texture, lightmap and pass.
@@ -376,7 +378,7 @@ impl Binder {
 #[derive(Default)]
 struct CharacterCache {
     materials: BTreeMap<usize, Vec<wgpu::BindGroup>>,
-    shades: Vec<(u32, (wgpu::Buffer, wgpu::BindGroup))>,
+    model: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     vertices: Option<(wgpu::Buffer, u64)>,
 }
 
@@ -384,7 +386,8 @@ struct CharacterCache {
 pub struct GpuCharacter<'a> {
     pub mesh: &'a KfsMesh,
     pub verts: Vec<[f32; 3]>,
-    pub shade: f32,
+    /// Per-vertex diffuse from `character_vertex_light`.
+    pub light: Vec<[f32; 3]>,
 }
 
 fn upload(
@@ -469,14 +472,14 @@ impl ModelUniform {
         }
     }
 
-    /// Identity placement, no culling, fixed shade (characters).
-    fn shaded(shade: f32) -> Self {
+    /// Identity placement, no culling, per-vertex light (characters).
+    fn vertex_lit() -> Self {
         let mut m = Self::new(
             [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             [0.0; 3],
             false,
         );
-        m.flags[1] = shade;
+        m.flags[1] = 1.0;
         m
     }
 }
@@ -507,12 +510,13 @@ struct In {
     @location(2) luv: vec2f,
     @location(3) cull_ref: vec3f,
     @location(4) normal: vec3f,
+    @location(5) light: vec3f,
 };
 struct Out {
     @builtin(position) clip: vec4f,
     @location(0) uv: vec2f,
     @location(1) luv: vec2f,
-    @location(2) shade: f32,
+    @location(2) shade: vec3f,
     @location(3) vz: f32,
 };
 
@@ -536,10 +540,10 @@ fn vs(v: In) -> Out {
     o.clip = vec4f(cx * cam.params.x, cy * cam.params.y, cz - cam.params2.x, cz);
     o.uv = v.uv;
     o.luv = v.luv;
-    // render3d::poly_shade on the world normal, or the fixed character shade (flags.y).
-    o.shade = clamp(abs(n.x * 0.35 + n.y * 0.75 + n.z * 0.55) * 0.55 + 0.45, 0.35, 1.0);
-    if model.flags.y > 0.0 {
-        o.shade = model.flags.y;
+    // render3d::poly_shade on the world normal, or the per-vertex light (characters).
+    o.shade = vec3f(clamp(abs(n.x * 0.35 + n.y * 0.75 + n.z * 0.55) * 0.55 + 0.45, 0.35, 1.0));
+    if model.flags.y > 0.5 {
+        o.shade = v.light;
     }
     o.vz = cz;
     return o;
@@ -696,7 +700,7 @@ impl GpuRenderer {
             immediate_size: 0,
         });
         let attributes = wgpu::vertex_attr_array![
-            0 => Float32x3, 1 => Float32x2, 2 => Float32x2, 3 => Float32x3, 4 => Float32x3
+            0 => Float32x3, 1 => Float32x2, 2 => Float32x2, 3 => Float32x3, 4 => Float32x3, 5 => Float32x3
         ];
         let buffers = [Some(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GpuVertex>() as u64,
@@ -1069,7 +1073,6 @@ pub fn build_dynamic_batches(scene: &LdbScene) -> Vec<StaticBatch> {
 struct CharacterDraw {
     mesh: usize,
     material: usize,
-    shade: usize,
     start: u32,
     count: u32,
 }
@@ -1155,7 +1158,9 @@ impl GpuRenderer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 for d in &frame.characters {
                     pass.set_bind_group(1, &self.characters.materials[&d.mesh][d.material], &[]);
-                    pass.set_bind_group(2, &self.characters.shades[d.shade].1 .1, &[]);
+                    if let Some((_, model)) = &self.characters.model {
+                        pass.set_bind_group(2, model, &[]);
+                    }
                     pass.draw(d.start..d.start + d.count, 0..1);
                 }
             }
@@ -1253,19 +1258,12 @@ impl GpuRenderer {
                     .collect();
                 self.characters.materials.insert(key, groups);
             }
-            let bits = ch.shade.to_bits();
-            let shade = match self.characters.shades.iter().position(|(b, _)| *b == bits) {
-                Some(i) => i,
-                None => {
-                    let model = self.binder.model(
-                        &self.device,
-                        &self.queue,
-                        ModelUniform::shaded(ch.shade),
-                    );
-                    self.characters.shades.push((bits, model));
-                    self.characters.shades.len() - 1
-                }
-            };
+            if self.characters.model.is_none() {
+                let model =
+                    self.binder
+                        .model(&self.device, &self.queue, ModelUniform::vertex_lit());
+                self.characters.model = Some(model);
+            }
             let materials = self.characters.materials[&key].len();
             let mut by_material: BTreeMap<usize, Vec<GpuVertex>> = BTreeMap::new();
             for face in &ch.mesh.faces {
@@ -1281,6 +1279,7 @@ impl GpuRenderer {
                         luv: [0.5, 0.5],
                         cull_ref: pos,
                         normal: [0.0; 3],
+                        light: ch.light.get(i).copied().unwrap_or([1.0; 3]),
                     });
                 }
             }
@@ -1288,7 +1287,6 @@ impl GpuRenderer {
                 draws.push(CharacterDraw {
                     mesh: key,
                     material,
-                    shade,
                     start: verts.len() as u32,
                     count: tri.len() as u32,
                 });
@@ -1556,6 +1554,7 @@ fn add_polys(
                 luv: v.luv,
                 cull_ref,
                 normal: poly.normal,
+                light: [1.0; 3],
             }
         };
         let out = &mut batches[at].verts;
@@ -1736,12 +1735,19 @@ mod tests {
         for hit_flash in [false, true] {
             let (sw_fb, sw_zb) =
                 crate::render3d::test_software_character(&rig, [0.0; 3], hit_flash, view);
+            let verts =
+                crate::render3d::character_world_verts(&rig, [0.0; 3], 0.0, 0.0, false, false);
+            let light = crate::render3d::character_vertex_light(
+                &rig.mesh,
+                &verts,
+                [0.0; 3],
+                hit_flash,
+                &[],
+            );
             let character = GpuCharacter {
                 mesh: &rig.mesh,
-                verts: crate::render3d::character_world_verts(
-                    &rig, [0.0; 3], 0.0, 0.0, false, false,
-                ),
-                shade: crate::render3d::character_shade(hit_flash),
+                verts,
+                light,
             };
             let mut fb = vec![0u32; w * h];
             let mut zb = vec![f32::INFINITY; w * h];

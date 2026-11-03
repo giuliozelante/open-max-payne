@@ -8,10 +8,10 @@
 //! - Visible 3D enemies (`doe_johnny_l0.kfs`) spawned via level `C_Teleport` FSM scripts + AI pursuit
 //! - Shooting (`F` / `Ctrl` / Right-Ctrl), Bullet-Time slow-motion (`B` / Right-Click), and `E` door/barrel interaction
 
-use crate::kf2::{load_character_rigs, load_skin_body, pose_mesh, CharacterRig};
+use crate::kf2::{load_character_rigs, load_skin_body, pose_mesh, CharacterRig, KfsFace};
 use crate::scene::{
     decode_texture_blob, material_policy, CameraFlyover, DecodedLightmap, DecodedTexture, LdbScene,
-    MaterialPolicy, ScenePoly, SceneVertex,
+    MaterialPolicy, ScenePointLight, ScenePoly, SceneVertex,
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use std::collections::BTreeMap;
@@ -53,6 +53,8 @@ struct ProjVert {
     v_over_z: f32,
     lu_over_z: f32,
     lv_over_z: f32,
+    /// Vertex diffuse (0..1 per channel), perspective-correct like the UVs.
+    light_over_z: [f32; 3],
 }
 
 #[derive(Clone, Copy)]
@@ -64,6 +66,7 @@ struct CamVert {
     v: f32,
     lu: f32,
     lv: f32,
+    light: [f32; 3],
 }
 
 #[derive(Clone)]
@@ -126,6 +129,18 @@ pub fn run_3d_walkthrough(
     for r in &scene.rooms {
         room_origins.insert(r.id, r.world_origin);
     }
+    // `.ldb` point light positions are room-local (every light sits within a few metres of every room).
+    let world_lights: Vec<ScenePointLight> = scene
+        .point_lights
+        .iter()
+        .map(|l| {
+            let ro = room_origins.get(&l.room_id).copied().unwrap_or([0.0; 3]);
+            ScenePointLight {
+                pos: [0, 1, 2].map(|k| ro[k] + l.pos[k]),
+                ..l.clone()
+            }
+        })
+        .collect();
 
     let mut bodies: Vec<CharacterRig> = Vec::new();
     if let Some(johnny) = johnny_rig {
@@ -208,20 +223,6 @@ pub fn run_3d_walkthrough(
 
     let mut jp_idx = scene.spawn_jumppoint_index(player_start);
 
-    let spawn_pos =
-        |scene: &LdbScene, room_origins: &BTreeMap<i32, [f32; 3]>, idx: usize| -> [f32; 3] {
-            if let Some(jp) = scene.jumppoints.get(idx) {
-                let ro = room_origins.get(&jp.room_id).copied().unwrap_or([0.0; 3]);
-                let wx = ro[0] + jp.pos[0];
-                let wz = ro[2] + jp.pos[2];
-                let wy = find_floor_y(scene, wx, ro[1] + jp.pos[1] + EYE_HEIGHT, wz)
-                    .unwrap_or(ro[1] + jp.pos[1]);
-                [wx, wy + EYE_HEIGHT, wz]
-            } else {
-                [0.0, EYE_HEIGHT, 0.0]
-            }
-        };
-
     let mut player_pos = spawn_pos(&scene, &room_origins, jp_idx);
     let mut yaw: f32 = std::f32::consts::PI; // face -Z toward van & door in StartRoom
     let mut pitch: f32 = -0.08;
@@ -256,6 +257,7 @@ pub fn run_3d_walkthrough(
     scene.apply_startup_hitpoints();
     scene.apply_startup_hides();
     scene.apply_startup_enables();
+    scene.apply_startup_sends();
     // Built after the material surfaces, so batches follow the draw policies.
     let mut gpu = winit_window
         .as_ref()
@@ -341,7 +343,7 @@ pub fn run_3d_walkthrough(
         }
 
         // Interact (`E`): trigger nearest dynamic mesh / door within 6m
-        if window.is_key_pressed(Key::E, KeyRepeat::No) {
+        if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             toggle_nearest_dynamic_mesh(&mut scene, &room_origins, player_pos, 36.0);
             if scene.activate_nearest_trigger(&room_origins, player_pos, 36.0) {
                 play_queued_sounds(&mut scene, &catalog_root(level_path), &mut break_voice);
@@ -407,6 +409,9 @@ pub fn run_3d_walkthrough(
             mv[0] -= right[0];
             mv[2] -= right[2];
         }
+        if !scene.player_controls {
+            mv = [0.0; 3];
+        }
         let mv_len = (mv[0] * mv[0] + mv[2] * mv[2]).sqrt();
         let player_moving = mv_len > 0.01;
         if player_moving {
@@ -441,7 +446,10 @@ pub fn run_3d_walkthrough(
                 player_pos[2] = nz;
             }
 
-            if window.is_key_pressed(Key::Space, KeyRepeat::No) && vel_y.abs() < 0.05 {
+            if scene.player_controls
+                && window.is_key_pressed(Key::Space, KeyRepeat::No)
+                && vel_y.abs() < 0.05
+            {
                 vel_y = 5.2;
             }
             vel_y -= 15.0 * player_dt;
@@ -462,7 +470,7 @@ pub fn run_3d_walkthrough(
         let fire_pressed = window.is_key_pressed(Key::F, KeyRepeat::No)
             || window.is_key_pressed(Key::LeftCtrl, KeyRepeat::No)
             || window.is_key_pressed(Key::RightCtrl, KeyRepeat::No);
-        if fire_pressed && shot_timer <= 0.0 {
+        if fire_pressed && scene.player_controls && shot_timer <= 0.0 {
             shot_timer = 0.18;
             let aim_dir = [sy * cp, sp, cy * cp];
             // Raycast against living enemies
@@ -559,14 +567,15 @@ pub fn run_3d_walkthrough(
             shot_clock += base_dt;
         }
         scene.step_dynamic_anims(base_dt);
+        scene.step_screen_fade(base_dt);
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
 
         // Compute camera position (3rd-person over-the-shoulder vs 1st-person)
-        let cam_right = [cy, 0.0, -sy];
-        let cam_up = [-sy * sp, cp, -cy * sp];
-        let cam_fwd = [sy * cp, sp, cy * cp];
-        let cam_pos = if third_person && !fly_mode {
+        let mut cam_right = [cy, 0.0, -sy];
+        let mut cam_up = [-sy * sp, cp, -cy * sp];
+        let mut cam_fwd = [sy * cp, sp, cy * cp];
+        let mut cam_pos = if third_person && !fly_mode {
             let mut dist = CHASE_BACK;
             while dist > 0.45 {
                 let cand = chase_eye(player_pos, cam_fwd, dist);
@@ -579,6 +588,9 @@ pub fn run_3d_walkthrough(
         } else {
             player_pos
         };
+        if let Some((pos, right, up, fwd)) = attached_view(&scene, &room_origins) {
+            (cam_pos, cam_right, cam_up, cam_fwd) = (pos, right, up, fwd);
+        }
 
         let fov_scale = (H as f32) * 0.85;
         // World sphere (house = sunset) or the flat ceiling when the level names none.
@@ -604,17 +616,25 @@ pub fn run_3d_walkthrough(
                 if let Some(erig) = bodies.get(en.rig_index) {
                     let moving = en.walk_phase > 0.0;
                     let time = if moving { en.walk_phase } else { anim_clock };
+                    let verts = character_world_verts(
+                        erig,
+                        en.world_pos,
+                        en.yaw,
+                        time,
+                        moving,
+                        en.health <= 0,
+                    );
+                    let light = character_vertex_light(
+                        &erig.mesh,
+                        &verts,
+                        en.world_pos,
+                        en.hit_flash > 0.0,
+                        &world_lights,
+                    );
                     characters.push(crate::gpu::GpuCharacter {
                         mesh: &erig.mesh,
-                        verts: character_world_verts(
-                            erig,
-                            en.world_pos,
-                            en.yaw,
-                            time,
-                            moving,
-                            en.health <= 0,
-                        ),
-                        shade: character_shade(en.hit_flash > 0.0),
+                        verts,
+                        light,
                     });
                 }
             }
@@ -624,17 +644,20 @@ pub fn run_3d_walkthrough(
                 } else {
                     anim_clock
                 };
+                let verts = character_world_verts(
+                    prig,
+                    player_feet,
+                    player_mesh_yaw(yaw),
+                    time,
+                    player_moving,
+                    false,
+                );
+                let light =
+                    character_vertex_light(&prig.mesh, &verts, player_feet, false, &world_lights);
                 characters.push(crate::gpu::GpuCharacter {
                     mesh: &prig.mesh,
-                    verts: character_world_verts(
-                        prig,
-                        player_feet,
-                        player_mesh_yaw(yaw),
-                        time,
-                        player_moving,
-                        false,
-                    ),
-                    shade: character_shade(false),
+                    verts,
+                    light,
                 });
             }
             scene_view = Some((cam_pos, cam_right, cam_up, cam_fwd));
@@ -696,6 +719,7 @@ pub fn run_3d_walkthrough(
                     en.walk_phase > 0.0,
                     en.health <= 0,
                     en.hit_flash > 0.0,
+                    &world_lights,
                     cam_pos,
                     cam_right,
                     cam_up,
@@ -723,6 +747,7 @@ pub fn run_3d_walkthrough(
                     player_moving,
                     false,
                     false,
+                    &world_lights,
                     cam_pos,
                     cam_right,
                     cam_up,
@@ -778,9 +803,13 @@ pub fn run_3d_walkthrough(
                 wireframe.then_some(background.as_slice()),
                 &fb,
             ),
-            (_, _, Some(soft)) => soft
-                .update_with_buffer(&fb, W, H)
-                .map_err(|e| e.to_string())?,
+            (_, _, Some(soft)) => {
+                if let Some(fade) = scene.screen_fade {
+                    blend_screen(&mut fb, fade.color());
+                }
+                soft.update_with_buffer(&fb, W, H)
+                    .map_err(|e| e.to_string())?
+            }
             _ => break,
         }
     }
@@ -820,7 +849,7 @@ fn toggle_nearest_dynamic_mesh(
                 "  3D Engine: DO_Animate {} ({}) -> {:?}",
                 dm.name,
                 anim.name,
-                anim.scripts.first().map(|s| s.as_str()).unwrap_or("ok")
+                anim.end_scripts.first().map(|s| s.as_str()).unwrap_or("ok")
             );
         }
     }
@@ -935,7 +964,11 @@ fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32
         }
     }
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
-        if dm.hidden || dm.name.contains("_Tip_") || dm.name.ends_with("Start_FSM.DO") {
+        if dm.hidden
+            || !dm.collisions
+            || dm.name.contains("_Tip_")
+            || dm.name.ends_with("Start_FSM.DO")
+        {
             continue;
         }
         let (xform, origin) = dynamic_world(scene, idx, rooms);
@@ -1167,6 +1200,131 @@ pub(crate) fn dynamic_world(
     (mat, [ro[0] + pos[0], ro[1] + pos[1], ro[2] + pos[2]])
 }
 
+/// Eye position on the floor under jumppoint `idx`.
+fn spawn_pos(scene: &LdbScene, room_origins: &BTreeMap<i32, [f32; 3]>, idx: usize) -> [f32; 3] {
+    if let Some(jp) = scene.jumppoints.get(idx) {
+        let ro = room_origins.get(&jp.room_id).copied().unwrap_or([0.0; 3]);
+        let wx = ro[0] + jp.pos[0];
+        let wz = ro[2] + jp.pos[2];
+        let wy = find_floor_y(scene, wx, ro[1] + jp.pos[1] + EYE_HEIGHT, wz)
+            .unwrap_or(ro[1] + jp.pos[1]);
+        [wx, wy + EYE_HEIGHT, wz]
+    } else {
+        [0.0, EYE_HEIGHT, 0.0]
+    }
+}
+
+/// One headless frame (`W` x `H`, `0x00RRGGBB`): level geometry and dynamic meshes, seen from the
+/// dynamic mesh named `camera` (as `CAM_AttachToDO` would) or from the walkthrough's spawn view.
+pub fn render_frame(
+    scene: &LdbScene,
+    camera: Option<&str>,
+) -> Result<(usize, usize, Vec<u32>), String> {
+    let rooms: BTreeMap<i32, [f32; 3]> =
+        scene.rooms.iter().map(|r| (r.id, r.world_origin)).collect();
+    let (pos, right, up, fwd) = match camera {
+        Some(name) => {
+            let idx = scene
+                .dynamic_meshes
+                .iter()
+                .position(|m| m.name.eq_ignore_ascii_case(name))
+                .ok_or_else(|| format!("no dynamic mesh named {name}"))?;
+            camera_view(scene, idx, &rooms)
+        }
+        None => {
+            let pos = spawn_pos(scene, &rooms, scene.spawn_jumppoint_index(None));
+            let (sy, cy) = std::f32::consts::PI.sin_cos();
+            let (sp, cp) = (-0.08f32).sin_cos();
+            (
+                pos,
+                [cy, 0.0, -sy],
+                [-sy * sp, cp, -cy * sp],
+                [sy * cp, sp, cy * cp],
+            )
+        }
+    };
+    let mut fb = vec![0x0016_1c28u32; W * H];
+    let mut zb = vec![f32::INFINITY; W * H];
+    let fov_scale = (H as f32) * 0.85;
+    const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let mut tris = Vec::new();
+    for sm in &scene.static_meshes {
+        queue_poly_batch(
+            &sm.polys,
+            IDENT_MAT,
+            sm.world_origin,
+            scene,
+            pos,
+            right,
+            up,
+            fwd,
+            fov_scale,
+            true,
+            false,
+            true,
+            &mut fb,
+            &mut tris,
+        );
+    }
+    flush_tris(&tris, &mut fb, &mut zb, raster_threads());
+    draw_dynamic_meshes(
+        scene, &rooms, pos, right, up, fwd, fov_scale, true, false, &mut fb, &mut zb,
+    );
+    Ok((W, H, fb))
+}
+
+/// Binary PPM (`P6`) of a `0x00RRGGBB` frame.
+pub fn write_ppm(path: &Path, w: usize, h: usize, fb: &[u32]) -> std::io::Result<()> {
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    for px in fb {
+        out.extend_from_slice(&[(px >> 16) as u8, (px >> 8) as u8, *px as u8]);
+    }
+    std::fs::write(path, out)
+}
+
+/// Eye position, right, up, forward.
+type View = ([f32; 3], [f32; 3], [f32; 3], [f32; 3]);
+
+/// Eye, right, up and forward of the `CAM_AttachToDO` mesh: forward is its +z axis (as the
+/// startup flyover), up its y axis, right = up × forward like the player camera.
+fn attached_view(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>) -> Option<View> {
+    let idx = scene.attached_camera?;
+    scene.dynamic_meshes.get(idx)?;
+    Some(camera_view(scene, idx, rooms))
+}
+
+fn camera_view(scene: &LdbScene, idx: usize, rooms: &BTreeMap<i32, [f32; 3]>) -> View {
+    let (mat, pos) = dynamic_world(scene, idx, rooms);
+    let fwd = normalize(xform_dir(mat, [0.0, 0.0, 1.0]));
+    let up = normalize(xform_dir(mat, [0.0, 1.0, 0.0]));
+    let right = [
+        up[1] * fwd[2] - up[2] * fwd[1],
+        up[2] * fwd[0] - up[0] * fwd[2],
+        up[0] * fwd[1] - up[1] * fwd[0],
+    ];
+    (pos, right, up, fwd)
+}
+
+/// Mix `rgba` over every `0x00RRGGBB` pixel by its alpha.
+fn blend_screen(fb: &mut [u32], rgba: [u8; 4]) {
+    let a = u32::from(rgba[3]);
+    if a == 0 {
+        return;
+    }
+    let mix = |c: u32, k: u8| (c * (255 - a) + u32::from(k) * a + 127) / 255;
+    for px in fb {
+        let r = mix((*px >> 16) & 0xff, rgba[0]);
+        let g = mix((*px >> 8) & 0xff, rgba[1]);
+        let b = mix(*px & 0xff, rgba[2]);
+        *px = (r << 16) | (g << 8) | b;
+    }
+}
+
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1.0e-6);
+    [v[0] / len, v[1] / len, v[2] / len]
+}
+
 fn xform_dir(mat: [f32; 9], v: [f32; 3]) -> [f32; 3] {
     [
         mat[0] * v[0] + mat[3] * v[1] + mat[6] * v[2],
@@ -1191,6 +1349,110 @@ fn lightmap_modulate(texture: u32, lightmap: u32) -> u32 {
     let channel =
         |shift: u32| (((texture >> shift) & 0xff) * ((lightmap >> shift) & 0xff) / 255) << shift;
     channel(16) | channel(8) | channel(0)
+}
+
+/// Retail static point light: `setFalloffCurve(0.01, 0, 20)` and `getAttenuation()` = `(c0, c1/R, c2/R²)`
+/// (e2mfc `0x10011310`), so D3D gives `1 / (0.01 + 20·(d/R)²)`. Zero past the range, as D3D does.
+fn point_light_attenuation(d: f32, radius: f32) -> f32 {
+    let r = radius.max(0.1); // e2mfc clamps the range to ≥ 0.1 (`0x100112c0`)
+    if d > r {
+        return 0.0;
+    }
+    1.0 / (0.01 + 20.0 * (d / r) * (d / r))
+}
+
+fn light_rgb(l: &ScenePointLight) -> [f32; 3] {
+    [0, 1, 2].map(|c| l.color[c] * l.intensity)
+}
+
+/// D3D fixed-function diffuse for an object material (colour source 0, diffuse 255, black scene
+/// ambient, zero emissive): `Σ colour/255 · max(N·L, 0) · attenuation`, clamped to 1.
+fn vertex_diffuse(pos: [f32; 3], normal: [f32; 3], lights: &[&ScenePointLight]) -> [f32; 3] {
+    let mut out = [0.0f32; 3];
+    for l in lights {
+        let to = [l.pos[0] - pos[0], l.pos[1] - pos[1], l.pos[2] - pos[2]];
+        let d = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+        let atten = point_light_attenuation(d, l.radius);
+        if atten == 0.0 || d < 1e-6 {
+            continue;
+        }
+        let n_dot_l = (normal[0] * to[0] + normal[1] * to[1] + normal[2] * to[2]) / d;
+        if n_dot_l <= 0.0 {
+            continue;
+        }
+        let rgb = light_rgb(l);
+        for c in 0..3 {
+            out[c] += rgb[c] / 255.0 * n_dot_l * atten;
+        }
+    }
+    out.map(|c| c.min(1.0))
+}
+
+/// Driver `0x10023ec0`: key = |colour| / 255 × attenuation at the object origin. Sorted descending
+/// (partition `0x100253c0`) and capped at `setMaximumLightsPerObject(8)` (exe `0x40deb5`).
+/// The collision test (light range reaches the object's bounding sphere) is STRONGLY SUPPORTED, not read.
+fn select_object_lights(
+    lights: &[ScenePointLight],
+    origin: [f32; 3],
+    radius: f32,
+) -> Vec<&ScenePointLight> {
+    let mut keyed: Vec<(f32, &ScenePointLight)> = lights
+        .iter()
+        .filter_map(|l| {
+            let d = ((l.pos[0] - origin[0]).powi(2)
+                + (l.pos[1] - origin[1]).powi(2)
+                + (l.pos[2] - origin[2]).powi(2))
+            .sqrt();
+            if d > l.radius + radius {
+                return None;
+            }
+            let r = l.radius.max(0.1);
+            let rgb = light_rgb(l);
+            let mag = (rgb[0] * rgb[0] + rgb[1] * rgb[1] + rgb[2] * rgb[2]).sqrt();
+            Some((mag / (0.01 + 20.0 * (d / r) * (d / r)) / 255.0, l))
+        })
+        .collect();
+    keyed.sort_by(|a, b| b.0.total_cmp(&a.0));
+    keyed.into_iter().take(8).map(|(_, l)| l).collect()
+}
+
+/// Area-weighted smooth vertex normals. KFS stores no normals (retail builds them at load, method
+/// UNKNOWN) and its winding is not documented, so the mesh-wide sign is chosen to face outward.
+fn smooth_normals(pts: &[[f32; 3]], faces: &[KfsFace]) -> Vec<[f32; 3]> {
+    let mut n = vec![[0.0f32; 3]; pts.len()];
+    for f in faces {
+        let [a, b, c] = f.indices.map(|i| pts[i]);
+        let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let fnorm = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        for &i in &f.indices {
+            for k in 0..3 {
+                n[i][k] += fnorm[k];
+            }
+        }
+    }
+    let count = pts.len().max(1) as f32;
+    let centroid = [0, 1, 2].map(|k| pts.iter().map(|p| p[k]).sum::<f32>() / count);
+    let outward: f32 = pts
+        .iter()
+        .zip(&n)
+        .map(|(p, v)| (0..3).map(|k| (p[k] - centroid[k]) * v[k]).sum::<f32>())
+        .sum();
+    let sign = if outward < 0.0 { -1.0 } else { 1.0 };
+    n.into_iter()
+        .map(|v| {
+            let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            if len < 1e-12 {
+                [0.0; 3]
+            } else {
+                v.map(|c| c * sign / len)
+            }
+        })
+        .collect()
 }
 
 /// Pull a decal toward the camera by its `DetailOffset` distance.
@@ -1247,13 +1509,34 @@ pub(crate) fn character_world_verts(
         .collect()
 }
 
-/// Flat character shade; brighter while a hit flash lasts.
-pub(crate) fn character_shade(hit_flash: bool) -> f32 {
+/// Per-vertex diffuse of a posed character: the retail point-light selection and D3D diffuse
+/// (#37), or a flat 1.35 while a hit flash lasts.
+pub(crate) fn character_vertex_light(
+    mesh: &crate::kf2::KfsMesh,
+    world: &[[f32; 3]],
+    world_pos: [f32; 3],
+    hit_flash: bool,
+    lights: &[ScenePointLight],
+) -> Vec<[f32; 3]> {
     if hit_flash {
-        1.35
-    } else {
-        0.92
+        return vec![[1.35; 3]; world.len()];
     }
+    let normals = smooth_normals(world, &mesh.faces);
+    let radius = world
+        .iter()
+        .map(|p| {
+            ((p[0] - world_pos[0]).powi(2)
+                + (p[1] - world_pos[1]).powi(2)
+                + (p[2] - world_pos[2]).powi(2))
+            .sqrt()
+        })
+        .fold(0.0f32, f32::max);
+    let picked = select_object_lights(lights, world_pos, radius);
+    world
+        .iter()
+        .zip(&normals)
+        .map(|(p, n)| vertex_diffuse(*p, *n, &picked))
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1265,6 +1548,7 @@ fn render_kfs_character(
     moving: bool,
     dead: bool,
     hit_flash: bool,
+    lights: &[ScenePointLight],
     cam_pos: [f32; 3],
     cam_right: [f32; 3],
     cam_up: [f32; 3],
@@ -1291,7 +1575,7 @@ fn render_kfs_character(
         cam_pts.push([cx, cy_c, cz]);
     }
 
-    let shade = character_shade(hit_flash);
+    let vertex_light = character_vertex_light(mesh, &world, world_pos, hit_flash, lights);
     let mut tris = Vec::new();
     for face in &mesh.faces {
         let [i0, i1, i2] = face.indices;
@@ -1313,6 +1597,7 @@ fn render_kfs_character(
                 v: face.uvs[0][1],
                 lu: 0.5,
                 lv: 0.5,
+                light: vertex_light[i0],
             },
             CamVert {
                 cx: c1[0],
@@ -1322,6 +1607,7 @@ fn render_kfs_character(
                 v: face.uvs[1][1],
                 lu: 0.5,
                 lv: 0.5,
+                light: vertex_light[i1],
             },
             CamVert {
                 cx: c2[0],
@@ -1331,6 +1617,7 @@ fn render_kfs_character(
                 v: face.uvs[2][1],
                 lu: 0.5,
                 lv: 0.5,
+                light: vertex_light[i2],
             },
         ];
         let clipped = clip_near_plane(&cam_verts);
@@ -1348,6 +1635,7 @@ fn render_kfs_character(
                 v_over_z: cv.v * inv_z,
                 lu_over_z: 0.0,
                 lv_over_z: 0.0,
+                light_over_z: cv.light.map(|c| c * inv_z),
             });
         }
         let tex = mesh
@@ -1365,7 +1653,6 @@ fn render_kfs_character(
                     tex,
                     alpha_reference: None,
                     lmap: None,
-                    shade,
                     write_z: true,
                     depth_bias: 0.0,
                 });
@@ -1508,6 +1795,7 @@ fn draw_poly<'a>(
         None
     };
 
+    let shade = poly_shade(wn);
     let mut cam_verts = Vec::with_capacity(poly.vertices.len());
     let mut all_behind = true;
     let mut all_far = true;
@@ -1536,6 +1824,7 @@ fn draw_poly<'a>(
             v: v.uv[1],
             lu: v.luv[0],
             lv: v.luv[1],
+            light: [shade; 3],
         });
     }
     if all_behind || all_far {
@@ -1560,10 +1849,9 @@ fn draw_poly<'a>(
             v_over_z: cv.v * inv_z,
             lu_over_z: cv.lu * inv_z,
             lv_over_z: cv.lv * inv_z,
+            light_over_z: cv.light.map(|c| c * inv_z),
         });
     }
-
-    let shade = poly_shade(wn);
 
     for k in 1..proj.len() - 1 {
         let p0 = proj[0];
@@ -1579,7 +1867,6 @@ fn draw_poly<'a>(
                 tex,
                 alpha_reference,
                 lmap,
-                shade,
                 write_z: policy.writes_z,
                 depth_bias: policy.detail_offset as f32 * DETAIL_OFFSET_M,
             });
@@ -1612,13 +1899,13 @@ fn clip_near_plane(verts: &[CamVert]) -> Vec<CamVert> {
                 v: a.v + (b.v - a.v) * t,
                 lu: a.lu + (b.lu - a.lu) * t,
                 lv: a.lv + (b.lv - a.lv) * t,
+                light: [0, 1, 2].map(|c| a.light[c] + (b.light[c] - a.light[c]) * t),
             });
         }
     }
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 /// One projected triangle waiting for [`flush_tris`].
 #[derive(Clone, Copy)]
 struct QueuedTri<'a> {
@@ -1626,7 +1913,6 @@ struct QueuedTri<'a> {
     tex: Option<&'a DecodedTexture>,
     alpha_reference: Option<u8>,
     lmap: Option<&'a DecodedLightmap>,
-    shade: f32,
     write_z: bool,
     depth_bias: f32,
 }
@@ -1667,14 +1953,8 @@ fn raster_threads() -> usize {
 /// Rasterise rows `y0..y1` of `t` into band buffers whose row 0 is frame row `y0`.
 fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usize) {
     let [p0, p1, p2] = t.p;
-    let (tex, alpha_reference, lmap, shade, write_z, depth_bias) = (
-        t.tex,
-        t.alpha_reference,
-        t.lmap,
-        t.shade,
-        t.write_z,
-        t.depth_bias,
-    );
+    let (tex, alpha_reference, lmap, write_z, depth_bias) =
+        (t.tex, t.alpha_reference, t.lmap, t.write_z, t.depth_bias);
     let area = (p1.sx - p0.sx) * (p2.sy - p0.sy) - (p2.sx - p0.sx) * (p1.sy - p0.sy);
     if area.abs() < 1e-3 {
         return;
@@ -1749,9 +2029,13 @@ fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usi
                     b = (lit & 0xff) as f32;
                 }
             } else {
-                r *= shade;
-                g *= shade;
-                b *= shade;
+                let light = [0, 1, 2].map(|c| {
+                    (w0 * p0.light_over_z[c] + w1 * p1.light_over_z[c] + w2 * p2.light_over_z[c])
+                        * z
+                });
+                r *= light[0];
+                g *= light[1];
+                b *= light[2];
             }
 
             let ri = (r.min(255.0) as u32) << 16;
@@ -1941,6 +2225,7 @@ pub(crate) fn test_software_character(
         false,
         false,
         hit_flash,
+        &[],
         cam,
         right,
         up,
@@ -1998,6 +2283,94 @@ pub(crate) fn test_software_static(
 mod tests {
     use super::*;
     use crate::scene::{SceneDynamicMesh, SceneMaterial, ScenePoly, SceneVertex};
+
+    fn light(pos: [f32; 3], rgb: f32, radius: f32, intensity: f32) -> ScenePointLight {
+        ScenePointLight {
+            id: 0,
+            room_id: 0,
+            pos,
+            color: [rgb, rgb, rgb, 255.0],
+            radius,
+            intensity,
+        }
+    }
+
+    #[test]
+    fn point_light_attenuation_uses_retail_falloff_curve() {
+        // 1 / (0.01 + 20·(d/R)²), zero past the range.
+        assert_eq!(point_light_attenuation(0.0, 10.0), 100.0);
+        assert!((point_light_attenuation(5.0, 10.0) - 1.0 / 5.01).abs() < 1e-6);
+        assert_eq!(point_light_attenuation(12.0, 10.0), 0.0);
+    }
+
+    #[test]
+    fn vertex_diffuse_is_lambert_times_attenuation_clamped() {
+        let l = [light([0.0, 5.0, 0.0], 255.0, 10.0, 1.0)];
+        let lit = vertex_diffuse(
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            &l.iter().collect::<Vec<_>>(),
+        );
+        assert!((lit[0] - 1.0 / 5.01).abs() < 1e-5);
+        let back = vertex_diffuse(
+            [0.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            &l.iter().collect::<Vec<_>>(),
+        );
+        assert_eq!(back, [0.0, 0.0, 0.0]);
+        let near = [light([0.0, 0.1, 0.0], 255.0, 10.0, 1.0)];
+        let sat = vertex_diffuse(
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            &near.iter().collect::<Vec<_>>(),
+        );
+        assert_eq!(sat, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn smooth_normals_point_outward_for_either_winding() {
+        // Tetrahedron with its apex up; the apex normal must point +Y whatever the face winding.
+        let pts = [
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, -1.0],
+            [1.0, 0.0, -1.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let face = |indices| KfsFace {
+            indices,
+            uvs: [[0.0; 2]; 3],
+            mat_index: 0,
+        };
+        let ccw = [
+            face([0, 1, 2]),
+            face([0, 2, 3]),
+            face([0, 3, 1]),
+            face([1, 3, 2]),
+        ];
+        let cw = [
+            face([0, 2, 1]),
+            face([0, 3, 2]),
+            face([0, 1, 3]),
+            face([1, 2, 3]),
+        ];
+        for faces in [&ccw[..], &cw[..]] {
+            let n = smooth_normals(&pts, faces);
+            assert!(n[0][1] > 0.99, "apex normal {:?}", n[0]);
+        }
+    }
+
+    #[test]
+    fn object_lights_sort_brightest_first_and_cap_at_eight() {
+        let mut lights: Vec<ScenePointLight> = (0..10)
+            .map(|i| light([i as f32 * 0.5, 0.0, 0.0], 255.0, 20.0, 1.0))
+            .collect();
+        lights.push(light([0.2, 0.0, 0.0], 1.0, 20.0, 1.0)); // close but dim
+        lights.push(light([30.0, 0.0, 0.0], 255.0, 5.0, 1.0)); // out of reach
+        let picked = select_object_lights(&lights, [0.0, 0.0, 0.0], 1.0);
+        assert_eq!(picked.len(), 8);
+        let xs: Vec<f32> = picked.iter().map(|l| l.pos[0]).collect();
+        assert_eq!(xs, vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]);
+    }
 
     #[test]
     fn lightmap_modulates_the_texture_like_d3dtop_modulate() {
@@ -2059,6 +2432,9 @@ mod tests {
             bytes_consumed: 0,
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
+            attached_camera: None,
+            player_controls: true,
+            screen_fade: None,
         }
     }
 
@@ -2113,17 +2489,90 @@ mod tests {
             local_start_pos: [0.0; 3],
             toggled: false,
             hidden: false,
+            collisions: true,
             hitpoints: None,
             polys: vec![quad],
             anims: Vec::new(),
             active_track: None,
             track_time: 0.0,
             track_duration: 0.0,
+            anim_state: Default::default(),
         });
         let rooms = BTreeMap::new();
         assert!(hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
         scene.dynamic_meshes[0].polys[0].material_id = 2;
         assert!(!hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+    }
+
+    #[test]
+    fn do_with_collisions_disabled_does_not_block() {
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(glass_quad(false));
+        let rooms = BTreeMap::new();
+        assert!(hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+        scene.dynamic_meshes[0].collisions = false;
+        assert!(!hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+    }
+
+    #[test]
+    fn attached_camera_looks_along_the_do_z_axis() {
+        // The four house cutscene cameras (`::entrance05::camera1`, `::startroom::camera2`,
+        // `::entrance06::camera2`, `::Bathroom::camera2`) frame their rooms along +z; along -z
+        // they face a wall (offline frames, docs/rea/2026-11-02-camera-attach-to-do.md).
+        let mut scene = empty_scene();
+        let mut cam = glass_quad(false);
+        // Yaw 90 degrees: local z points along world +x.
+        cam.world_mat = [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0];
+        cam.local_start_mat = cam.world_mat;
+        cam.world_pos = [2.0, 1.5, -3.0];
+        cam.local_start_pos = cam.world_pos;
+        scene.dynamic_meshes.push(cam);
+        let rooms = BTreeMap::new();
+        assert!(attached_view(&scene, &rooms).is_none());
+        scene.attached_camera = Some(0);
+        let (pos, right, up, fwd) = attached_view(&scene, &rooms).expect("attached");
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
+        assert!(close(pos, [2.0, 1.5, -3.0]), "{pos:?}");
+        assert!(close(fwd, [1.0, 0.0, 0.0]), "{fwd:?}");
+        assert!(close(up, [0.0, 1.0, 0.0]), "{up:?}");
+        assert!(close(right, [0.0, 0.0, -1.0]), "{right:?}");
+    }
+
+    #[test]
+    fn screen_fade_blends_by_alpha() {
+        let mut fb = vec![0x00ff_8000u32, 0x0000_00ffu32];
+        blend_screen(&mut fb, [0, 0, 0, 128]);
+        assert_eq!(fb, vec![0x007f_4000, 0x0000_007f]);
+        blend_screen(&mut fb, [255, 255, 255, 255]);
+        assert_eq!(fb, vec![0x00ff_ffff, 0x00ff_ffff]);
+    }
+
+    #[test]
+    fn render_frame_from_a_camera_do_paints_what_it_faces() {
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(glass_quad(false));
+        let mut cam = glass_quad(false);
+        cam.name = "::Bathroom::camera2.DO".into();
+        cam.polys.clear();
+        // Local +z (the view axis) along world +x, toward the glass at x = 0.
+        cam.world_mat = [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0];
+        cam.local_start_mat = cam.world_mat;
+        cam.world_pos = [-4.0, 1.0, 0.0];
+        cam.local_start_pos = cam.world_pos;
+        scene.dynamic_meshes.push(cam);
+        let (w, h, fb) = render_frame(&scene, Some("::bathroom::camera2.DO")).expect("frame");
+        assert_eq!((w, h), (W, H));
+        assert!(fb.iter().any(|px| *px != fb[0]), "the glass must show");
+        assert!(render_frame(&scene, Some("::nowhere.DO")).is_err());
+    }
+
+    #[test]
+    fn ppm_is_binary_rgb_with_a_header() {
+        let path = std::env::temp_dir().join(format!("omp-frame-{}.ppm", std::process::id()));
+        write_ppm(&path, 2, 1, &[0x00ff_8000, 0x0000_00ff]).expect("write");
+        let bytes = std::fs::read(&path).expect("read");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(bytes, b"P6\n2 1\n255\n\xff\x80\x00\x00\x00\xff".to_vec());
     }
 
     #[test]
@@ -2158,6 +2607,7 @@ mod tests {
                 v_over_z: vv / z,
                 lu_over_z: 0.0,
                 lv_over_z: 0.0,
+                light_over_z: [0.7 / z; 3],
             };
             for (a, b, c) in [
                 (
@@ -2176,7 +2626,6 @@ mod tests {
                     tex: (k % 2 == 0).then_some(&tex),
                     alpha_reference: (k % 4 == 0).then_some(128),
                     lmap: None,
-                    shade: 0.5 + (k % 5) as f32 * 0.1,
                     write_z: k % 3 != 0,
                     depth_bias: 0.0,
                 });
@@ -2268,7 +2717,9 @@ mod tests {
             start_pos: [0.0; 3],
             end_mat: drawer.local_start_mat,
             end_pos: [0.3, 0.0, 0.0],
-            scripts: Vec::new(),
+            start_scripts: Vec::new(),
+            reverse_end_scripts: Vec::new(),
+            end_scripts: Vec::new(),
             curves: [Vec::new(), Vec::new()],
         });
         scene.dynamic_meshes.push(drawer);
@@ -2292,6 +2743,7 @@ mod tests {
             local_start_pos: [0.0; 3],
             toggled: false,
             hidden,
+            collisions: true,
             hitpoints: None,
             polys: vec![ScenePoly {
                 vertices: vec![
@@ -2308,6 +2760,7 @@ mod tests {
             active_track: None,
             track_time: 0.0,
             track_duration: 0.0,
+            anim_state: Default::default(),
         }
     }
 

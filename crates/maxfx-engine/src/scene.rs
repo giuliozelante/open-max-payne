@@ -200,10 +200,30 @@ pub struct SceneDynamicAnim {
     pub start_pos: [f32; 3],
     pub end_mat: [f32; 9],
     pub end_pos: [f32; 3],
-    pub scripts: Vec<String>,
+    /// `.ldb` list 1 → DMA `+0x8c` → runtime anim `+0x9`: sent when `DO_Animate` starts (`0x6f40aa`).
+    pub start_scripts: Vec<String>,
+    /// `.ldb` list 2 → DMA `+0x9c` → runtime anim `+0x19`: sent when a reversed track reaches 0.
+    pub reverse_end_scripts: Vec<String>,
+    /// `.ldb` list 3 → DMA `+0xac` → runtime anim `+0x29`: sent when the track reaches its end.
+    pub end_scripts: Vec<String>,
     /// Two sample channels. Each sample is a tagged `f32` (`0x09`). One channel
     /// runs along the start→end distance; the other is a 0..1 clock.
     pub curves: [Vec<f32>; 2],
+}
+
+/// Retail DO playback fields beside the playhead (`X_LevelRuntimeDynamicObject`).
+#[derive(Debug, Clone, Default)]
+pub struct DoAnimState {
+    /// `+0x483 != 0`: a track is advancing.
+    pub playing: bool,
+    /// `+0x4a7`, toggled by `DO_InvertAnimation`.
+    pub reverse: bool,
+    /// `+0x4a3`, set by `DO_PauseAnimation(t)`: > 0 counts down, < 0 holds forever.
+    pub hold: f32,
+    /// `+0x487` / `+0x49f`: track and playhead saved by `DO_StopAnimation`.
+    pub saved: Option<(String, f32)>,
+    /// Start-list messages waiting for the next step (retail sends them lagged).
+    pub queued: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +237,8 @@ pub struct SceneDynamicMesh {
     pub toggled: bool,
     /// Set by `DO_Hide`. Parsed meshes start visible.
     pub hidden: bool,
+    /// Set by `DO_EnableCollisions` (DO `+0x4ae`). When false the player walks through the mesh.
+    pub collisions: bool,
     /// Set by `DO_SetHitpoints`. `None` means the mesh is not damaged by shots.
     pub hitpoints: Option<i32>,
     pub polys: Vec<ScenePoly>,
@@ -225,6 +247,7 @@ pub struct SceneDynamicMesh {
     pub active_track: Option<String>,
     pub track_time: f32,
     pub track_duration: f32,
+    pub anim_state: DoAnimState,
 }
 
 impl SceneDynamicMesh {
@@ -249,26 +272,101 @@ impl SceneDynamicMesh {
         else {
             return false;
         };
+        // Apply 0x6f3d20 zeroes playhead and hold; reverse (+0x4a7) is left as it was.
         self.track_duration = track.duration;
         self.track_time = 0.0;
         self.active_track = Some(track.name.clone());
+        let start = track.start_scripts.clone();
+        let state = &mut self.anim_state;
+        state.playing = true;
+        state.hold = 0.0;
+        state.queued.extend(start);
         true
     }
 
-    /// Advance the active track. Returns its scripts once, on the frame it ends.
+    /// One `0x6f34c0` tick. Returns the end list (`+0x29`, or `+0x19` when reversed)
+    /// on the frame the track runs out.
     pub fn step_animation(&mut self, dt: f32) -> Option<Vec<String>> {
-        let name = self.active_track.as_ref()?.clone();
-        if self.track_duration <= 0.0 || self.track_time >= self.track_duration {
+        let state = &mut self.anim_state;
+        if !state.playing {
             return None;
         }
-        self.track_time = (self.track_time + dt).min(self.track_duration);
-        if self.track_time < self.track_duration {
+        let dir = if state.reverse { -1.0 } else { 1.0 };
+        if state.hold == 0.0 {
+            self.track_time += dir * dt;
+        } else if state.hold > 0.0 {
+            state.hold -= dt;
+            if state.hold < 0.0 {
+                self.track_time -= dir * state.hold;
+                state.hold = 0.0;
+            }
+        }
+        let reached_end = self.track_duration <= self.track_time;
+        if !reached_end && self.track_time >= 0.0 {
             return None;
         }
-        self.anims
+        self.track_time = if reached_end {
+            self.track_duration
+        } else {
+            0.0
+        };
+        state.playing = false;
+        state.hold = 0.0;
+        state.reverse = false;
+        let name = self.active_track.as_ref()?;
+        let anim = self
+            .anims
             .iter()
-            .find(|anim| anim.name.eq_ignore_ascii_case(&name))
-            .map(|anim| anim.scripts.clone())
+            .find(|anim| anim.name.eq_ignore_ascii_case(name))?;
+        Some(if reached_end {
+            anim.end_scripts.clone()
+        } else {
+            anim.reverse_end_scripts.clone()
+        })
+    }
+
+    /// `DO_InvertAnimation` (`0x6f40e0`): flip direction while a track plays.
+    fn invert_animation(&mut self) {
+        if self.anim_state.playing {
+            self.anim_state.reverse = !self.anim_state.reverse;
+        }
+    }
+
+    /// `DO_PauseAnimation(t)` (`0x6f4100`): set the hold time while a track plays.
+    fn pause_animation(&mut self, hold: f32) {
+        if self.anim_state.playing {
+            self.anim_state.hold = hold;
+        }
+    }
+
+    /// `DO_StopAnimation` (`0x6f4120`): save track and playhead, stop advancing.
+    /// The pose stays where it was.
+    fn stop_animation(&mut self) {
+        if self.anim_state.playing {
+            if let Some(name) = self.active_track.clone() {
+                self.anim_state.saved = Some((name, self.track_time));
+            }
+            self.anim_state.playing = false;
+        }
+    }
+
+    /// `DO_ResumeAnimation` (`0x6f4150`): restore what Stop saved, with no hold.
+    fn resume_animation(&mut self) {
+        let Some((name, time)) = self.anim_state.saved.take() else {
+            return;
+        };
+        if let Some(duration) = self
+            .anims
+            .iter()
+            .find(|anim| anim.name == name)
+            .map(|anim| anim.duration)
+        {
+            self.track_duration = duration;
+        }
+        self.active_track = Some(name);
+        self.track_time = time;
+        self.anim_state.playing = true;
+        self.anim_state.hold = 0.0;
     }
 
     /// World pose ignoring the parent's motion: the track-local pose `L`
@@ -430,9 +528,18 @@ pub struct SceneFsm {
     pub states: Vec<String>,
     pub default_state: String,
     pub startup_actions: Vec<String>,
-    /// `(hook name, calls with no state, per-state calls in file order)`.
-    pub hooks: Vec<(String, Vec<String>, Vec<(String, Vec<String>)>)>,
+    /// Every named script of the record (states, commands, events), in file order.
+    pub hooks: Vec<FsmScript>,
+    /// State scripts (`.ldb` map 2, runtime `+0x441`): `FSM_Switch` runs them.
+    pub state_scripts: Vec<FsmScript>,
+    /// Commands (`.ldb` map 3, runtime `+0x431`): `FSM_Send` runs them.
+    pub commands: Vec<FsmScript>,
+    /// Current state (runtime `+0x365`); starts at `default_state`.
+    pub state: String,
 }
+
+/// `(name, calls with no state, per-state calls in file order)`.
+pub type FsmScript = (String, Vec<String>, Vec<(String, Vec<String>)>);
 
 #[derive(Debug, Clone)]
 pub struct SceneCharacter {
@@ -518,6 +625,36 @@ pub struct LdbScene {
     pub sound_catalogs: BTreeMap<String, String>,
     /// Sounds a verb asked to play. Dispatch only enqueues them.
     pub sound_queue: Vec<QueuedSound>,
+    /// Dynamic mesh the view is attached to by `CAM_AttachToDO`, if any.
+    pub attached_camera: Option<usize>,
+    /// Cleared by `GM_SetPlayerControls(false)` during cutscenes.
+    pub player_controls: bool,
+    /// Full-screen colour from `MPHM_FadeToColor`, if any.
+    pub screen_fade: Option<ScreenFade>,
+}
+
+/// `MPHM_FadeToColor(from, to, seconds)`: colours are `0xRRGGBBAA`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenFade {
+    pub from: [u8; 4],
+    pub to: [u8; 4],
+    pub duration: f32,
+    pub elapsed: f32,
+}
+
+impl ScreenFade {
+    /// `[r, g, b, a]` now, held at `to` once the fade is over.
+    pub fn color(&self) -> [u8; 4] {
+        let t = if self.duration > 0.0 {
+            (self.elapsed / self.duration).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        std::array::from_fn(|i| {
+            let (a, b) = (f32::from(self.from[i]), f32::from(self.to[i]));
+            (a + (b - a) * t).round() as u8
+        })
+    }
 }
 
 /// One `A_Play3DSound` accepted by a mesh or trigger that this scene actually stores.
@@ -616,20 +753,24 @@ impl LdbScene {
         context_name: &str,
         receiver: &str,
     ) -> Option<&'a mut SceneDynamicMesh> {
-        if let Some(index) = self
-            .dynamic_meshes
-            .iter()
-            .position(|mesh| mesh.name.eq_ignore_ascii_case(receiver))
-        {
-            return Some(&mut self.dynamic_meshes[index]);
+        let index = self.resolve_mesh_index(context_name, receiver)?;
+        Some(&mut self.dynamic_meshes[index])
+    }
+
+    fn resolve_mesh_index(&self, context_name: &str, receiver: &str) -> Option<usize> {
+        let find = |name: &str| {
+            self.dynamic_meshes
+                .iter()
+                .position(|mesh| mesh.name.eq_ignore_ascii_case(name))
+        };
+        if let Some(index) = find(receiver) {
+            return Some(index);
         }
         let target = mesh_target_name(context_name, receiver)?;
         if target.eq_ignore_ascii_case(receiver) {
             return None;
         }
-        self.dynamic_meshes
-            .iter_mut()
-            .find(|mesh| mesh.name.eq_ignore_ascii_case(&target))
+        find(&target)
     }
 
     /// Run one stored message. Unknown verbs do nothing.
@@ -645,6 +786,28 @@ impl LdbScene {
                 self.resolve_mesh_mut(context_name, msg.receiver)
                     .is_some_and(|mesh| mesh.play_track(track_name))
             }
+            "do_invertanimation" | "do_stopanimation" | "do_resumeanimation" => {
+                let verb = msg.verb.to_ascii_lowercase();
+                self.resolve_mesh_mut(context_name, msg.receiver)
+                    .is_some_and(|mesh| {
+                        match verb.as_str() {
+                            "do_invertanimation" => mesh.invert_animation(),
+                            "do_stopanimation" => mesh.stop_animation(),
+                            _ => mesh.resume_animation(),
+                        }
+                        true
+                    })
+            }
+            "do_pauseanimation" => {
+                let Some(hold) = msg.args.first().and_then(|arg| arg.parse::<f32>().ok()) else {
+                    return false;
+                };
+                self.resolve_mesh_mut(context_name, msg.receiver)
+                    .is_some_and(|mesh| {
+                        mesh.pause_animation(hold);
+                        true
+                    })
+            }
             "t_enable" => {
                 let enabled = match msg.args.first().copied().unwrap_or("") {
                     "false" | "0" => false,
@@ -657,7 +820,62 @@ impl LdbScene {
                         true
                     })
             }
+            "fsm_switch" => {
+                let Some(state) = msg.args.first().copied() else {
+                    return false;
+                };
+                self.fsm_switch(msg.receiver, state)
+            }
+            "fsm_send" => {
+                let Some(command) = msg.args.first().copied() else {
+                    return false;
+                };
+                self.fsm_send(msg.receiver, command)
+            }
+            "fsm_randomize" => self.fsm_randomize(msg.receiver),
             "a_play3dsound" => self.queue_3d_sound(context_name, msg.receiver, &msg.args),
+            "mphm_fadetocolor" => {
+                let colour = |i: usize| {
+                    let arg = msg.args.get(i)?.trim();
+                    let hex = arg.strip_prefix("0x").or_else(|| arg.strip_prefix("0X"))?;
+                    u32::from_str_radix(hex, 16).ok().map(u32::to_be_bytes)
+                };
+                let (Some(from), Some(to), Some(duration)) = (
+                    colour(0),
+                    colour(1),
+                    msg.args.get(2).and_then(|a| a.trim().parse::<f32>().ok()),
+                ) else {
+                    return false;
+                };
+                self.screen_fade = Some(ScreenFade {
+                    from,
+                    to,
+                    duration,
+                    elapsed: 0.0,
+                });
+                true
+            }
+            "gm_setplayercontrols" => {
+                self.player_controls = match msg.args.first().copied().unwrap_or("").trim() {
+                    "true" | "1" => true,
+                    "false" | "0" => false,
+                    _ => return false,
+                };
+                true
+            }
+            "cam_attachtodo" => {
+                // Arg 0 (camera `+0x14f`, 0x672d12) is the camera's weight in percent: 100
+                // attaches, 0 hands the view back to the player.
+                let Some(weight) = msg.args.first().and_then(|a| a.trim().parse::<f32>().ok())
+                else {
+                    return false;
+                };
+                let Some(index) = self.resolve_mesh_index(context_name, msg.receiver) else {
+                    return false;
+                };
+                self.attached_camera = (weight > 0.0).then_some(index);
+                true
+            }
             "do_hide" => {
                 let hidden = match msg.args.first().copied().unwrap_or("") {
                     "true" | "1" => true,
@@ -667,6 +885,18 @@ impl LdbScene {
                 self.resolve_mesh_mut(context_name, msg.receiver)
                     .is_some_and(|mesh| {
                         mesh.hidden = hidden;
+                        true
+                    })
+            }
+            "do_enablecollisions" => {
+                let collisions = match msg.args.first().copied().unwrap_or("") {
+                    "true" | "1" => true,
+                    "false" | "0" => false,
+                    _ => return false,
+                };
+                self.resolve_mesh_mut(context_name, msg.receiver)
+                    .is_some_and(|mesh| {
+                        mesh.collisions = collisions;
                         true
                     })
             }
@@ -737,6 +967,17 @@ impl LdbScene {
         true
     }
 
+    /// Advance the screen fade; a finished fade to a transparent colour goes away.
+    pub fn step_screen_fade(&mut self, dt: f32) {
+        let Some(fade) = self.screen_fade.as_mut() else {
+            return;
+        };
+        fade.elapsed += dt;
+        if fade.elapsed >= fade.duration && fade.to[3] == 0 {
+            self.screen_fade = None;
+        }
+    }
+
     /// Run startup `DO_SetHitpoints` calls. Other startup verbs stay untouched.
     pub fn apply_startup_hitpoints(&mut self) {
         let scripts: Vec<(String, String)> = self
@@ -788,6 +1029,23 @@ impl LdbScene {
         }
     }
 
+    /// Startup `FSM_Send` only (door locks, ceiling fans). Other startup verbs stay untouched.
+    pub fn apply_startup_sends(&mut self) {
+        let scripts: Vec<(String, String)> = self
+            .fsms
+            .iter()
+            .flat_map(|fsm| {
+                fsm.startup_actions.iter().filter_map(|act| {
+                    let verb = Message::parse(act)?.verb.to_ascii_lowercase();
+                    (verb == "fsm_send").then(|| (fsm.name.clone(), act.clone()))
+                })
+            })
+            .collect();
+        for (name, act) in scripts {
+            self.dispatch_message(&name, &act);
+        }
+    }
+
     /// Subtract `amount` from a mesh that has hit points. At zero, run its `DO_OnDeath` hook.
     pub fn damage_mesh(&mut self, index: usize, amount: i32) -> bool {
         let Some(mesh) = self.dynamic_meshes.get_mut(index) else {
@@ -809,23 +1067,82 @@ impl LdbScene {
     }
 
     fn dispatch_hook(&mut self, fsm_name: &str, hook_name: &str) -> bool {
-        let scripts = self
-            .fsms
-            .iter()
-            .find(|fsm| fsm.name.eq_ignore_ascii_case(fsm_name))
-            .and_then(|fsm| {
-                fsm.hooks
-                    .iter()
-                    .find(|(name, _, _)| name.eq_ignore_ascii_case(hook_name))
-                    .map(|(_, acts, _)| acts.clone())
-            });
-        let Some(scripts) = scripts else {
+        let Some(index) = self.fsm_index(fsm_name) else {
             return false;
         };
-        let mut ran = false;
-        for act in &scripts {
-            ran |= self.dispatch_message(fsm_name, act);
+        let fsm = &self.fsms[index];
+        let Some(script) = find_script(&fsm.hooks, hook_name) else {
+            return false;
+        };
+        let state = fsm.state.clone();
+        self.run_fsm_script(index, script, &state)
+    }
+
+    /// `FSM_Switch` (0x6e30a0): store the new state, then run its script with the old state.
+    fn fsm_switch(&mut self, fsm_name: &str, state: &str) -> bool {
+        let Some(index) = self.fsm_index(fsm_name) else {
+            return false;
+        };
+        let old = std::mem::replace(&mut self.fsms[index].state, state.to_string());
+        if let Some(script) = find_script(&self.fsms[index].state_scripts, state) {
+            self.run_fsm_script(index, script, &old);
         }
+        true
+    }
+
+    /// `FSM_Randomize` (0x6e3310): switch to state `rand() % count` of the state list.
+    fn fsm_randomize(&mut self, fsm_name: &str) -> bool {
+        let Some(index) = self.fsm_index(fsm_name) else {
+            return false;
+        };
+        let states = &self.fsms[index].states;
+        if states.is_empty() {
+            return false;
+        }
+        let state = states[crt_rand() as usize % states.len()].clone();
+        self.fsm_switch(fsm_name, &state)
+    }
+
+    /// `FSM_Send` (0x6e2f10): run the command's script with the current state.
+    fn fsm_send(&mut self, fsm_name: &str, command: &str) -> bool {
+        let Some(index) = self.fsm_index(fsm_name) else {
+            return false;
+        };
+        let fsm = &self.fsms[index];
+        let Some(script) = find_script(&fsm.commands, command) else {
+            return false;
+        };
+        let state = fsm.state.clone();
+        self.run_fsm_script(index, script, &state)
+    }
+
+    fn fsm_index(&self, fsm_name: &str) -> Option<usize> {
+        self.fsms
+            .iter()
+            .position(|fsm| fsm.name.eq_ignore_ascii_case(fsm_name))
+    }
+
+    /// The calls with no state, then the calls of the `section` state. Nested FSM scripts stop
+    /// at depth 32, the limit retail warns at (`0x89b294`).
+    fn run_fsm_script(&mut self, index: usize, script: FsmScript, section: &str) -> bool {
+        thread_local! {
+            static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        if DEPTH.get() >= 32 {
+            return false;
+        }
+        DEPTH.set(DEPTH.get() + 1);
+        let name = self.fsms[index].name.clone();
+        let (_, plain, per_state) = script;
+        let calls = per_state
+            .into_iter()
+            .filter(|(state, _)| state.eq_ignore_ascii_case(section))
+            .flat_map(|(_, calls)| calls);
+        let mut ran = false;
+        for act in plain.into_iter().chain(calls) {
+            ran |= self.dispatch_message(&name, &act);
+        }
+        DEPTH.set(DEPTH.get() - 1);
         ran
     }
 
@@ -861,6 +1178,22 @@ impl LdbScene {
     }
 
     pub fn step_dynamic_anims(&mut self, dt: f32) {
+        let queued: Vec<(String, Vec<String>)> = self
+            .dynamic_meshes
+            .iter_mut()
+            .filter(|mesh| !mesh.anim_state.queued.is_empty())
+            .map(|mesh| {
+                (
+                    mesh.name.clone(),
+                    std::mem::take(&mut mesh.anim_state.queued),
+                )
+            })
+            .collect();
+        for (name, scripts) in queued {
+            for script in &scripts {
+                self.dispatch_message(&name, script);
+            }
+        }
         let mut pending = Vec::new();
         for mesh in &mut self.dynamic_meshes {
             if let Some(scripts) = mesh.step_animation(dt) {
@@ -916,6 +1249,23 @@ fn strip_trigger_suffix(name: &str) -> &str {
     } else {
         name
     }
+}
+
+/// MSVCRT `rand()`: `seed = seed * 214013 + 2531011`, result bits 16..30. Unseeded start is 1.
+fn crt_rand() -> u32 {
+    thread_local! {
+        static SEED: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+    }
+    let seed = SEED.get().wrapping_mul(214_013).wrapping_add(2_531_011);
+    SEED.set(seed);
+    (seed >> 16) & 0x7fff
+}
+
+fn find_script(scripts: &[FsmScript], name: &str) -> Option<FsmScript> {
+    scripts
+        .iter()
+        .find(|(script, _, _)| script.eq_ignore_ascii_case(name))
+        .cloned()
 }
 
 fn strip_mesh_suffix(name: &str) -> &str {
@@ -1667,11 +2017,15 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         i += n2 * 13; // vertex normals
         let _editor_pos = read_xform_pos(data, &mut i)?;
         let polys = read_mesh_polys_resolved(data, &mut i, &verts, &static_points)?;
-        // Optional non-empty mesh attribs (`0x1f` + count + (id, vec3)*count)
+        // Mesh attribs (`0x1f` + count + (id, vec3)*count), may be empty
         if data.get(i) == Some(&0x1f) {
             let mut p = i + 1;
             if let Some(acnt) = read_i32(data, &mut p) {
-                if acnt > 0 && data.get(p) != Some(&0x25) {
+                // An empty list belongs to this mesh too. After the last mesh the light
+                // count follows it (Part1_Level6 @0x65a854, Startup_level @0x135ec82).
+                if acnt == 0 {
+                    i = p;
+                } else if acnt > 0 && data.get(p) != Some(&0x25) {
                     i = p;
                     for _ in 0..acnt {
                         read_i32(data, &mut i)?;
@@ -1754,19 +2108,26 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
             let states = read_str_list(data, &mut i, 0x1c)?;
             let default_state = read_str(data, &mut i)?;
             let startup_actions = read_str_list(data, &mut i, 0x1c)?;
+            // `X_LevelDBFSM` (0x5fad40): the startup script (list, per-state map, list), then
+            // maps of named scripts: states +0xe4, commands +0xf4, events +0x104.
             let mut hooks = skip_hook_map(data, &mut i)?;
             let _extra = read_str_list(data, &mut i, 0x1c)?;
-            hooks.append(&mut skip_hook_map(data, &mut i)?);
-            hooks.append(&mut skip_hook_map(data, &mut i)?);
+            let state_scripts = skip_hook_map(data, &mut i)?;
+            let commands = skip_hook_map(data, &mut i)?;
+            hooks.extend(state_scripts.iter().cloned());
+            hooks.extend(commands.iter().cloned());
             hooks.append(&mut skip_hook_map(data, &mut i)?);
             fsms.push(SceneFsm {
                 name,
                 room_id,
                 pos,
                 states,
+                state: default_state.clone(),
                 default_state,
                 startup_actions,
                 hooks,
+                state_scripts,
+                commands,
             });
         }
     }
@@ -1859,9 +2220,10 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     let duration = read_f32_tag(data, &mut i)?;
                     let (start_mat, start_pos) = read_xform(data, &mut i)?;
                     let (end_mat, end_pos) = read_xform(data, &mut i)?;
-                    let mut scripts = read_str_list(data, &mut i, 0x1c)?;
-                    scripts.append(&mut read_str_list(data, &mut i, 0x1c)?);
-                    scripts.append(&mut read_str_list(data, &mut i, 0x1c)?);
+                    // DMA reader 0x5ff420: three 0x1c lists → +0x8c, +0x9c, +0xac.
+                    let start_scripts = read_str_list(data, &mut i, 0x1c)?;
+                    let reverse_end_scripts = read_str_list(data, &mut i, 0x1c)?;
+                    let end_scripts = read_str_list(data, &mut i, 0x1c)?;
                     let mut curves = [Vec::new(), Vec::new()];
                     for curve in &mut curves {
                         let _cty = read_i32(data, &mut i)?;
@@ -1878,10 +2240,15 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                         curves,
                         end_mat,
                         end_pos,
-                        scripts,
+                        start_scripts,
+                        reverse_end_scripts,
+                        end_scripts,
                     });
                 }
-                i += 12; // 6 bools (`0e u8`)
+                // Six bools to `X_LevelDBDynamicMesh` +0xa0..+0xa5 (0x5ef340); +0xa0 seeds
+                // the DO's collisions flag +0x4ae (0x6f2c7c).
+                let collisions = *data.get(i + 1)? != 0;
+                i += 12; // `0e u8` each
                 let _f_start = read_i32(data, &mut i)?;
                 let _f_cnt = read_i32(data, &mut i)?;
                 let _s_start = read_i32(data, &mut i)?;
@@ -1897,12 +2264,14 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     local_start_pos,
                     toggled: false,
                     hidden: false,
+                    collisions,
                     hitpoints: None,
                     polys,
                     anims,
                     active_track: None,
                     track_time: 0.0,
                     track_duration: 0.0,
+                    anim_state: Default::default(),
                 });
             }
         }
@@ -2099,6 +2468,9 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         bytes_consumed: i,
         sound_catalogs: BTreeMap::new(),
         sound_queue: Vec::new(),
+        attached_camera: None,
+        player_controls: true,
+        screen_fade: None,
     })
 }
 
@@ -2252,10 +2624,14 @@ pub fn camera_flyover(scene: &LdbScene) -> Option<CameraFlyover> {
     let cam = scene.dynamic_meshes.iter().find(|m| {
         m.name.ends_with("altitude::camera.DO")
             && m.anims.iter().any(|a| {
-                a.scripts.iter().any(|s| {
-                    s.to_ascii_lowercase()
-                        .contains("s_modeswitch(graphicnovel)")
-                })
+                a.start_scripts
+                    .iter()
+                    .chain(&a.reverse_end_scripts)
+                    .chain(&a.end_scripts)
+                    .any(|s| {
+                        s.to_ascii_lowercase()
+                            .contains("s_modeswitch(graphicnovel)")
+                    })
             })
     })?;
     let mut chain = vec![cam];
@@ -2344,6 +2720,9 @@ mod tests {
             bytes_consumed: 0,
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
+            attached_camera: None,
+            player_controls: true,
+            screen_fade: None,
         }
     }
 
@@ -2516,12 +2895,14 @@ mod tests {
             local_start_pos: [0.0, 0.0, 0.0],
             toggled: false,
             hidden: false,
+            collisions: true,
             hitpoints: None,
             polys: Vec::new(),
             anims,
             active_track: None,
             track_time: 0.0,
             track_duration: 0.0,
+            anim_state: DoAnimState::default(),
         }
     }
 
@@ -2533,7 +2914,9 @@ mod tests {
             start_pos: [0.0, 0.0, 0.0],
             end_mat: [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
             end_pos: end,
-            scripts: Vec::new(),
+            start_scripts: Vec::new(),
+            reverse_end_scripts: Vec::new(),
+            end_scripts: Vec::new(),
             curves: [Vec::new(), Vec::new()],
         }
     }
@@ -2749,7 +3132,8 @@ mod tests {
             track("open2", [0.0; 3]),
         ]);
         door.name = "::startroom::door_dummy::Door.DO".into();
-        door.anims[0].scripts = vec!["::startroom::door_dummy::Door.DO->DO_Animate(open2);".into()];
+        door.anims[0].end_scripts =
+            vec!["::startroom::door_dummy::Door.DO->DO_Animate(open2);".into()];
         scene.dynamic_meshes.push(door);
         let started = scene.dispatch_message(
             "::startroom::door_dummy::Door::t1.TRIGGER",
@@ -2765,6 +3149,68 @@ mod tests {
             scene.dynamic_meshes[0].active_track.as_deref(),
             Some("open2")
         );
+    }
+
+    /// One door playing `open` (1.3 s) in a scene, for the `0x6f34c0` tick tests.
+    fn playing_door() -> LdbScene {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene
+            .dynamic_meshes
+            .push(door_mesh(vec![track("open", [0.4, 0.0, 0.0])]));
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_Animate(open);"));
+        scene
+    }
+
+    #[test]
+    fn do_pause_animation_holds_then_carries_the_overshoot() {
+        // 0x6f4100 sets hold +0x4a3; 0x6f34c0 counts it down and adds the overshoot.
+        let mut scene = playing_door();
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_PauseAnimation(1);"));
+        scene.step_dynamic_anims(0.6);
+        assert_eq!(scene.dynamic_meshes[0].track_time, 0.0);
+        scene.step_dynamic_anims(0.6);
+        assert!((scene.dynamic_meshes[0].track_time - 0.2).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn do_invert_animation_runs_back_and_sends_the_reverse_end_list() {
+        // 0x6f40e0 toggles reverse; below 0 the tick sends anim +0x19 (.ldb list 2).
+        let mut scene = playing_door();
+        scene.dynamic_meshes[0].anims[0].reverse_end_scripts = vec!["this->DO_Hide(true);".into()];
+        scene.dynamic_meshes[0].anims[0].end_scripts = vec!["this->DO_SetHitpoints(7);".into()];
+        scene.step_dynamic_anims(0.5);
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_InvertAnimation();"));
+        scene.step_dynamic_anims(0.7);
+        let door = &scene.dynamic_meshes[0];
+        assert_eq!(door.track_time, 0.0);
+        assert!(door.hidden);
+        assert_eq!(door.hitpoints, None);
+    }
+
+    #[test]
+    fn do_stop_freezes_and_resume_continues_from_the_saved_playhead() {
+        // 0x6f4120 saves curve + playhead and clears the curve; 0x6f4150 restores them.
+        let mut scene = playing_door();
+        scene.step_dynamic_anims(0.4);
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_StopAnimation();"));
+        scene.step_dynamic_anims(0.5);
+        assert!((scene.dynamic_meshes[0].track_time - 0.4).abs() < 1.0e-5);
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_ResumeAnimation();"));
+        scene.step_dynamic_anims(0.3);
+        assert!((scene.dynamic_meshes[0].track_time - 0.7).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn do_animate_sends_the_start_list_on_the_next_step() {
+        // Apply 0x6f3d20 sends anim +0x9 (.ldb list 1) through the lagged queue.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let mut open = track("open", [0.4, 0.0, 0.0]);
+        open.start_scripts = vec!["this->DO_Hide(true);".into()];
+        scene.dynamic_meshes.push(door_mesh(vec![open]));
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_Animate(open);"));
+        assert!(!scene.dynamic_meshes[0].hidden);
+        scene.step_dynamic_anims(0.1);
+        assert!(scene.dynamic_meshes[0].hidden);
     }
 
     #[test]
@@ -3012,6 +3458,166 @@ mod tests {
         let far = [at[0] + 100.0, at[1], at[2]];
         assert!(!scene.activate_nearest_trigger(&origins, far, 36.0));
         assert!(scene.sound_queue.is_empty());
+    }
+
+    const HIDE: &str = "::startroom::door.DO->DO_Hide(true);";
+    const SHOW: &str = "::startroom::door.DO->DO_Hide(false);";
+
+    /// `::startroom::door` FSM in state `closed`, next to its door mesh.
+    fn door_fsm_scene() -> LdbScene {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.dynamic_meshes.push(door_mesh(Vec::new()));
+        scene.fsms.push(SceneFsm {
+            name: "::startroom::door".into(),
+            room_id: 1,
+            pos: [0.0; 3],
+            states: vec!["closed".into(), "open".into()],
+            default_state: "closed".into(),
+            startup_actions: Vec::new(),
+            hooks: vec![(
+                "T_Activate".into(),
+                Vec::new(),
+                vec![("open".into(), vec![SHOW.into()])],
+            )],
+            state_scripts: vec![(
+                "open".into(),
+                Vec::new(),
+                vec![("closed".into(), vec![HIDE.into()])],
+            )],
+            commands: vec![(
+                "toggle".into(),
+                Vec::new(),
+                vec![
+                    ("closed".into(), vec![HIDE.into()]),
+                    ("open".into(), vec![SHOW.into()]),
+                ],
+            )],
+            state: "closed".into(),
+        });
+        scene
+    }
+
+    #[test]
+    fn fsm_switch_runs_the_new_state_script_with_the_previous_state_section() {
+        // 0x6e30a0 saves the old state (0x6e1670), stores the new one at +0x365, then runs the
+        // state's script (map +0x441, 0x6e3910) with the old state.
+        let mut scene = door_fsm_scene();
+        assert!(scene.dispatch_message("", "::startroom::door->FSM_Switch(open);"));
+        assert_eq!(scene.fsms[0].state, "open");
+        assert!(scene.dynamic_meshes[0].hidden);
+    }
+
+    #[test]
+    fn fsm_send_runs_the_command_section_for_the_current_state() {
+        // 0x6e2f10 looks the command up in map +0x431 (0x6e37c0) with the current state.
+        let mut scene = door_fsm_scene();
+        assert!(scene.dispatch_message("", "::startroom::door->FSM_Send(toggle);"));
+        assert!(scene.dynamic_meshes[0].hidden);
+        scene.fsms[0].state = "open".into();
+        assert!(scene.dispatch_message("", "::startroom::door->FSM_Send(toggle);"));
+        assert!(!scene.dynamic_meshes[0].hidden);
+    }
+
+    #[test]
+    fn event_hooks_run_the_current_state_section() {
+        let mut scene = door_fsm_scene();
+        scene.dynamic_meshes[0].hidden = true;
+        assert!(!scene.dispatch_hook("::startroom::door", "T_Activate"));
+        assert!(scene.dynamic_meshes[0].hidden);
+        scene.fsms[0].state = "open".into();
+        assert!(scene.dispatch_hook("::startroom::door", "T_Activate"));
+        assert!(!scene.dynamic_meshes[0].hidden);
+    }
+
+    #[test]
+    fn fsm_randomize_switches_to_a_state_picked_by_crt_rand() {
+        // 0x6e3310: `rand() % states` (MSVCRT `rand`, IAT 0x7ca368), then the Switch path.
+        // The first `rand()` of an unseeded CRT is 41, so state 1 of 2.
+        let mut scene = door_fsm_scene();
+        assert!(scene.dispatch_message("", "::startroom::door->FSM_Randomize();"));
+        assert_eq!(scene.fsms[0].state, "open");
+        assert!(scene.dynamic_meshes[0].hidden, "the open state script ran");
+    }
+
+    #[test]
+    fn startup_fsm_send_runs_the_command() {
+        let mut scene = door_fsm_scene();
+        scene.fsms[0]
+            .startup_actions
+            .push("::startroom::door->FSM_Send(toggle);".into());
+        scene.apply_startup_sends();
+        assert!(scene.dynamic_meshes[0].hidden);
+    }
+
+    #[test]
+    fn fsm_switch_to_itself_from_its_own_script_stops() {
+        // Retail warns at a depth above 32 (`0x89b294`, "recursively switching").
+        let mut scene = door_fsm_scene();
+        scene.fsms[0].state_scripts[0]
+            .1
+            .push("::startroom::door->FSM_Switch(open);".into());
+        assert!(scene.dispatch_message("", "::startroom::door->FSM_Switch(open);"));
+        assert_eq!(scene.fsms[0].state, "open");
+    }
+
+    #[test]
+    fn do_enable_collisions_sets_the_mesh_flag() {
+        // 0x6f43f0 stores the argument in +0x4ae, which characters and the player camera
+        // test before reacting to a DO contact.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.dynamic_meshes.push(door_mesh(Vec::new()));
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_EnableCollisions(false);"));
+        assert!(!scene.dynamic_meshes[0].collisions);
+        assert!(scene.dispatch_message("", "::startroom::door.DO->DO_EnableCollisions(true);"));
+        assert!(scene.dynamic_meshes[0].collisions);
+    }
+
+    #[test]
+    fn cam_attach_to_do_sets_and_clears_the_attached_camera() {
+        // `::finito::camera2` starts with `CAM_AttachToDO(100, false)` and its last track ends
+        // with `CAM_AttachToDO(0, false)` plus `GM_SetPlayerControls(true)`.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.dynamic_meshes.push(door_mesh(Vec::new()));
+        assert!(scene.dispatch_message("", "::startroom::door.DO->CAM_AttachToDO(100, false);"));
+        assert_eq!(scene.attached_camera, Some(0));
+        assert!(scene.dispatch_message("", "::startroom::door.DO->CAM_AttachToDO(0, false);"));
+        assert_eq!(scene.attached_camera, None);
+    }
+
+    #[test]
+    fn gm_set_player_controls_toggles_the_flag() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        assert!(scene.player_controls);
+        assert!(scene.dispatch_message("", "maxpayne_gamemode->GM_SetPlayerControls(false);"));
+        assert!(!scene.player_controls);
+        assert!(scene.dispatch_message("", "MaxPayne_GameMode->gm_setplayercontrols(true);"));
+        assert!(scene.player_controls);
+    }
+
+    #[test]
+    fn mphm_fade_to_color_ramps_rrggbbaa_and_holds_the_target() {
+        // `::finito::camera2` track 2 ends with `MPHM_FadeToColor(0x0, 0x000000ff, 0.4)`.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        assert!(scene.dispatch_message(
+            "",
+            "maxpayne_hudmode->MPHM_FadeToColor(0x0, 0x000000ff, 0.4);"
+        ));
+        assert_eq!(scene.screen_fade.map(|f| f.color()), Some([0, 0, 0, 0]));
+        scene.step_screen_fade(0.2);
+        assert_eq!(scene.screen_fade.map(|f| f.color()), Some([0, 0, 0, 128]));
+        scene.step_screen_fade(1.0);
+        assert_eq!(scene.screen_fade.map(|f| f.color()), Some([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn mphm_fade_to_transparent_clears_the_fade_when_done() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        assert!(scene.dispatch_message(
+            "",
+            "maxpayne_hudmode->mphm_fadetocolor(0x000000ff, 0x0, 0.5);"
+        ));
+        scene.step_screen_fade(0.6);
+        assert_eq!(scene.screen_fade, None);
     }
 
     #[test]
