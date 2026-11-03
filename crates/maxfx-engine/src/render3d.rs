@@ -424,7 +424,7 @@ pub fn run_3d_walkthrough(
         let mv_len = (mv[0] * mv[0] + mv[2] * mv[2]).sqrt();
         let player_moving = mv_len > 0.01;
         if player_moving {
-            walk_phase += player_dt * speed * 1.9;
+            walk_phase = move_clip_time(walk_phase, player_dt);
         } else {
             walk_phase = 0.0;
         }
@@ -567,7 +567,7 @@ pub fn run_3d_walkthrough(
                         {
                             en.world_pos[1] = fy;
                         }
-                        en.walk_phase += world_dt * 5.0;
+                        en.walk_phase = move_clip_time(en.walk_phase, world_dt);
                     }
                 } else {
                     en.walk_phase = 0.0;
@@ -1105,6 +1105,12 @@ pub(crate) fn poly_policy(scene: &LdbScene, material_id: i32) -> MaterialPolicy 
 
 fn blocks_character(scene: &LdbScene, material_id: i32) -> bool {
     poly_policy(scene, material_id).character_collides
+}
+
+/// Clock of a character's move clip after `dt` seconds of moving. Clips carry their own frame
+/// rate (`Kf2Anim` bones), so the clock is plain game time.
+fn move_clip_time(time: f32, dt: f32) -> f32 {
+    time + dt
 }
 
 const CHASE_BACK: f32 = 2.2;
@@ -3449,6 +3455,13 @@ mod tests {
         let eye = chase_camera(&scene, [0.0, 1.6, 0.0], [0.0, 0.0, 1.0]);
         assert!((eye[0] - (0.1 - CAMERA_CLEARANCE)).abs() < 1e-4, "{eye:?}");
         assert!((eye[2] + CHASE_BACK).abs() < 1e-4, "{eye:?}");
+    }
+
+    #[test]
+    fn the_move_clip_runs_on_real_time() {
+        // The run clip played ~11x fast: its clock advanced by dt * speed * 1.9. Clips carry
+        // their own frame rate (Run.kf2 50 fps), so one second of running is one clip second.
+        assert_eq!(move_clip_time(0.25, 1.0), 1.25);
     }
 
     #[test]
