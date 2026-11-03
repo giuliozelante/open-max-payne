@@ -50,6 +50,7 @@ cargo test -p openras <test_name_substring>
 cargo run -p openras -- list /path/to/mod.mpm   # RASMaker-compatible flags -x/-v/-a/-m/-p/-c
 cargo run -p openpfx -- dump-pse|dump-rps|export|validate-rps ...
 cargo run -p maxfx-engine -- --window ...       # 3D walkthrough over BYOD .ldb
+cargo run -p maxfx-engine -- --frame out.ppm [--camera NAME.DO] level.ldb  # headless frame for visual checks
 
 # Studio (Tauri 2 + Vite/TS, bun)
 cd studio && bun install && ./build.sh          # build.sh sources rust-env.sh (bash); never source it from fish

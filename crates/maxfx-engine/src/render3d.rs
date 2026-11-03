@@ -193,20 +193,6 @@ pub fn run_3d_walkthrough(
 
     let mut jp_idx = scene.spawn_jumppoint_index(player_start);
 
-    let spawn_pos =
-        |scene: &LdbScene, room_origins: &BTreeMap<i32, [f32; 3]>, idx: usize| -> [f32; 3] {
-            if let Some(jp) = scene.jumppoints.get(idx) {
-                let ro = room_origins.get(&jp.room_id).copied().unwrap_or([0.0; 3]);
-                let wx = ro[0] + jp.pos[0];
-                let wz = ro[2] + jp.pos[2];
-                let wy = find_floor_y(scene, wx, ro[1] + jp.pos[1] + EYE_HEIGHT, wz)
-                    .unwrap_or(ro[1] + jp.pos[1]);
-                [wx, wy + EYE_HEIGHT, wz]
-            } else {
-                [0.0, EYE_HEIGHT, 0.0]
-            }
-        };
-
     let mut player_pos = spawn_pos(&scene, &room_origins, jp_idx);
     let mut yaw: f32 = std::f32::consts::PI; // face -Z toward van & door in StartRoom
     let mut pitch: f32 = -0.08;
@@ -1065,6 +1051,86 @@ fn dynamic_world(
     (mat, [ro[0] + pos[0], ro[1] + pos[1], ro[2] + pos[2]])
 }
 
+/// Eye position on the floor under jumppoint `idx`.
+fn spawn_pos(scene: &LdbScene, room_origins: &BTreeMap<i32, [f32; 3]>, idx: usize) -> [f32; 3] {
+    if let Some(jp) = scene.jumppoints.get(idx) {
+        let ro = room_origins.get(&jp.room_id).copied().unwrap_or([0.0; 3]);
+        let wx = ro[0] + jp.pos[0];
+        let wz = ro[2] + jp.pos[2];
+        let wy = find_floor_y(scene, wx, ro[1] + jp.pos[1] + EYE_HEIGHT, wz)
+            .unwrap_or(ro[1] + jp.pos[1]);
+        [wx, wy + EYE_HEIGHT, wz]
+    } else {
+        [0.0, EYE_HEIGHT, 0.0]
+    }
+}
+
+/// One headless frame (`W` x `H`, `0x00RRGGBB`): level geometry and dynamic meshes, seen from the
+/// dynamic mesh named `camera` (as `CAM_AttachToDO` would) or from the walkthrough's spawn view.
+pub fn render_frame(
+    scene: &LdbScene,
+    camera: Option<&str>,
+) -> Result<(usize, usize, Vec<u32>), String> {
+    let rooms: BTreeMap<i32, [f32; 3]> =
+        scene.rooms.iter().map(|r| (r.id, r.world_origin)).collect();
+    let (pos, right, up, fwd) = match camera {
+        Some(name) => {
+            let idx = scene
+                .dynamic_meshes
+                .iter()
+                .position(|m| m.name.eq_ignore_ascii_case(name))
+                .ok_or_else(|| format!("no dynamic mesh named {name}"))?;
+            camera_view(scene, idx, &rooms)
+        }
+        None => {
+            let pos = spawn_pos(scene, &rooms, scene.spawn_jumppoint_index(None));
+            let (sy, cy) = std::f32::consts::PI.sin_cos();
+            let (sp, cp) = (-0.08f32).sin_cos();
+            (
+                pos,
+                [cy, 0.0, -sy],
+                [-sy * sp, cp, -cy * sp],
+                [sy * cp, sp, cy * cp],
+            )
+        }
+    };
+    let mut fb = vec![0x0016_1c28u32; W * H];
+    let mut zb = vec![f32::INFINITY; W * H];
+    let fov_scale = (H as f32) * 0.85;
+    const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    for sm in &scene.static_meshes {
+        render_poly_batch(
+            &sm.polys,
+            IDENT_MAT,
+            sm.world_origin,
+            scene,
+            pos,
+            right,
+            up,
+            fwd,
+            fov_scale,
+            true,
+            false,
+            true,
+            &mut fb,
+            &mut zb,
+        );
+    }
+    draw_dynamic_meshes(
+        scene, &rooms, pos, right, up, fwd, fov_scale, true, false, &mut fb, &mut zb,
+    );
+    Ok((W, H, fb))
+}
+
+/// Binary PPM (`P6`) of a `0x00RRGGBB` frame.
+pub fn write_ppm(path: &Path, w: usize, h: usize, fb: &[u32]) -> std::io::Result<()> {
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    for px in fb {
+        out.extend_from_slice(&[(px >> 16) as u8, (px >> 8) as u8, *px as u8]);
+    }
+    std::fs::write(path, out)
+}
+
 /// Eye position, right, up, forward.
 type View = ([f32; 3], [f32; 3], [f32; 3], [f32; 3]);
 
@@ -1073,6 +1139,10 @@ type View = ([f32; 3], [f32; 3], [f32; 3], [f32; 3]);
 fn attached_view(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>) -> Option<View> {
     let idx = scene.attached_camera?;
     scene.dynamic_meshes.get(idx)?;
+    Some(camera_view(scene, idx, rooms))
+}
+
+fn camera_view(scene: &LdbScene, idx: usize, rooms: &BTreeMap<i32, [f32; 3]>) -> View {
     let (mat, pos) = dynamic_world(scene, idx, rooms);
     let fwd = normalize(xform_dir(mat, [0.0, 0.0, 1.0]));
     let up = normalize(xform_dir(mat, [0.0, 1.0, 0.0]));
@@ -1081,7 +1151,7 @@ fn attached_view(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>) -> Option<Vi
         up[2] * fwd[0] - up[0] * fwd[2],
         up[0] * fwd[1] - up[1] * fwd[0],
     ];
-    Some((pos, right, up, fwd))
+    (pos, right, up, fwd)
 }
 
 /// Mix `rgba` over every `0x00RRGGBB` pixel by its alpha.
@@ -2088,6 +2158,34 @@ mod tests {
         assert_eq!(fb, vec![0x007f_4000, 0x0000_007f]);
         blend_screen(&mut fb, [255, 255, 255, 255]);
         assert_eq!(fb, vec![0x00ff_ffff, 0x00ff_ffff]);
+    }
+
+    #[test]
+    fn render_frame_from_a_camera_do_paints_what_it_faces() {
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(glass_quad(false));
+        let mut cam = glass_quad(false);
+        cam.name = "::Bathroom::camera2.DO".into();
+        cam.polys.clear();
+        // Local +z (the view axis) along world +x, toward the glass at x = 0.
+        cam.world_mat = [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0];
+        cam.local_start_mat = cam.world_mat;
+        cam.world_pos = [-4.0, 1.0, 0.0];
+        cam.local_start_pos = cam.world_pos;
+        scene.dynamic_meshes.push(cam);
+        let (w, h, fb) = render_frame(&scene, Some("::bathroom::camera2.DO")).expect("frame");
+        assert_eq!((w, h), (W, H));
+        assert!(fb.iter().any(|px| *px != fb[0]), "the glass must show");
+        assert!(render_frame(&scene, Some("::nowhere.DO")).is_err());
+    }
+
+    #[test]
+    fn ppm_is_binary_rgb_with_a_header() {
+        let path = std::env::temp_dir().join(format!("omp-frame-{}.ppm", std::process::id()));
+        write_ppm(&path, 2, 1, &[0x00ff_8000, 0x0000_00ff]).expect("write");
+        let bytes = std::fs::read(&path).expect("read");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(bytes, b"P6\n2 1\n255\n\xff\x80\x00\x00\x00\xff".to_vec());
     }
 
     #[test]
