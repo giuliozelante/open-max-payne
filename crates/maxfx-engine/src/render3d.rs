@@ -259,9 +259,9 @@ pub fn run_3d_walkthrough(
     scene.apply_startup_sends();
     scene.apply_startup_animates();
     if cinematic {
-        // No player in the intro: the scripts own the camera.
+        // The scripts own the camera; the player body stays where the level puts it (Max with the
+        // sniper rifle on the rooftop in the startup intro).
         scene.player_controls = false;
-        third_person = false;
     }
     // Built after the material surfaces, so batches follow the draw policies.
     let mut gpu = winit_window
@@ -786,7 +786,7 @@ pub fn run_3d_walkthrough(
         };
         let cx = W / 2;
         let cy_scr = H / 2;
-        for d in -4i32..=4 {
+        for d in (-4i32..=4).filter(|_| crosshair_visible(&scene)) {
             fb[cy_scr * W + (cx as i32 + d) as usize] = cross_col;
             fb[(cy_scr as i32 + d) as usize * W + cx] = cross_col;
         }
@@ -1279,6 +1279,11 @@ pub fn write_ppm(path: &Path, w: usize, h: usize, fb: &[u32]) -> std::io::Result
         out.extend_from_slice(&[(px >> 16) as u8, (px >> 8) as u8, *px as u8]);
     }
     std::fs::write(path, out)
+}
+
+/// The HUD crosshair is hidden while a cutscene camera owns the view.
+fn crosshair_visible(scene: &LdbScene) -> bool {
+    scene.attached_camera.is_none()
 }
 
 /// Eye position, right, up, forward.
@@ -2647,6 +2652,15 @@ mod tests {
                 .all(|(a, b)| a.to_bits() == b.to_bits()),
             "depth differs between serial and parallel"
         );
+    }
+
+    #[test]
+    fn crosshair_is_hidden_while_a_cutscene_camera_is_attached() {
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(glass_quad(false));
+        assert!(crosshair_visible(&scene));
+        scene.attached_camera = Some(0);
+        assert!(!crosshair_visible(&scene));
     }
 
     #[test]
