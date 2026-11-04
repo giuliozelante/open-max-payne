@@ -313,6 +313,8 @@ pub struct WeaponDef {
     pub reload_seconds: f32,
     /// `ReloadAmount`: rounds per `C_Reload`, or -1 to fill the clip.
     pub reload_amount: i32,
+    /// `[Crosshair]` names `dot.kf2` and not `invisible.kf2`.
+    pub shows_dot: bool,
 }
 
 impl WeaponDef {
@@ -327,6 +329,11 @@ impl WeaponDef {
             pocket_size: key("pocketsize")?.parse().ok()?,
             reload_seconds: 0.0,
             reload_amount: key("reloadamount")?.parse().ok()?,
+            shows_dot: sections
+                .iter()
+                .find(|s| s.path == "crosshair/geometry")
+                .and_then(|s| s.text("exportdata"))
+                .is_some_and(|file| file.to_ascii_lowercase().ends_with("dot.kf2")),
         })
     }
 }
@@ -809,6 +816,25 @@ impl HudTarget<'_> {
         }
     }
 
+    /// The aiming dot of the weapon in hand, if it has one.
+    pub fn draw_crosshair(&mut self, inventory: &PlayerInventory) {
+        let held = inventory
+            .current
+            .as_ref()
+            .and_then(|name| inventory.defs.get(name));
+        if !held.is_some_and(|def| def.shows_dot) {
+            return;
+        }
+        // Retail: 3 pixels of a 1920x1080 frame each way, a 640x360 unit.
+        let size = |extent: usize, units: f32| (extent as f32 / units).round().max(1.0) as usize;
+        let (width, height) = (size(self.width, 640.0), size(self.height, 360.0));
+        let (left, top) = (self.width / 2 - width / 2, self.height / 2 - height / 2);
+        for row in top..top + height {
+            let start = row * self.width + left;
+            self.pixels[start..start + width].fill(0x00ff_ffff);
+        }
+    }
+
     /// `text` anchored at `anchor`, tinted by `rgba`.
     pub fn draw_text(&mut self, font: &HudFont, anchor: HudText, text: &str, rgba: [u8; 4]) {
         let size = font.size(text);
@@ -902,6 +928,7 @@ mod tests {
             pocket_size,
             reload_seconds: 1.3,
             reload_amount: -1,
+            shows_dot: true,
         };
         let mut defs = BTreeMap::new();
         for (name, weapon) in [
@@ -943,7 +970,7 @@ mod tests {
     fn a_weapon_file_gives_its_id_and_sizes_through_shooting_h() {
         let def = WeaponDef::parse(
             "#define\tBERETTA_CLIPSIZE\t\t18\n#define BERETTA_POCKETSIZE 162\n",
-            "[Properties]\nInventoryID = INVENTORYID_BERETTA;\nWeaponID \t= WEAPONID_BERETTA;\nClipsize \t= BERETTA_CLIPSIZE;\nPocketsize\t= BERETTA_POCKETSIZE;\nReloadAmount = -1;\n",
+            "[Properties]\nInventoryID = INVENTORYID_BERETTA;\nWeaponID \t= WEAPONID_BERETTA;\nClipsize \t= BERETTA_CLIPSIZE;\nPocketsize\t= BERETTA_POCKETSIZE;\nReloadAmount = -1;\n[Crosshair]\n{\n\t[Geometry]\n\tExportData = ..\\crosshairs\\dot.kf2;\n}\n",
         );
         assert_eq!(
             def,
@@ -954,6 +981,7 @@ mod tests {
                 pocket_size: 162,
                 reload_seconds: 0.0,
                 reload_amount: -1,
+                shows_dot: true,
             })
         );
     }
@@ -1500,6 +1528,47 @@ mod tests {
         };
         target.draw_text(&font, anchor, "A", [255; 4]);
         assert!(pixels.iter().all(|px| *px == 0));
+    }
+
+    fn dot_pixels(player: &PlayerInventory, width: usize, height: usize) -> Vec<(usize, usize)> {
+        let mut pixels = vec![0u32; width * height];
+        let mut target = HudTarget {
+            pixels: &mut pixels,
+            width,
+            height,
+        };
+        target.draw_crosshair(player);
+        let white = |(_, px): &(usize, &u32)| **px == 0x00ff_ffff;
+        pixels
+            .iter()
+            .enumerate()
+            .filter(white)
+            .map(|(i, _)| (i % width, i / width))
+            .collect()
+    }
+
+    #[test]
+    fn the_dot_is_three_pixels_square_at_the_centre_of_a_1080p_frame() {
+        // Measured in retail frames `original/0104` and `0106`.
+        let mut player = inventory();
+        player.pickup_weapon("beretta");
+        let dot = dot_pixels(&player, 1920, 1080);
+        assert_eq!(dot.len(), 9);
+        assert_eq!(dot[0], (959, 539));
+        assert_eq!(dot[8], (961, 541));
+    }
+
+    #[test]
+    fn no_weapon_shows_no_dot() {
+        assert!(dot_pixels(&inventory(), 960, 600).is_empty());
+    }
+
+    #[test]
+    fn a_weapon_with_the_invisible_crosshair_shows_no_dot() {
+        let mut player = inventory();
+        player.pickup_weapon("beretta");
+        player.defs.get_mut("beretta").expect("def").shows_dot = false;
+        assert!(dot_pixels(&player, 960, 600).is_empty());
     }
 
     #[test]

@@ -892,19 +892,7 @@ pub fn run_3d_walkthrough(
                 inventory: &scene.inventory,
             };
             target.draw_hud(assets, &state);
-        }
-
-        // Draw crosshair (gold in Bullet-Time, white/amber normally)
-        let cross_col = if bullet_time_active {
-            0x00ffaa22
-        } else {
-            0x00ffdd66
-        };
-        let cx = W / 2;
-        let cy_scr = H / 2;
-        for d in (-4i32..=4).filter(|_| crosshair_visible(&scene)) {
-            fb[cy_scr * W + (cx as i32 + d) as usize] = cross_col;
-            fb[(cy_scr as i32 + d) as usize * W + cx] = cross_col;
+            target.draw_crosshair(&scene.inventory);
         }
 
         if let (Some((renderer, _)), Some(view)) = (gpu.as_mut(), scene_view) {

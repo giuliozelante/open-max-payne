@@ -4223,6 +4223,7 @@ mod tests {
         // `[Revert]`: the sniper reloads as the MP5 does.
         assert_eq!(defs["sniper"].reload_seconds, defs["mp5"].reload_seconds);
         assert_eq!(defs["pumpshotgun"].reload_amount, 1);
+        assert_eq!(defs.values().filter(|def| def.shows_dot).count(), 13);
         assert_eq!(defs["beretta"].reload_amount, -1);
         let best = load_best_weapons(
             &std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join("Games/MaxPayne1"),

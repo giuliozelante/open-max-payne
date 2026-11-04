@@ -4378,6 +4378,7 @@ mod tests {
                 pocket_size: 162,
                 reload_seconds: 1.3,
                 reload_amount: -1,
+                shows_dot: true,
             },
         );
         for message in [
