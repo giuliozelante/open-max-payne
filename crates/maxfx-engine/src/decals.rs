@@ -13,6 +13,26 @@ const SURFACE_OFFSET: f32 = 0.01;
 /// Width, height and `0x00RRGGBB` pixels.
 type Bitmap = (u32, u32, Vec<u32>);
 
+/// Rotation (columns) whose y is `normal` turned to face against `dir`.
+pub(crate) fn surface_frame(normal: [f32; 3], dir: [f32; 3]) -> [f32; 9] {
+    let along = normal[0] * dir[0] + normal[1] * dir[1] + normal[2] * dir[2];
+    let n = if along > 0.0 {
+        normal.map(|c| -c)
+    } else {
+        normal
+    };
+    let reference = if n[1].abs() < 0.9 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let right = normalize(cross(reference, n));
+    let up = cross(n, right);
+    [
+        right[0], right[1], right[2], n[0], n[1], n[2], up[0], up[1], up[2],
+    ]
+}
+
 /// One `[Materials]` entry.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DecalMaterial {
@@ -173,19 +193,12 @@ impl DecalField {
         let Some(material) = self.set.material(category).cloned() else {
             return false;
         };
-        let along = normal[0] * dir[0] + normal[1] * dir[1] + normal[2] * dir[2];
-        let n = if along > 0.0 {
-            normal.map(|c| -c)
-        } else {
-            normal
-        };
-        let reference = if n[1].abs() < 0.9 {
-            [0.0, 1.0, 0.0]
-        } else {
-            [0.0, 0.0, 1.0]
-        };
-        let right = normalize(cross(reference, n));
-        let up = cross(n, right);
+        let frame = surface_frame(normal, dir);
+        let (right, n, up) = (
+            [frame[0], frame[1], frame[2]],
+            [frame[3], frame[4], frame[5]],
+            [frame[6], frame[7], frame[8]],
+        );
         let (roll, spread) = (self.random() - 0.5, self.random());
         let (sin, cos) = (roll * material.rotation).to_radians().sin_cos();
         let mirror = if material.flip && self.random() < 0.5 {
@@ -309,6 +322,21 @@ mod tests {
             set: DecalSet::parse(TEXT, "bullethit_generic").expect("set"),
             ..DecalField::default()
         }
+    }
+
+    #[test]
+    fn a_surface_frame_points_y_back_at_the_shooter() {
+        let frame = surface_frame([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        assert_eq!(frame[3..6], [-1.0, 0.0, 0.0]);
+        let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        assert!(dot(&frame[0..3], &frame[3..6]).abs() < 1e-6);
+        assert!(dot(&frame[3..6], &frame[6..9]).abs() < 1e-6);
+        assert!((dot(&frame[0..3], &frame[0..3]) - 1.0).abs() < 1e-6);
+        // Facing the shot already, and on a floor where the reference axis changes.
+        assert_eq!(
+            surface_frame([0.0, 1.0, 0.0], [0.0, -1.0, 0.0])[3..6],
+            [0.0, 1.0, 0.0]
+        );
     }
 
     #[test]

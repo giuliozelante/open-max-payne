@@ -773,6 +773,8 @@ pub struct QueuedSound {
     pub looping: bool,
     /// Distance model of a `3DSound = YES` cue; `None` plays at full volume.
     pub range: Option<crate::SoundRange>,
+    /// World position of a sound with no emitter object, as a bullet hit's.
+    pub at: Option<[f32; 3]>,
 }
 
 /// One `PS_StartEffect(effect, ...)` on a mesh, trigger or FSM this scene stores.
@@ -1284,6 +1286,7 @@ impl LdbScene {
             emitter,
             looping: false,
             range: None,
+            at: None,
         };
         let catalog_loaded = self
             .sound_catalogs

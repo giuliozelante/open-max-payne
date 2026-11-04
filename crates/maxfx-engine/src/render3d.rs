@@ -278,6 +278,11 @@ pub fn run_3d_walkthrough(
         crate::read_game_bytes(&game_root, r"\data\database\particles\particles.txt")
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default();
+    let hit_effects = HitEffects {
+        game_dir: &game_root,
+        particles_txt: &particles_txt,
+        sounds_txt: crate::load_sound_catalog(&game_root, "projectiles").unwrap_or_default(),
+    };
     let mut particle_lights = ParticleLights::default();
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
@@ -595,6 +600,9 @@ pub fn run_3d_walkthrough(
                 {
                     let kind = category(&scene, material);
                     decals.add(&kind, at(mt), normal, aim_dir, Some(midx));
+                    let frame = crate::decals::surface_frame(normal, aim_dir);
+                    let hit = at(mt);
+                    hit_effects.start(&mut scene, &mut particle_sprites, &kind, hit, frame);
                     let scripted = scene.bullet_hits(midx);
                     println!(
                         "  3D Engine: shot hit {} at {mt:.1} m (scripted: {scripted})",
@@ -632,6 +640,8 @@ pub fn run_3d_walkthrough(
                     if let Some((t, normal, material)) = level_hit {
                         let kind = category(&scene, material);
                         decals.add(&kind, at(t), normal, aim_dir, None);
+                        let frame = crate::decals::surface_frame(normal, aim_dir);
+                        hit_effects.start(&mut scene, &mut particle_sprites, &kind, at(t), frame);
                     }
                 }
             }
@@ -1660,6 +1670,7 @@ struct Voice {
     wav: PathBuf,
     looping: bool,
     range: Option<crate::SoundRange>,
+    at: Option<[f32; 3]>,
     /// The player and the gain it was started at.
     child: Option<(Child, f32)>,
 }
@@ -1773,15 +1784,17 @@ fn voice_gain(
     let Some(range) = &voice.range else {
         return 1.0;
     };
-    let Some(pos) = scene.emitter_world_pos(&voice.emitter) else {
+    let pos = voice.at.or_else(|| {
+        let pos = scene.emitter_world_pos(&voice.emitter)?;
+        let room = emitter_room(scene, &voice.emitter);
+        let origin = rooms.get(&room).copied().unwrap_or([0.0; 3]);
+        Some([0, 1, 2].map(|k| origin[k] + pos[k]))
+    });
+    let Some(pos) = pos else {
         return range.volume;
     };
-    let origin = rooms
-        .get(&emitter_room(scene, &voice.emitter))
-        .copied()
-        .unwrap_or([0.0; 3]);
     let d = (0..3)
-        .map(|k| (origin[k] + pos[k] - listener[k]).powi(2))
+        .map(|k| (pos[k] - listener[k]).powi(2))
         .sum::<f32>()
         .sqrt();
     sound_gain(d, range)
@@ -1841,6 +1854,7 @@ fn play_queued_sounds(
             wav,
             looping: sound.looping,
             range: sound.range,
+            at: sound.at,
             child: None,
         };
         let gain = voice_gain(&voice, scene, rooms, listener);
@@ -1974,6 +1988,53 @@ fn start_queued_effects(
     }
 }
 
+/// `decals.txt` `[bullethit_generic]`'s `[Message]`s name its sound and effect by the same word.
+const BULLET_HIT: &str = "bullethit_generic";
+
+/// What a bullet hit starts: the `[Material]` variant of its sound and effect, or the `[Default]`.
+struct HitEffects<'a> {
+    game_dir: &'a Path,
+    particles_txt: &'a str,
+    /// `sounds/projectiles.txt`.
+    sounds_txt: String,
+}
+
+impl HitEffects<'_> {
+    fn start(
+        &self,
+        scene: &mut LdbScene,
+        sprites: &mut ParticleSprites,
+        category: &str,
+        point: [f32; 3],
+        frame: [f32; 9],
+    ) {
+        let files = crate::material_files(self.particles_txt, BULLET_HIT, category);
+        let effect = files.first().and_then(|file| {
+            let win_path = format!("\\data\\database\\particles\\{file}");
+            sprites.effect(self.game_dir, &win_path)
+        });
+        if let Some((key, effect)) = effect {
+            sprites.field.start_at((point, frame), key, effect);
+        }
+        let files = crate::material_files(&self.sounds_txt, BULLET_HIT, category);
+        // HYPOTHESIS: retail picks among a cue's `[Sound]`s at random.
+        let pick = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |time| time.subsec_nanos() as usize);
+        if let Some(file) = files.get(pick % files.len().max(1)) {
+            scene.sound_queue.push(crate::scene::QueuedSound {
+                category: "projectiles".to_string(),
+                cue: BULLET_HIT.to_string(),
+                filename: Some(file.clone()),
+                emitter: String::new(),
+                looping: false,
+                range: crate::sound_cue_3d(&self.sounds_txt, BULLET_HIT),
+                at: Some(point),
+            });
+        }
+    }
+}
+
 /// Particles of running effects (`particles::ParticleField`) and their decoded bitmaps.
 #[derive(Default)]
 struct ParticleSprites {
@@ -1984,7 +2045,11 @@ struct ParticleSprites {
 }
 
 impl ParticleSprites {
-    fn start(&mut self, emitter: String, game_dir: &Path, win_path: &str, looping: bool) {
+    fn effect(
+        &mut self,
+        game_dir: &Path,
+        win_path: &str,
+    ) -> Option<(String, std::sync::Arc<openpfx::effect::RpsEffect>)> {
         let key = win_path.to_ascii_lowercase();
         let effect = self
             .effects
@@ -1994,8 +2059,12 @@ impl ParticleSprites {
                     .and_then(|bytes| openpfx::effect::rps_effect(&bytes))
                     .map(std::sync::Arc::new)
             })
-            .clone();
-        if let Some(effect) = effect {
+            .clone()?;
+        Some((key, effect))
+    }
+
+    fn start(&mut self, emitter: String, game_dir: &Path, win_path: &str, looping: bool) {
+        if let Some((key, effect)) = self.effect(game_dir, win_path) {
             self.field.start(emitter, key, effect, looping);
         }
     }
@@ -3835,6 +3904,64 @@ mod tests {
         assert_eq!(out[0].color, [127.5, 0.0, 127.5, 255.0]);
         assert_eq!(out[0].radius, 6.0);
         assert_eq!(out[0].intensity, 1.0);
+    }
+
+    #[test]
+    fn a_sound_with_a_position_is_heard_from_there() {
+        // sounds/projectiles.txt with soundid.h: Hotspot 5, FallOff 15, Volume 0.4.
+        let voice = Voice {
+            emitter: String::new(),
+            wav: PathBuf::new(),
+            looping: false,
+            range: Some(crate::SoundRange {
+                hotspot: 5.0,
+                falloff: 15.0,
+                volume: 0.4,
+            }),
+            at: Some([100.0, 0.0, 0.0]),
+            child: None,
+        };
+        let (scene, rooms) = (LdbScene::default(), BTreeMap::new());
+        assert_eq!(voice_gain(&voice, &scene, &rooms, [101.0, 0.0, 0.0]), 0.4);
+        assert_eq!(voice_gain(&voice, &scene, &rooms, [0.0, 0.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn retail_bullet_hit_starts_the_materials_dust_and_sound() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        let Some(particles) =
+            crate::read_game_bytes(&game, r"\data\database\particles\particles.txt")
+        else {
+            return;
+        };
+        let particles_txt = String::from_utf8_lossy(&particles).into_owned();
+        let hits = HitEffects {
+            game_dir: &game,
+            particles_txt: &particles_txt,
+            sounds_txt: crate::load_sound_catalog(&game, "projectiles").expect("catalog"),
+        };
+        let mut scene = LdbScene::default();
+        let mut sprites = ParticleSprites::default();
+        let frame = crate::decals::surface_frame([0.0, 1.0, 0.0], [0.0, -1.0, 0.0]);
+        for material in ["wood", "no such material"] {
+            hits.start(&mut scene, &mut sprites, material, [1.0, 2.0, 3.0], frame);
+        }
+        sprites.step(&scene, &BTreeMap::new(), 0.05);
+        let live = sprites.sprites();
+        assert!(!live.is_empty());
+        // Dust leaves the hit, not 7 m off it.
+        let near = |s: &crate::particles::Sprite| (s.pos[1] - 2.0).abs() < 1.0;
+        assert!(live.iter().all(near), "{:?}", live[0].pos);
+        assert_eq!(scene.sound_queue.len(), 2);
+        let wood = scene.sound_queue[0].filename.as_deref().expect("file");
+        assert!(wood.to_ascii_lowercase().contains("wood"), "{wood}");
+        let path = crate::story_wav_win_path(wood);
+        assert!(crate::read_game_bytes(&game, &path).is_some(), "{path}");
+        let range = scene.sound_queue[1].range.expect("3D cue");
+        assert_eq!((range.hotspot, range.falloff), (5.0, 15.0));
     }
 
     #[test]

@@ -2708,6 +2708,51 @@ pub fn particle_effect_file(particles_txt: &str, effect: &str) -> Option<(String
     ))
 }
 
+/// `Filename`s of `block`'s `[Material]` named `material`, or of its `[Default]` when it has none.
+pub fn material_files(text: &str, block: &str, material: &str) -> Vec<String> {
+    let header = format!("[{}]", block.trim());
+    let code = |line: &'_ str| line.split("//").next().unwrap_or("").trim().to_string();
+    let lines = text
+        .lines()
+        .skip_while(|line| !code(line).eq_ignore_ascii_case(&header))
+        .skip(1);
+    let (mut depth, mut opened) = (0_usize, false);
+    // `None` inside `[Default]`; the name of the `[Material]` otherwise.
+    let mut current: Option<String> = None;
+    let (mut defaults, mut matches) = (Vec::new(), Vec::new());
+    for line in lines {
+        let line = code(line);
+        depth += line.matches('{').count();
+        depth = depth.saturating_sub(line.matches('}').count());
+        opened |= line.contains('{');
+        if opened && depth == 0 {
+            break;
+        }
+        match bracket_name(&line).map(str::to_ascii_lowercase).as_deref() {
+            Some("default") => current = None,
+            Some("material") => current = Some(String::new()),
+            _ => {}
+        }
+        let Some((key, value)) = assign_pair(&line) else {
+            continue;
+        };
+        if key.eq_ignore_ascii_case("name") && current.is_some() {
+            current = Some(value);
+        } else if key.eq_ignore_ascii_case("filename") {
+            match &current {
+                None => defaults.push(value),
+                Some(name) if name.eq_ignore_ascii_case(material) => matches.push(value),
+                Some(_) => {}
+            }
+        }
+    }
+    if matches.is_empty() {
+        defaults
+    } else {
+        matches
+    }
+}
+
 /// Distance model of a `3DSound = YES` cue: full `volume` inside `hotspot` metres, released past
 /// `falloff` metres (`sndmfc.dll` `S_SoundOmni` `+0x149` / `+0x14d`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -4104,6 +4149,21 @@ mod tests {
             ))
         );
         assert_eq!(particle_effect_file(text, "missing"), None);
+    }
+
+    #[test]
+    fn material_files_read_a_flat_particle_block() {
+        let text = "[other]\n{\n[Default]\nFilename = other.rps;\n}\n[hit]\t// Hits\n{\n[Properties]\nLooping = false;\n[Default]\nFilename = hit\\default.rps;\n[Material]\nName = \"wood\";\nFilename = hit\\wood.rps;\n}\n[next]\n{\n[Material]\nName = \"metal\";\nFilename = next.rps;\n}\n";
+        assert_eq!(material_files(text, "HIT", "Wood"), ["hit\\wood.rps"]);
+        assert_eq!(material_files(text, "hit", "metal"), ["hit\\default.rps"]);
+    }
+
+    #[test]
+    fn material_files_list_every_sound_of_a_nested_block() {
+        let text = "[Hit]\n{\n\t[Properties] ID = 0; Probability = 100%;\n\t[Default]\n\t{\n\t\t[Sound]\n\t\tFilename = d1.wav;\n\t\t[Sound]\n\t\tFilename = d2.wav;\n\t}\n\t[Material]\n\t{\n\t\t[General]\n\t\tName = \"carpet\";\n\t\t[Sound]\n\t\tFilename = c1.wav;\n\t\t[Sound]\n\t\tFilename = c2.wav;\n\t}\n}\n[After]\n{\n\t[Default]\n\t{\n\t\t[Sound]\n\t\tFilename = after.wav;\n\t}\n}\n";
+        assert_eq!(material_files(text, "hit", "CARPET"), ["c1.wav", "c2.wav"]);
+        assert_eq!(material_files(text, "hit", "stone"), ["d1.wav", "d2.wav"]);
+        assert!(material_files(text, "missing", "stone").is_empty());
     }
 
     #[test]
