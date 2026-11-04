@@ -63,3 +63,12 @@ note. `camerapaths.txt` and `CAM_AnimateInPlace` are now in `2026-11-02-camera-a
   the bitmap set file). Colour graphs multiply additive bitmaps.
 - Effects are exported to `.rps` and registered in `data/database/particles/particles.txt`; levels start
   them with `PS_StartEffect`.
+
+## Trigger kinds in the data (2026-11-04)
+
+**STRONGLY SUPPORTED (names of the 1191 triggers in 13 retail levels, against the tutorial's list):** the `.ldb` trigger type is
+0 action button (radius 0.18 to 1.8 m), 1 player collide (0.1 to 7), 2 projectile collide (0.1 to 7), 3 character collide
+(0.1 to 4), 4 look-at (2 to 15). The engine had fired all of them on `E` within 6 m and none on touch. Action buttons
+now answer `E` within their radius plus the capsule radius (`CapsuleRadius = 0.48`, `CapsuleTop = 1.95`); player and character
+collide triggers fire on entering. HYPOTHESIS: once per entry, and only the player is tested so far. Projectile and
+look-at triggers do nothing yet.

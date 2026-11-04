@@ -373,7 +373,8 @@ pub fn run_3d_walkthrough(
         // Interact (`E`): trigger nearest dynamic mesh / door within 6m
         if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             toggle_nearest_dynamic_mesh(&mut scene, &room_origins, player_pos, 36.0);
-            if scene.activate_nearest_trigger(&room_origins, player_pos, 36.0) {
+            let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+            if scene.activate_nearest_trigger(&room_origins, feet) {
                 play_queued_sounds(
                     &mut scene,
                     &catalog_root(level_path),
@@ -507,6 +508,10 @@ pub fn run_3d_walkthrough(
             }
         }
 
+        if !cinematic {
+            let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+            scene.step_touch_triggers(&room_origins, feet);
+        }
         scene.inventory.step(world_dt);
 
         // Shoot (`F` or `LeftCtrl` / `RightCtrl`)

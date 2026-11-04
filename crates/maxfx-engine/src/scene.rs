@@ -585,6 +585,12 @@ impl SceneCharacter {
     }
 }
 
+/// `SceneTrigger::trigger_type`, from the names of the 1191 triggers in the retail levels:
+/// 2 is projectile collide and 4 look-at.
+const TRIGGER_ACTION_BUTTON: i32 = 0;
+const TRIGGER_PLAYER_COLLIDE: i32 = 1;
+const TRIGGER_CHARACTER_COLLIDE: i32 = 3;
+
 #[derive(Debug, Clone)]
 pub struct SceneTrigger {
     pub name: String,
@@ -593,6 +599,8 @@ pub struct SceneTrigger {
     pub radius: f32,
     pub trigger_type: i32,
     pub enabled: bool,
+    /// The player was touching it last frame: a collide trigger fires on entering.
+    pub touched: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1634,35 +1642,73 @@ impl LdbScene {
         ran
     }
 
-    /// `E` near an enabled trigger runs that FSM's unconditional `T_Activate` calls.
+    /// How far the player's capsule (`max_payne.txt`) is from `trigger`'s sphere: 0 or less touches.
+    fn capsule_gap(
+        trigger: &SceneTrigger,
+        room_origins: &BTreeMap<i32, [f32; 3]>,
+        feet: [f32; 3],
+    ) -> f32 {
+        const CAPSULE_TOP: f32 = 1.95;
+        const CAPSULE_RADIUS: f32 = 0.48;
+        let origin = room_origins
+            .get(&trigger.room_id)
+            .copied()
+            .unwrap_or([0.0; 3]);
+        let centre = [0, 1, 2].map(|k| origin[k] + trigger.pos[k]);
+        let nearest_y = centre[1].clamp(feet[1], feet[1] + CAPSULE_TOP);
+        let d = [
+            centre[0] - feet[0],
+            centre[1] - nearest_y,
+            centre[2] - feet[2],
+        ];
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - CAPSULE_RADIUS - trigger.radius
+    }
+
+    /// `E` within reach of an enabled action button trigger runs its `T_Activate` calls.
     pub fn activate_nearest_trigger(
         &mut self,
         room_origins: &BTreeMap<i32, [f32; 3]>,
-        pos: [f32; 3],
-        max_d2: f32,
+        feet: [f32; 3],
     ) -> bool {
-        let mut best: Option<(usize, f32)> = None;
-        for (idx, trigger) in self.triggers.iter().enumerate() {
-            if !trigger.enabled {
-                continue;
-            }
-            let ro = room_origins
-                .get(&trigger.room_id)
-                .copied()
-                .unwrap_or([0.0; 3]);
-            let wx = ro[0] + trigger.pos[0];
-            let wy = ro[1] + trigger.pos[1];
-            let wz = ro[2] + trigger.pos[2];
-            let d2 = (wx - pos[0]).powi(2) + (wy - pos[1]).powi(2) + (wz - pos[2]).powi(2);
-            if d2 < max_d2 && best.is_none_or(|(_, best_d2)| d2 < best_d2) {
-                best = Some((idx, d2));
-            }
-        }
-        let Some((idx, _)) = best else {
+        let nearest = self
+            .triggers
+            .iter()
+            .filter(|trigger| trigger.enabled && trigger.trigger_type == TRIGGER_ACTION_BUTTON)
+            .map(|trigger| (trigger, Self::capsule_gap(trigger, room_origins, feet)))
+            .filter(|(_, gap)| *gap <= 0.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((trigger, _)) = nearest else {
             return false;
         };
-        let fsm_name = strip_trigger_suffix(&self.triggers[idx].name).to_string();
+        let fsm_name = strip_trigger_suffix(&trigger.name).to_string();
         self.dispatch_hook(&fsm_name, "T_Activate")
+    }
+
+    /// Player and character collide triggers fire as the player enters their sphere.
+    pub fn step_touch_triggers(
+        &mut self,
+        room_origins: &BTreeMap<i32, [f32; 3]>,
+        feet: [f32; 3],
+    ) -> bool {
+        let mut entered = Vec::new();
+        for trigger in &mut self.triggers {
+            if !matches!(
+                trigger.trigger_type,
+                TRIGGER_PLAYER_COLLIDE | TRIGGER_CHARACTER_COLLIDE
+            ) {
+                continue;
+            }
+            let touching = Self::capsule_gap(trigger, room_origins, feet) <= 0.0;
+            if touching && !trigger.touched && trigger.enabled {
+                entered.push(strip_trigger_suffix(&trigger.name).to_string());
+            }
+            trigger.touched = touching;
+        }
+        let mut fired = false;
+        for fsm_name in entered {
+            fired |= self.dispatch_hook(&fsm_name, "T_Activate");
+        }
+        fired
     }
 
     pub fn step_dynamic_anims(&mut self, dt: f32) {
@@ -2672,6 +2718,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                 radius,
                 trigger_type,
                 enabled: true,
+                touched: false,
             });
         }
     }
@@ -3819,6 +3866,7 @@ mod tests {
             radius: 0.2,
             trigger_type: 0,
             enabled: true,
+            touched: false,
         });
         let dispatched = scene.dispatch_message(
             "::Bathroom::lid.DO",
@@ -3874,6 +3922,7 @@ mod tests {
             radius: 0.2,
             trigger_type: 0,
             enabled: true,
+            touched: false,
         });
         let res = scene.dispatch_message(
             "::Bathroom::lid.DO",
@@ -4072,6 +4121,7 @@ mod tests {
             radius: 0.2,
             trigger_type: 0,
             enabled: true,
+            touched: false,
         });
         scene.sound_catalogs.insert(
             "dynamic".into(),
@@ -4189,7 +4239,7 @@ mod tests {
             ro[1] + trigger.pos[1],
             ro[2] + trigger.pos[2],
         ];
-        assert!(scene.activate_nearest_trigger(&origins, at, 36.0));
+        assert!(scene.activate_nearest_trigger(&origins, at));
         assert_eq!(scene.sound_queue.len(), 1);
         assert_eq!(scene.sound_queue[0].cue, "door_wood_locked");
         assert_eq!(
@@ -4198,7 +4248,7 @@ mod tests {
         );
         scene.sound_queue.clear();
         let far = [at[0] + 100.0, at[1], at[2]];
-        assert!(!scene.activate_nearest_trigger(&origins, far, 36.0));
+        assert!(!scene.activate_nearest_trigger(&origins, far));
         assert!(scene.sound_queue.is_empty());
     }
 
@@ -4397,6 +4447,93 @@ mod tests {
         assert!(!scene.dynamic_meshes[0].collisions);
         assert!(scene.dispatch_message("", "::startroom::door.DO->DO_EnableCollisions(true);"));
         assert!(scene.dynamic_meshes[0].collisions);
+    }
+
+    /// A trigger of `kind` at the origin that hides the door when activated.
+    fn trigger_scene(kind: i32, radius: f32) -> LdbScene {
+        let mut scene = door_fsm_scene();
+        scene.triggers.push(SceneTrigger {
+            name: "::startroom::door.TRIGGER".into(),
+            room_id: 1,
+            pos: [0.0; 3],
+            radius,
+            trigger_type: kind,
+            enabled: true,
+            touched: false,
+        });
+        scene.fsms[0].hooks[0] = ("T_Activate".into(), vec![HIDE.into()], Vec::new());
+        scene
+    }
+
+    fn fired(scene: &LdbScene) -> bool {
+        scene.dynamic_meshes[0].hidden
+    }
+
+    #[test]
+    fn an_action_button_answers_within_its_radius_plus_the_capsule() {
+        let origins = BTreeMap::new();
+        let mut scene = trigger_scene(0, 1.0);
+        assert!(!scene.activate_nearest_trigger(&origins, [2.0, 0.0, 0.0]));
+        assert!(!fired(&scene));
+        assert!(scene.activate_nearest_trigger(&origins, [1.4, 0.0, 0.0]));
+        assert!(fired(&scene));
+    }
+
+    #[test]
+    fn the_action_key_ignores_other_kinds_of_trigger() {
+        let origins = BTreeMap::new();
+        for kind in [1, 2, 3, 4] {
+            let mut scene = trigger_scene(kind, 1.0);
+            assert!(
+                !scene.activate_nearest_trigger(&origins, [0.0; 3]),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_collide_trigger_fires_once_on_entering_its_sphere() {
+        let origins = BTreeMap::new();
+        for kind in [1, 3] {
+            let mut scene = trigger_scene(kind, 1.0);
+            assert!(!scene.step_touch_triggers(&origins, [3.0, 0.0, 0.0]));
+            assert!(
+                scene.step_touch_triggers(&origins, [1.2, 0.0, 0.0]),
+                "{kind}"
+            );
+            assert!(fired(&scene));
+            assert!(
+                !scene.step_touch_triggers(&origins, [1.0, 0.0, 0.0]),
+                "still inside"
+            );
+            assert!(!scene.step_touch_triggers(&origins, [3.0, 0.0, 0.0]));
+            assert!(
+                scene.step_touch_triggers(&origins, [1.0, 0.0, 0.0]),
+                "entered again"
+            );
+        }
+    }
+
+    #[test]
+    fn the_capsule_reaches_a_trigger_above_the_feet() {
+        // A sphere at chest height touches a standing player, not one a storey below it.
+        let origins = BTreeMap::new();
+        let mut scene = trigger_scene(1, 0.5);
+        assert!(scene.step_touch_triggers(&origins, [0.0, -1.5, 0.0]));
+        let mut scene = trigger_scene(1, 0.5);
+        assert!(!scene.step_touch_triggers(&origins, [0.0, -4.0, 0.0]));
+    }
+
+    #[test]
+    fn touch_ignores_disabled_action_projectile_and_look_at_triggers() {
+        let origins = BTreeMap::new();
+        for kind in [0, 2, 4] {
+            let mut scene = trigger_scene(kind, 1.0);
+            assert!(!scene.step_touch_triggers(&origins, [0.0; 3]), "{kind}");
+        }
+        let mut scene = trigger_scene(1, 1.0);
+        scene.triggers[0].enabled = false;
+        assert!(!scene.step_touch_triggers(&origins, [0.0; 3]));
     }
 
     #[test]
@@ -5018,6 +5155,7 @@ mod tests {
             radius: 0.2,
             trigger_type: 0,
             enabled: true,
+            touched: false,
         });
         let dispatched = scene.dispatch_message(
             "::entrance03::New mesh 62::drawer.DO",
