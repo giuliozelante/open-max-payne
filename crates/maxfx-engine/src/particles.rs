@@ -139,12 +139,14 @@ impl ParticleField {
                     if live >= run.effect.max_particles as usize {
                         continue;
                     }
-                    let local: [f32; 3] = std::array::from_fn(|c| {
-                        let t = random(&mut seed);
-                        emission.position[c]
-                            + emission.box_min[c]
-                            + (emission.box_max[c] - emission.box_min[c]) * t
-                    });
+                    let spawn = match emission.sphere {
+                        Some(radii) => in_sphere(radii, &mut seed),
+                        None => std::array::from_fn(|c| {
+                            let t = random(&mut seed);
+                            emission.box_min[c] + (emission.box_max[c] - emission.box_min[c]) * t
+                        }),
+                    };
+                    let local: [f32; 3] = std::array::from_fn(|c| emission.position[c] + spawn[c]);
                     let direction = emission.direction.at(u);
                     let dir: [f32; 3] = std::array::from_fn(|c| {
                         direction.get(c).copied().unwrap_or(0.0)
@@ -156,8 +158,8 @@ impl ParticleField {
                     let local_vel = dir.map(|d| d * speed);
                     let sequences = emitter.particle.sequences.len().max(1);
                     list.push(Particle {
-                        pos: transform(rot, origin, particle_to_level(local)),
-                        vel: transform(rot, [0.0; 3], particle_to_level(local_vel)),
+                        pos: transform(rot, origin, local),
+                        vel: transform(rot, [0.0; 3], local_vel),
                         age: 0.0,
                         life: between(&emission.lifetime.at(u), &mut seed).max(1e-3),
                         size_multiplier: between(&emission.size_multiplier.at(u), &mut seed),
@@ -308,11 +310,15 @@ fn random(seed: &mut u32) -> f32 {
     (*seed >> 8) as f32 / (1u32 << 24) as f32
 }
 
-/// ParticleFX local axes to the level's: z is mirrored. HYPOTHESIS from the intro: the startup
-/// snow (`C1_PAN::f1`, box offset `(0, -3, 12)`, wind `(0, -3, 30)`) put 18 flakes in the `C3`
-/// camera's view unmirrored and 343 mirrored; the retail frame is full of snow.
-fn particle_to_level(v: [f32; 3]) -> [f32; 3] {
-    [v[0], v[1], -v[2]]
+/// A point in a "Sphere" emitter of `[hotspot, falloff]` radii. The tutorial has most emissions
+/// inside the hotspot and the probability fading to zero at the falloff; HYPOTHESIS: linearly.
+fn in_sphere([hotspot, falloff]: [f32; 2], seed: &mut u32) -> [f32; 3] {
+    let reach = hotspot + (falloff - hotspot) * random(seed);
+    let radius = reach * random(seed).cbrt();
+    let z = random(seed) * 2.0 - 1.0;
+    let angle = random(seed) * std::f32::consts::TAU;
+    let ring = (1.0 - z * z).sqrt();
+    [ring * angle.cos(), ring * angle.sin(), z].map(|c| c * radius)
 }
 
 /// `rot` (columns) times `v`, plus `origin`.
@@ -364,6 +370,7 @@ mod tests {
                     cycle_length: 1.0,
                     box_max: [0.0; 3],
                     box_min: [0.0; 3],
+                    sphere: None,
                     size_multiplier: flat(2, &[1.0, 1.0]),
                     rotation_multiplier: flat(2, &[1.0, 1.0]),
                 },
@@ -484,6 +491,28 @@ mod tests {
     }
 
     #[test]
+    fn a_sphere_emitter_spawns_inside_its_falloff_around_the_relative_position() {
+        // bullethit-default: hotspot 0.05, falloff 0.1; its 0..1 box is the editor's default.
+        let mut def = effect(1000.0, 5.0, 0.0);
+        let emission = &mut def.emitters[0].emission;
+        emission.velocity = flat(2, &[0.0, 0.0]);
+        emission.position = [0.0, 2.0, 0.0];
+        emission.box_max = [1.0; 3];
+        emission.sphere = Some([0.05, 0.1]);
+        let mut field = ParticleField::default();
+        field.start("e".into(), "k".into(), std::sync::Arc::new(def), false);
+        field.step(0.1, at_origin);
+        let sprites = field.sprites();
+        assert!(sprites.len() > 10, "{} sprites", sprites.len());
+        let offsets: Vec<f32> = sprites
+            .iter()
+            .map(|s| (s.pos[0].powi(2) + (s.pos[1] - 12.0).powi(2) + s.pos[2].powi(2)).sqrt())
+            .collect();
+        assert!(offsets.iter().all(|d| *d <= 0.1 + 1e-4), "{offsets:?}");
+        assert!(offsets.iter().any(|d| *d > 1e-3), "{offsets:?}");
+    }
+
+    #[test]
     fn particles_fall_with_the_level_gravity() {
         // levels.txt `Gravity = ( 0, GRAVITY_VALUE , 0 )` with `GRAVITY_VALUE -20`; the tutorial:
         // the editor's gravity "does not affect the gravity setting used in the game".
@@ -515,8 +544,9 @@ mod tests {
         field.stop("e");
         field.step(1.0, at_origin);
         let p = field.sprites()[0].pos;
-        // ParticleFX z runs opposite to the level's (see `particle_to_level`).
-        assert!((p[2] + 15.0).abs() < 1e-3, "{p:?}");
+        // The wind blows along the level's +z: the intro's storm sits at z -30 and reaches the
+        // camera looking along -z.
+        assert!((p[2] - 15.0).abs() < 1e-3, "{p:?}");
         assert!((p[1] - (10.0 - 1.5)).abs() < 1e-3, "{p:?}");
     }
 

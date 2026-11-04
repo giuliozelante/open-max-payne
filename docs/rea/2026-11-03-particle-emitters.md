@@ -94,10 +94,10 @@ number of bitmap sequences, then for each sequence a frame count and its frames.
 term, size term, constant), animation type, animation FPS, random first frame, randomize rotation
 direction, random rotation from/to, mirroring flags. Snow: gravity 0.8, 20 fps, rotation −180..180.
 
-**Emission (HYPOTHESIS labels):**
-- relative position `(0, −3, 12)`;
+**Emission (labels corrected 2026-11-04, see below):**
+- an unlabelled vec3 `(0, −3, 12)`, equal to the direction graph in 329 of 739 retail emitters;
 - direction spread `(2, 2, 2)`;
-- an unlabelled vec3;
+- Relative Position `(0, 5, −30)`;
 - cycle length `5`;
 - three ints (the volume type?), an up vector;
 - five floats, sphere hotspot and falloff among them (`3`, `6`);
@@ -114,12 +114,23 @@ direction, random rotation from/to, mirroring flags. Snow: gravity 0.8, 20 fps, 
   `::startroom::cam_mover::camera1::snow` under `camera1.DO` and `::start::…::C1_PAN::f1` under `C1_PAN.DO`.
   These emitters already followed their parent's position; they now take its rotation too
   (`LdbScene::emitter_world_pose`), so the spawn box and the wind turn with the camera rig.
-- **Axis (HYPOTHESIS, measured):** ParticleFX's local z runs opposite to the level's. The intro's
-  water-shot camera `C1_PAN::C3` looks along world −z. Its snow emitter `C1_PAN::f1` puts its box at
-  local `(0, −3, 12)` and blows along `(0, −3, 30)`. After 2 s of simulation, a headless probe counted
-  18 flakes in the camera's view unmirrored and 343 mirrored (126 from `snowstorm_20m`, 217 from
-  `snowstorm_60m`). The retail frame is full of snow. The box and the wind are symmetric in x, so this
-  case cannot tell a z mirror from a 180° turn about y. `particles::particle_to_level` applies the mirror.
+- **Axis (RETRACTED 2026-11-04):** this note mirrored ParticleFX z into the level. The mirror compensated for
+  reading the wrong vec3 as Relative Position; see the next section.
+
+## Relative Position and emitter shape (2026-11-04)
+
+- **STRONGLY SUPPORTED (data + tutorial):** Relative Position is the third emission vec3, not the first. The tutorial says the
+  muzzle flashes are "offset by the Relative Position value to be placed at the gun muzzle", and the third vec3 of
+  `weapons/beretta.rps` is `(0, 0.085, 0.5)`. The first vec3 of the same file holds `(0, 0, 45)`, which cannot be a
+  muzzle offset in metres. Bullet hits store zero in the third vec3, as a hit on the surface should.
+- **STRONGLY SUPPORTED (measured):** no z mirror. `C1_PAN::f1` has an identity frame and `C3` looks along −z. With the true
+  offset `(0, 5, −30)` and wind `(0, −3, 30)`, the storm sits ahead of the camera and blows at it. After 2 s of
+  `snowstorm_60m` plus `snowstorm_20m`, a probe counted 309 of 665 sprites in view unmirrored and 4 mirrored.
+- **STRONGLY SUPPORTED (data):** the third int after the cycle floats selects the shape, 0 box and 1 sphere. 514 of 739
+  emitters store 1 and 497 keep the editor's default `0..1` box; the two counts were not cross-tabulated. The last two
+  floats before the box are Hotspot and Falloff.
+- **HYPOTHESIS:** the emission probability fades linearly from hotspot to falloff. The tutorial gives the shape of the
+  fade only in words.
 
 ## The intro's haze, and fog on particles (2026-11-04)
 
