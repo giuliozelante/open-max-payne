@@ -120,3 +120,14 @@ direction, random rotation from/to, mirroring flags. Snow: gravity 0.8, 20 fps, 
   18 flakes in the camera's view unmirrored and 343 mirrored (126 from `snowstorm_20m`, 217 from
   `snowstorm_60m`). The retail frame is full of snow. The box and the wind are symmetric in x, so this
   case cannot tell a z mirror from a 180° turn about y. `particles::particle_to_level` applies the mirror.
+
+## The intro's haze, and fog on particles (2026-11-04)
+
+- **VERIFIED (data):** the grey shapes in the water shot are emitter 1 of `snowstorm_20m` and `snowstorm_60m`: about
+  17 live sprites of 15 to 30 m at about 3% alpha. Retail draws them too, only fainter.
+- **STRONGLY SUPPORTED (measured):** retail fogs alpha-blended particles at their own depth. The brightest pixel of
+  retail frames `original/0036` and `0041` is 84 and 103, against 174 in the engine. Under fog `-700, 700` a white
+  flake 20 m out becomes about 134, which at alpha 0.67 over the 20 grey sky gives about 96. With the fog applied
+  the engine's frames peak at 103 to 121, and the haze falls to about half.
+- **HYPOTHESIS:** additive particles are left unfogged. No retail frame here tests them.
+- Not read from the binary: the material's fog flags (`P_Material::enableFogging`, import `0x7ca4ec`).
