@@ -2557,7 +2557,7 @@ mod tests {
                 &mut sw,
                 &mut sw_zb,
                 view,
-                h as f32 * 0.85,
+                crate::render3d::fov_scale(1.0),
                 std::slice::from_ref(&sprite),
                 |_| Some(&white),
             );

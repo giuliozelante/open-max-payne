@@ -118,4 +118,17 @@ shake.
   time and are stepped each frame. The bars are painted black over the frame (HUD layer on the GPU)
   under the screen fade.
 - **HYPOTHESIS:** the bars cover the 3D view rather than shrinking it. The FOV multiplier scales the
-  horizontal view angle (`render3d::fov_scale`). The bars slide in linearly over `fade_time`.
+  view angle (`render3d::fov_scale`; see "Default field of view"). The bars slide in linearly over `fade_time`.
+
+## Default field of view (2026-11-04)
+
+- **VERIFIED:** `globalconfig.txt` `[camera]` has `DefaultFOV = 70` degrees. `MaxPayne.exe` also pushes
+  `0x3f9c61aa` (1.2217 rad, 70°) into `P_Camera::setFOV` at `0x630ff1`, and the error text "GM_ChangeFOV multiplier
+  (%5.2f) makes fov (%5.2f) out of range (0-180)" shows the multiplier scales that angle.
+- **STRONGLY SUPPORTED (measured):** the angle runs across the frame's width. A free fit of the retail sky gave a half
+  angle of 36° at a moment when the script's multiplier is 0.975. With 70° across the width, the engine's city and street
+  shots land on the retail frames (`original/0042`, `0046`, `0047`) horizontally, element for element.
+- **Replaced:** the engine's `H * 0.85`, about 87° across its 960 x 600 frame.
+- **Capture note:** the `original/` frames look about 1.33 times squashed vertically against the engine. That is
+  the ratio of 16:9 to 4:3, so those captures are a 4:3 image stretched across a 16:9 frame. Measure them
+  horizontally.

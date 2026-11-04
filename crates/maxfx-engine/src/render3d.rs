@@ -914,14 +914,14 @@ fn draw_letterbox(fb: &mut [u32], fraction: f32) {
     fb[(H - rows) * W..].fill(0);
 }
 
-/// Projection scale for a `gm_changeFOV` multiplier. HYPOTHESIS: the multiplier scales the
-/// horizontal view angle; 1 (or an unset, non-positive value) keeps the default `H * 0.85`.
+/// `globalconfig.txt` `[camera]` `DefaultFOV`, in degrees across the frame.
+const DEFAULT_FOV: f32 = 70.0;
+
+/// Projection scale for a `gm_changeFOV` multiplier, which scales the view angle (the game's
+/// error text: "multiplier makes fov out of range"). A non-positive one keeps the default.
 pub(crate) fn fov_scale(multiplier: f32) -> f32 {
-    let base = H as f32 * 0.85;
-    if multiplier <= 0.0 || multiplier == 1.0 {
-        return base;
-    }
-    let half = (W as f32 * 0.5 / base).atan() * multiplier;
+    let multiplier = if multiplier > 0.0 { multiplier } else { 1.0 };
+    let half = (DEFAULT_FOV * 0.5).to_radians() * multiplier;
     W as f32 * 0.5 / half.min(1.5).tan()
 }
 
@@ -1973,7 +1973,7 @@ pub fn render_frame(
     };
     let mut fb = vec![0x0016_1c28u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
-    let fov_scale = (H as f32) * 0.85;
+    let fov_scale = fov_scale(scene.fov_multiplier.value);
     const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
     let mut tris = Vec::new();
     for sm in static_meshes_in_view(scene, camera_idx) {
@@ -2875,6 +2875,9 @@ fn raster_threads() -> usize {
 }
 
 /// Rasterise rows `y0..y1` of `t` into band buffers whose row 0 is frame row `y0`.
+/// Barycentric slack, so rounding cannot reject a pixel on a shared edge from both triangles.
+const EDGE_SLACK: f32 = -1.0e-5;
+
 fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usize) {
     let [p0, p1, p2] = t.p;
     let (tex, alpha_reference, lmap, write_z, depth_bias) =
@@ -2902,7 +2905,7 @@ fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usi
             let w0 = ((p1.sx - px) * (p2.sy - py) - (p2.sx - px) * (p1.sy - py)) * inv_area;
             let w1 = ((p2.sx - px) * (p0.sy - py) - (p0.sx - px) * (p2.sy - py)) * inv_area;
             let w2 = 1.0 - w0 - w1;
-            if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+            if w0 < EDGE_SLACK || w1 < EDGE_SLACK || w2 < EDGE_SLACK {
                 continue;
             }
             let inv_z = w0 * p0.inv_z + w1 * p1.inv_z + w2 * p2.inv_z;
@@ -3270,7 +3273,7 @@ pub(crate) fn test_software_dynamic(
         right,
         up,
         fwd,
-        (H as f32) * 0.85,
+        fov_scale(1.0),
         true,
         false,
         &mut fb,
@@ -3303,7 +3306,7 @@ pub(crate) fn test_software_character(
         right,
         up,
         fwd,
-        (H as f32) * 0.85,
+        fov_scale(1.0),
         false,
         &mut fb,
         &mut zb,
@@ -3318,7 +3321,7 @@ pub(crate) fn test_software_sky(
     (_, right, up, fwd): crate::gpu::GpuView,
 ) -> Vec<u32> {
     let mut fb = vec![0u32; W * H];
-    paint_sky_strip(tex, right, up, fwd, (H as f32) * 0.85, &mut fb);
+    paint_sky_strip(tex, right, up, fwd, fov_scale(1.0), &mut fb);
     fb
 }
 
@@ -3341,7 +3344,7 @@ pub(crate) fn test_software_static(
             right,
             up,
             fwd,
-            (H as f32) * 0.85,
+            fov_scale(1.0),
             true,
             false,
             true,
@@ -3915,7 +3918,9 @@ mod tests {
     #[test]
     fn the_fov_multiplier_widens_the_horizontal_angle() {
         // HYPOTHESIS: gm_changefov scales the view angle (house cutscenes use 1.1).
-        assert_eq!(fov_scale(1.0), H as f32 * 0.85);
+        // `globalconfig.txt` `DefaultFOV = 70`, across the width of the frame.
+        let half_default = (W as f32 * 0.5 / fov_scale(1.0)).atan().to_degrees();
+        assert!((half_default - 35.0).abs() < 1e-3, "{half_default}");
         let half = |scale: f32| (W as f32 * 0.5 / scale).atan();
         assert!((half(fov_scale(1.1)) - 1.1 * half(fov_scale(1.0))).abs() < 1e-5);
     }
@@ -3946,7 +3951,7 @@ mod tests {
         let view = test_view([0.0; 3], [0.0, 0.0, 1.0]);
         let centre = (H / 2) * W + W / 2;
         let draw = |fb: &mut Vec<u32>, zb: &mut Vec<f32>, sprite: Sprite| {
-            draw_sprites(fb, zb, view, H as f32 * 0.85, &[sprite], |_| Some(&white));
+            draw_sprites(fb, zb, view, fov_scale(1.0), &[sprite], |_| Some(&white));
         };
         // Alpha blend: half of white over black.
         let (mut fb, mut zb) = (vec![0u32; W * H], vec![f32::INFINITY; W * H]);
@@ -4476,7 +4481,7 @@ mod tests {
             [0.0, 0.0, -1.0],
             [0.0, 1.0, 0.0],
             [1.0, 0.0, 0.0],
-            (H as f32) * 0.85,
+            fov_scale(1.0),
             false,
             false,
             &mut fb,
@@ -4568,7 +4573,7 @@ mod tests {
             [0.0, 0.0, -1.0],
             [0.0, 1.0, 0.0],
             [1.0, 0.0, 0.0],
-            (H as f32) * 0.85,
+            fov_scale(1.0),
             false,
             false,
             &mut fb,
