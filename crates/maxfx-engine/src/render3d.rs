@@ -98,7 +98,7 @@ pub fn run_3d_walkthrough(
 ) -> Result<(), String> {
     screen.set_title(title);
     let (catalog_player, johnny_rig) = load_character_rigs(level_path);
-    let player_rig = player_skin
+    let mut player_rig = player_skin
         .filter(|id| !id.is_empty())
         .and_then(|id| load_skin_body(level_path, id).map(|body| body.rig))
         .or(catalog_player);
@@ -210,6 +210,11 @@ pub fn run_3d_walkthrough(
     let mut third_person = true;
     let mut bullet_time = false;
     let mut shot_timer: f32 = 0.0;
+    // Seconds into the player's shot or reload clip.
+    let mut action_time: f32 = 0.0;
+    let mut reload_seen = false;
+    // Seconds until the reload's sound, and its cue.
+    let mut reload_cue: Option<(f32, String)> = None;
     let mut fly_mode = false;
     let mut use_lightmaps = true;
     let mut wireframe = false;
@@ -574,8 +579,27 @@ pub fn run_3d_walkthrough(
             || window.is_key_pressed(Key::LeftCtrl, KeyRepeat::No)
             || window.is_key_pressed(Key::RightCtrl, KeyRepeat::No);
         mouse_fire_held = mouse_fire;
+        // The last round can switch the weapon, so this is read before firing.
+        let shooter = scene.inventory.current.clone();
         if fire_pressed && scene.player_controls && shot_timer <= 0.0 && scene.inventory.fire() {
-            shot_timer = 0.18;
+            let def = shooter.and_then(|name| scene.inventory.defs.get(&name).cloned());
+            let def = def.unwrap_or_default();
+            shot_timer = 1.0 / def.shots_per_second.max(0.1);
+            let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+            if let Some(cue) = &def.fire_sound {
+                queue_weapon_sound(&mut scene, cue, feet);
+            }
+            if let Some(rig) = player_rig.as_mut() {
+                rig.action = def.fire_clip.clone();
+                action_time = 0.0;
+                let frame = character_clip(rig, player_moving).and_then(|clip| {
+                    let time = if player_moving { walk_phase } else { 0.0 };
+                    bone_frame(clip, "Gun", time, feet, player_mesh_yaw(yaw))
+                });
+                if let Some((frame, muzzle)) = frame.zip(def.muzzle.as_deref()) {
+                    hit_effects.start_muzzle(&mut particle_sprites, muzzle, frame);
+                }
+            }
             let aim_dir = [sy * cp, sp, cy * cp];
             // The dot marks the view's centre, so the shot leaves from the camera.
             let aim_from = if third_person && !fly_mode {
@@ -653,6 +677,41 @@ pub fn run_3d_walkthrough(
                         hit_effects.start(&mut scene, &mut particle_sprites, &kind, at(t), frame);
                     }
                 }
+            }
+        }
+
+        let reloading = scene.inventory.reloading.is_some();
+        if reloading && !reload_seen {
+            let def = scene.inventory.current.as_ref();
+            if let Some(def) = def.and_then(|name| scene.inventory.defs.get(name)) {
+                if let Some(rig) = player_rig.as_mut() {
+                    rig.action = def.reload_clip.clone();
+                    action_time = 0.0;
+                }
+                reload_cue = def
+                    .reload_sound
+                    .clone()
+                    .map(|cue| (def.reload_sound_delay, cue));
+            }
+        }
+        reload_seen = reloading;
+        if let Some((delay, cue)) = &mut reload_cue {
+            *delay -= world_dt;
+            if *delay <= 0.0 {
+                let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+                let cue = cue.clone();
+                queue_weapon_sound(&mut scene, &cue, feet);
+                reload_cue = None;
+            }
+        }
+        if let Some(rig) = player_rig.as_mut() {
+            action_time += world_dt;
+            if rig
+                .action
+                .as_ref()
+                .is_some_and(|clip| action_time >= clip_seconds(clip))
+            {
+                rig.action = None;
             }
         }
 
@@ -817,11 +876,8 @@ pub fn run_3d_walkthrough(
                 }
             }
             if let (true, false, Some(prig)) = (third_person, fly_mode, player_rig.as_ref()) {
-                let time = if player_moving {
-                    walk_phase
-                } else {
-                    anim_clock
-                };
+                let time =
+                    player_clip_time(prig, player_moving, walk_phase, anim_clock, action_time);
                 let verts = character_world_verts(
                     prig,
                     player_feet,
@@ -948,11 +1004,8 @@ pub fn run_3d_walkthrough(
         // 4. Render Player (`Payne_Max_L0.KFS`) in 3rd-person view
         if third_person && !fly_mode && cpu_characters {
             if let Some(ref prig) = player_rig {
-                let time = if player_moving {
-                    walk_phase
-                } else {
-                    anim_clock
-                };
+                let time =
+                    player_clip_time(prig, player_moving, walk_phase, anim_clock, action_time);
                 let mesh_yaw = player_mesh_yaw(yaw);
                 let verts =
                     character_world_verts(prig, player_feet, mesh_yaw, time, player_moving, false);
@@ -1013,18 +1066,6 @@ pub fn run_3d_walkthrough(
             fb.fill(crate::gpu::HUD_CLEAR);
         }
         draw_letterbox(&mut fb, scene.widescreen.value);
-
-        // 5. Render muzzle flash / bullet tracer when firing
-        if shot_timer > 0.10 {
-            draw_line(
-                &mut fb,
-                (W as f32) * 0.56,
-                (H as f32) * 0.62,
-                (W as f32) * 0.50,
-                (H as f32) * 0.50,
-                0x00ffee77,
-            );
-        }
 
         if let Some(assets) = hud_assets.as_ref() {
             let layout = &assets.layout;
@@ -2051,6 +2092,20 @@ struct HitEffects<'a> {
 }
 
 impl HitEffects<'_> {
+    /// A weapon's `PS_StartEffect` at the gun.
+    fn start_muzzle(
+        &self,
+        sprites: &mut ParticleSprites,
+        effect: &str,
+        frame: crate::particles::Frame,
+    ) {
+        let file = crate::particle_effect_file(self.particles_txt, effect);
+        let effect = file.and_then(|(win_path, _)| sprites.effect(self.game_dir, &win_path));
+        if let Some((key, effect)) = effect {
+            sprites.field.start_at(frame, key, effect);
+        }
+    }
+
     fn start(
         &self,
         scene: &mut LdbScene,
@@ -2835,8 +2890,66 @@ fn character_clip(rig: &CharacterRig, moving: bool) -> Option<&crate::kf2::Kf2An
     if moving {
         rig.walk.as_ref().or(rig.idle.as_ref())
     } else {
-        rig.idle.as_ref().or(rig.walk.as_ref())
+        rig.action
+            .as_ref()
+            .or(rig.idle.as_ref())
+            .or(rig.walk.as_ref())
     }
+}
+
+fn clip_seconds(clip: &crate::kf2::Kf2Anim) -> f32 {
+    clip.bones
+        .first()
+        .filter(|bone| bone.fps > 0.0)
+        .map_or(0.0, |bone| bone.duration as f32 / bone.fps)
+}
+
+/// Where the player's current clip is.
+fn player_clip_time(
+    rig: &CharacterRig,
+    moving: bool,
+    walk_phase: f32,
+    anim_clock: f32,
+    action_time: f32,
+) -> f32 {
+    match (moving, &rig.action) {
+        (true, _) => walk_phase,
+        (false, Some(_)) => action_time,
+        (false, None) => anim_clock,
+    }
+}
+
+/// World position and rotation (columns) of `bone`, for a character at `world_pos` turned `yaw`.
+fn bone_frame(
+    anim: &crate::kf2::Kf2Anim,
+    bone: &str,
+    time: f32,
+    world_pos: [f32; 3],
+    yaw: f32,
+) -> Option<crate::particles::Frame> {
+    let locals = crate::kf2::sample_locals(anim, time);
+    let (rot, pos) = *crate::kf2::compose_world(anim, &locals).get(&bone.to_ascii_lowercase())?;
+    let (sy, cy) = yaw.sin_cos();
+    let turn = |[x, y, z]: [f32; 3]| [x * cy + z * sy, y, z * cy - x * sy];
+    let [x, y, z] = turn(pos);
+    let columns = [0, 3, 6].map(|c| turn([rot[c], rot[c + 1], rot[c + 2]]));
+    Some((
+        [world_pos[0] + x, world_pos[1] + y, world_pos[2] + z],
+        std::array::from_fn(|i| columns[i / 3][i % 3]),
+    ))
+}
+
+/// Queue a `sounds/weapons.txt` cue heard from `at`.
+fn queue_weapon_sound(scene: &mut LdbScene, cue: &str, at: [f32; 3]) {
+    scene.sound_queue.push(crate::scene::QueuedSound {
+        category: "weapons".to_string(),
+        cue: cue.to_string(),
+        filename: None,
+        emitter: String::new(),
+        looping: false,
+        range: None,
+        at: Some(at),
+    });
 }
 
 /// `weapon` on the `Gun` bone of `rig`, in the world (`LeftHandGunBone` and `RightHandGunBone`
@@ -3985,6 +4098,68 @@ mod tests {
         assert_eq!(out[0].color, [127.5, 0.0, 127.5, 255.0]);
         assert_eq!(out[0].radius, 6.0);
         assert_eq!(out[0].intensity, 1.0);
+    }
+
+    fn clip(bone: &str, pos: [f32; 3]) -> crate::kf2::Kf2Anim {
+        crate::kf2::Kf2Anim {
+            bones: vec![crate::kf2::AnimBone {
+                name: bone.to_string(),
+                parent: None,
+                duration: 30,
+                fps: 15.0,
+                keys: vec![crate::kf2::AnimKeyframe {
+                    frame: 0,
+                    mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    pos,
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn an_action_clip_replaces_the_idle_but_not_the_run() {
+        let mesh = crate::kf2::KfsMesh {
+            name: String::new(),
+            vertices: Vec::new(),
+            faces: Vec::new(),
+            material_textures: Vec::new(),
+        };
+        let rig = CharacterRig {
+            mesh,
+            skin: None,
+            idle: Some(clip("idle", [0.0; 3])),
+            walk: Some(clip("run", [0.0; 3])),
+            bind: None,
+            action: Some(clip("shoot", [0.0; 3])),
+        };
+        let name = |moving| character_clip(&rig, moving).map(|c| c.bones[0].name.as_str());
+        assert_eq!(name(false), Some("shoot"));
+        assert_eq!(name(true), Some("run"));
+    }
+
+    #[test]
+    fn a_clip_lasts_its_frames_at_its_rate() {
+        assert_eq!(clip_seconds(&clip("gun", [0.0; 3])), 2.0);
+    }
+
+    #[test]
+    fn the_gun_frame_turns_with_the_character() {
+        let anim = clip("Gun", [1.0, 2.0, 0.0]);
+        let (pos, rot) = bone_frame(
+            &anim,
+            "gun",
+            0.0,
+            [10.0, 0.0, 0.0],
+            std::f32::consts::FRAC_PI_2,
+        )
+        .expect("frame");
+        // Yaw 90 degrees sends x to -z, as `held_weapon_verts` places vertices.
+        assert!(
+            (pos[0] - 10.0).abs() < 1e-5 && (pos[1] - 2.0).abs() < 1e-5,
+            "{pos:?}"
+        );
+        assert!((pos[2] + 1.0).abs() < 1e-5, "{pos:?}");
+        assert!((rot[2] + 1.0).abs() < 1e-5, "{rot:?}");
     }
 
     #[test]

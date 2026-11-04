@@ -2589,6 +2589,8 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
     let reloads = hud::parse_reload_animations(&skeleton);
+    let reload_sounds = hud::parse_reload_sound_frames(&skeleton);
+    let shots = hud::parse_shoot_animations(&skeleton);
     names
         .into_iter()
         .filter_map(|name| {
@@ -2599,10 +2601,31 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
                 let clip = source
                     .read(&path)
                     .and_then(|bytes| kf2::parse_kf2_anim(&bytes));
-                let fps = clip.and_then(|clip| Some(clip.bones.first()?.fps));
-                def.reload_seconds = fps
-                    .filter(|fps| *fps > 0.0)
-                    .map_or(0.0, |fps| *frame as f32 / fps);
+                let fps = clip.as_ref().and_then(|clip| Some(clip.bones.first()?.fps));
+                let fps = fps.filter(|fps| *fps > 0.0);
+                def.reload_seconds = fps.map_or(0.0, |fps| *frame as f32 / fps);
+                def.reload_sound_delay = fps
+                    .zip(reload_sounds.get(&name))
+                    .map_or(0.0, |(fps, frame)| *frame as f32 / fps);
+                def.reload_clip = clip;
+            }
+            // A bare file lives in the weapon's own folder.
+            if let Some(model) = def.model.as_mut().filter(|model| !model.contains('\\')) {
+                *model = format!(r"{name}\{model}");
+            }
+            // Ingram, dual and melee weapons script the shot on the body clip.
+            let body = format!("CHARANIM_SHOOT{}", name.to_ascii_uppercase());
+            def.fire_sound = def
+                .fire_sound
+                .or_else(|| hud::weapon_cue(&skeleton, &body, "A_Play3DSound", 1));
+            def.muzzle = def
+                .muzzle
+                .or_else(|| hud::weapon_cue(&skeleton, &body, "PS_StartEffect", 0));
+            if let Some(file) = shots.get(&name) {
+                let path = format!(r"\data\database\skeletons\default_skeleton\{file}");
+                def.fire_clip = source
+                    .read(&path)
+                    .and_then(|bytes| kf2::parse_kf2_anim(&bytes));
             }
             Some((name, def))
         })
@@ -4187,6 +4210,51 @@ mod tests {
         // `ProjectileOffset = (0, 0.06, 0)`: the barrel runs along +z, above the grip's pivot.
         let barrel = mesh.vertices.iter().map(|v| v[2]).fold(f32::MIN, f32::max);
         assert!((0.1..0.4).contains(&barrel), "front {barrel}");
+    }
+
+    #[test]
+    fn retail_weapons_name_clips_sounds_and_effects_that_exist() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        let defs = load_weapon_defs(&game);
+        if defs.is_empty() {
+            return;
+        }
+        let sounds = load_sound_catalog(&game, "weapons").expect("weapons.txt");
+        let particles = read_game_bytes(&game, r"\data\database\particles\particles.txt")
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .expect("particles.txt");
+        let beretta = &defs["beretta"];
+        assert_eq!(beretta.shots_per_second, 4.0);
+        assert!(beretta.fire_clip.is_some() && beretta.reload_clip.is_some());
+        assert!(beretta.reload_sound_delay > 0.0);
+        // These script the shot on the body clip, not in the weapon file.
+        assert_eq!(defs["ingram"].fire_sound.as_deref(), Some("shoot_ingram"));
+        assert_eq!(defs["ingram"].muzzle.as_deref(), Some("Muzzle_ingram"));
+        assert_eq!(
+            defs["leadpipe"].fire_sound.as_deref(),
+            Some("shoot_leadpipe")
+        );
+        for (name, def) in &defs {
+            if !matches!(name.as_str(), "empty" | "painkiller") {
+                let model = def.model.as_deref().unwrap_or_else(|| panic!("{name}"));
+                assert!(load_weapon_model(&game, model).is_some(), "{name}: {model}");
+            }
+        }
+        for def in defs.values() {
+            if let Some(cue) = &def.fire_sound {
+                let file = story_sound_filename(&sounds, cue).unwrap_or_else(|| panic!("{cue}"));
+                let path = story_wav_win_path(&file);
+                assert!(read_game_bytes(&game, &path).is_some(), "{path}");
+            }
+            if let Some(effect) = &def.muzzle {
+                let (path, _) =
+                    particle_effect_file(&particles, effect).unwrap_or_else(|| panic!("{effect}"));
+                assert!(read_game_bytes(&game, &path).is_some(), "{path}");
+            }
+        }
     }
 
     #[test]

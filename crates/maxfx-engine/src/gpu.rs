@@ -2138,6 +2138,7 @@ mod tests {
             idle: None,
             walk: None,
             bind: None,
+            action: None,
         }
     }
 

@@ -92,6 +92,8 @@ pub struct CharacterRig {
     pub walk: Option<Kf2Anim>,
     /// `Widepose.kf2` (else `Pose.kf2`) — bind-pose locals for `inv(bind) * pose`.
     pub bind: Option<Kf2Anim>,
+    /// A shot or reload clip that replaces the idle while it plays.
+    pub action: Option<Kf2Anim>,
 }
 
 fn read_i32(data: &[u8], i: &mut usize) -> Option<i32> {
@@ -929,6 +931,7 @@ fn rig_from_mesh(mesh: KfsMesh, skin: Option<SkdSkin>, path: &Path) -> Character
         // `default_skeleton.txt` `CHARANIM_POSE = anim\\widepose.kf2`: the pose the skins were
         // exported in. `Pose.kf2` raises the arms ~0.39 rad and narrows the legs.
         bind: load_anim_named(path, &["widepose.kf2", "pose.kf2"]),
+        action: None,
     }
 }
 

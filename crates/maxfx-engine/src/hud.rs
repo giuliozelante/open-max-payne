@@ -478,6 +478,20 @@ pub struct WeaponDef {
     pub shows_dot: bool,
     /// First `[LOD]` `ExportData`, relative to `database\\weapons\\`.
     pub model: Option<String>,
+    /// `DefaultShootingFrequency`, shots per second.
+    pub shots_per_second: f32,
+    /// `WEAPONANIM_SHOOT`'s `A_Play3DSound(weapons, ...)` cue.
+    pub fire_sound: Option<String>,
+    /// `WEAPONANIM_SHOOT`'s `PS_StartEffect` effect.
+    pub muzzle: Option<String>,
+    /// `WEAPONANIM_RELOAD`'s `A_Play3DSound(weapons, ...)` cue.
+    pub reload_sound: Option<String>,
+    /// Seconds into the reload clip of its `WS_Animate(WEAPONANIM_RELOAD)`.
+    pub reload_sound_delay: f32,
+    /// `CHARANIM_SHOOT<WEAPON>`.
+    pub fire_clip: Option<crate::kf2::Kf2Anim>,
+    /// `CHARANIM_RELOAD<WEAPON>`.
+    pub reload_clip: Option<crate::kf2::Kf2Anim>,
 }
 
 impl WeaponDef {
@@ -497,17 +511,45 @@ impl WeaponDef {
                 .find(|s| s.path == "crosshair/geometry")
                 .and_then(|s| s.text("exportdata"))
                 .is_some_and(|file| file.to_ascii_lowercase().ends_with("dot.kf2")),
-            // `[LOD] { [Geometry] ExportData = ..\x.kf2; ... }` sits on one line.
-            model: weapon_txt.lines().find_map(|line| {
-                let (_, rest) = line.split_once("[LOD]")?.1.split_once("ExportData")?;
-                let file = rest
-                    .trim_start_matches([' ', '\t', '='])
-                    .split(';')
-                    .next()?;
-                Some(file.trim().trim_start_matches(r"..\").to_string())
-            }),
+            shots_per_second: key("defaultshootingfrequency")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0.0),
+            fire_sound: weapon_cue(weapon_txt, "WEAPONANIM_SHOOT", "A_Play3DSound", 1),
+            muzzle: weapon_cue(weapon_txt, "WEAPONANIM_SHOOT", "PS_StartEffect", 0),
+            reload_sound: weapon_cue(weapon_txt, "WEAPONANIM_RELOAD", "A_Play3DSound", 1),
+            reload_sound_delay: 0.0,
+            fire_clip: None,
+            reload_clip: None,
+            model: weapon_txt
+                .split_once("[LOD]")
+                .and_then(|(_, lod)| lod.split_once("ExportData"))
+                .and_then(|(_, rest)| {
+                    let file = rest
+                        .trim_start_matches([' ', '\t', '='])
+                        .split(';')
+                        .next()?;
+                    Some(file.trim().trim_start_matches(r"..\").to_string())
+                }),
         })
     }
+}
+
+/// Argument `arg` of the first `verb` message in the `[Animation]` of `index`.
+pub(crate) fn weapon_cue(weapon_txt: &str, index: &str, verb: &str, arg: usize) -> Option<String> {
+    let header = format!("Index = {index};");
+    let lines = weapon_txt
+        .lines()
+        .skip_while(|line| !line.contains(&header))
+        .skip(1)
+        .take_while(|line| !line.contains("[Animation]"));
+    for line in lines {
+        let Some((_, call)) = line.split_once(verb) else {
+            continue;
+        };
+        let args = call.trim_start().strip_prefix('(')?;
+        return Some(args.split(',').nth(arg)?.trim().to_string());
+    }
+    None
 }
 
 /// The weapon IDs of `weaponpriority.txt` `[BestWeapons]`, strongest first.
@@ -521,6 +563,56 @@ pub fn parse_best_weapons(text: &str) -> Vec<String> {
         .filter_map(|line| line.split_once("ID =")?.1.split(';').next())
         .map(|id| id.trim().to_string())
         .collect()
+}
+
+/// `CHARANIM_SHOOT<WEAPON>` file per weapon, `[Revert]`s followed. The `LOW`, `HIGH` and dodge
+/// variants have their own names and stay in the map unused.
+pub fn parse_shoot_animations(skeleton: &str) -> BTreeMap<String, String> {
+    let after = |line: &str, key: &str| {
+        let value = line.split_once(key)?.1.split(';').next()?;
+        Some(value.trim().to_string())
+    };
+    let mut shots = BTreeMap::new();
+    let mut reverts = Vec::new();
+    for line in skeleton.lines() {
+        if line.contains("[Revert]") {
+            let from = after(line, "From = CHARANIM_SHOOT");
+            reverts.extend(from.zip(after(line, "To = CHARANIM_SHOOT")));
+        } else if line.contains("[Animation]") {
+            let weapon = after(line, "Index = CHARANIM_SHOOT");
+            if let Some((weapon, file)) = weapon.zip(after(line, "Filename =")) {
+                shots.insert(weapon.to_ascii_lowercase(), file);
+            }
+        }
+    }
+    for (from, to) in reverts {
+        if let Some(file) = shots.get(&to.to_ascii_lowercase()).cloned() {
+            shots.insert(from.to_ascii_lowercase(), file);
+        }
+    }
+    shots
+}
+
+/// Frame of `WS_Animate(WEAPONANIM_RELOAD)` per `CHARANIM_RELOAD<WEAPON>` block.
+pub fn parse_reload_sound_frames(skeleton: &str) -> BTreeMap<String, u32> {
+    let mut frames = BTreeMap::new();
+    let mut weapon = None;
+    for line in skeleton.lines() {
+        if line.contains("[Animation]") {
+            weapon = line
+                .split_once("CHARANIM_RELOAD")
+                .and_then(|(_, rest)| rest.split(';').next())
+                .map(|name| name.trim().to_ascii_lowercase());
+        } else if line.contains("WS_Animate") && line.contains("WEAPONANIM_RELOAD") {
+            let frame = line
+                .split_once("Frame =")
+                .and_then(|(_, rest)| rest.split(';').next()?.trim().parse().ok());
+            if let (Some(weapon), Some(frame)) = (&weapon, frame) {
+                frames.entry(weapon.clone()).or_insert(frame);
+            }
+        }
+    }
+    frames
 }
 
 /// `(animation file, frame of its C_Reload)` per `CHARANIM_RELOAD<WEAPON>` block of a skeleton.
@@ -1113,7 +1205,7 @@ mod tests {
             reload_seconds: 1.3,
             reload_amount: -1,
             shows_dot: true,
-            model: None,
+            ..Default::default()
         };
         let mut defs = BTreeMap::new();
         for (name, weapon) in [
@@ -1167,9 +1259,37 @@ mod tests {
                 reload_seconds: 0.0,
                 reload_amount: -1,
                 shows_dot: true,
-                model: None,
+                ..Default::default()
             })
         );
+    }
+
+    #[test]
+    fn a_weapon_file_gives_its_shot_and_reload_cues() {
+        let def = WeaponDef::parse(
+            "#define BERETTA_SHOOTINGFREQUENCY 4\n",
+            "[Animationset]\n{\n\t[Animation] Index = WEAPONANIM_DEFAULT; Filename = d.kf2;\n\t[Animation] Index = WEAPONANIM_SHOOT; Filename = s.kf2;\n\t[Properties]\n\t{\n\t\t[Message] Frame = 0; String = \"this->A_Play3DSound ( weapons, shoot_beretta , \\\"\\\");\";\n\t\t[Message] Frame = 0; String = \"this->PS_StartEffect ( Muzzle_Beretta, \\\"\\\" );\";\n\t}\n\t[Animation] Index = WEAPONANIM_RELOAD; Filename = d.kf2;\n\t[Properties]\n\t{\n\t\t[Message] Frame = 0; String = \"this->A_Play3DSound ( weapons, reload_beretta, \\\"\\\");\";\n\t}\n}\n[Attributes]\nInventoryID = I;\nWeaponID = W;\nClipsize = 1;\nPocketsize = 2;\nReloadAmount = -1;\nDefaultShootingFrequency = BERETTA_SHOOTINGFREQUENCY;\n",
+        )
+        .expect("weapon");
+        assert_eq!(def.shots_per_second, 4.0);
+        assert_eq!(def.fire_sound.as_deref(), Some("shoot_beretta"));
+        assert_eq!(def.muzzle.as_deref(), Some("Muzzle_Beretta"));
+        assert_eq!(def.reload_sound.as_deref(), Some("reload_beretta"));
+    }
+
+    #[test]
+    fn shoot_animations_map_weapons_and_follow_reverts() {
+        let text = "\t[Revert] From = CHARANIM_SHOOTMP5; To = CHARANIM_SHOOTINGRAM;\n\t[Animation] Index = CHARANIM_SHOOTBERETTA; Filename = anim\\shootberetta.kf2;\n\t[Animation] Index = CHARANIM_SHOOTINGRAM; Filename = anim\\shootingram.kf2;\n\t[Animation] Index = CHARANIM_WALK; Filename = anim\\walk.kf2;\n";
+        let shots = parse_shoot_animations(text);
+        assert_eq!(shots["beretta"], r"anim\shootberetta.kf2");
+        assert_eq!(shots["mp5"], r"anim\shootingram.kf2");
+        assert!(!shots.contains_key("walk"));
+    }
+
+    #[test]
+    fn reload_sound_frames_come_from_the_weapons_ws_animate() {
+        let text = "\t[Animation] Index = CHARANIM_RELOADBERETTA; Filename = r.kf2;\n\t{\n\t\t[Message] Frame = 0; String = \"RightHandWeapon->WS_Hide( FALSE );\";\n\t\t[Message] Frame = 10; String = \"RightHandWeapon->WS_Animate(\" WEAPONANIM_RELOAD \");\";\n\t}\n";
+        assert_eq!(parse_reload_sound_frames(text)["beretta"], 10);
     }
 
     #[test]
