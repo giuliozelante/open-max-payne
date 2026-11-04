@@ -212,6 +212,110 @@ pub fn load_font(game_dir: &std::path::Path, base: &str) -> Option<HudFont> {
     })
 }
 
+/// What `database/weapons/<name>.txt` says about a weapon's ammunition.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WeaponDef {
+    /// `WeaponID`, the key of the weapon's `[ActiveWeapon]` sprite.
+    pub id: String,
+    pub clip_size: u32,
+    pub pocket_size: u32,
+}
+
+impl WeaponDef {
+    /// Reads a weapon file, with `shooting.h` for the sizes it names.
+    pub fn parse(shooting_h: &str, weapon_txt: &str) -> Option<Self> {
+        let sections = parse_sections(&format!("{shooting_h}\n{weapon_txt}"));
+        let key = |name: &str| sections.iter().find_map(|s| s.text(name));
+        Some(Self {
+            id: key("weaponid")?.to_string(),
+            clip_size: key("clipsize")?.parse().ok()?,
+            pocket_size: key("pocketsize")?.parse().ok()?,
+        })
+    }
+}
+
+/// One weapon the player carries.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WeaponStock {
+    pub clip: u32,
+    pub pocket: u32,
+    pub infinite: bool,
+}
+
+/// The player's weapons, changed by the `C_PickupWeapon` family of script messages.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PlayerInventory {
+    /// Weapon definitions by lower-case file name, such as `beretta`.
+    pub defs: BTreeMap<String, WeaponDef>,
+    pub weapons: BTreeMap<String, WeaponStock>,
+    /// The weapon in hand, by lower-case file name.
+    pub current: Option<String>,
+}
+
+impl PlayerInventory {
+    /// `C_RemoveAllWeapons(name)`: strips the player and gives `name` with unlimited ammo.
+    pub fn remove_all(&mut self, name: &str) {
+        self.weapons.clear();
+        self.current = None;
+        if self.defs.contains_key(name) {
+            self.pickup_weapon(name);
+            self.set_infinite(name, true);
+        }
+    }
+
+    /// `C_PickupWeapon(name)`: a full clip. A weapon already carried gains nothing: the house
+    /// script picks up a Beretta it has and the retail HUD still reads `18 + 99`.
+    pub fn pickup_weapon(&mut self, name: &str) {
+        let Some(def) = self.defs.get(name) else {
+            return;
+        };
+        self.weapons.entry(name.to_string()).or_insert(WeaponStock {
+            clip: def.clip_size,
+            ..WeaponStock::default()
+        });
+        if self.current.is_none() && def.id != "WEAPONID_PAINKILLER" {
+            self.current = Some(name.to_string());
+        }
+    }
+
+    /// `C_PickupAmmo(name, amount)`: into the pocket, up to its size.
+    pub fn pickup_ammo(&mut self, name: &str, amount: u32) {
+        if let (Some(def), Some(stock)) = (self.defs.get(name), self.weapons.get_mut(name)) {
+            stock.pocket = (stock.pocket + amount).min(def.pocket_size);
+        }
+    }
+
+    /// `C_SetInfiniteAmmo(name, on)`.
+    pub fn set_infinite(&mut self, name: &str, on: bool) {
+        if let Some(stock) = self.weapons.get_mut(name) {
+            stock.infinite = on;
+        }
+    }
+
+    /// Spends a round of the weapon in hand; `false` when it has none.
+    pub fn fire(&mut self) -> bool {
+        let Some(name) = &self.current else {
+            return false;
+        };
+        let (Some(def), Some(stock)) = (self.defs.get(name), self.weapons.get_mut(name)) else {
+            return false;
+        };
+        if stock.infinite {
+            return true;
+        }
+        if stock.clip == 0 {
+            let reload = stock.pocket.min(def.clip_size);
+            stock.pocket -= reload;
+            stock.clip = reload;
+        }
+        if stock.clip == 0 {
+            return false;
+        }
+        stock.clip -= 1;
+        true
+    }
+}
+
 /// A strip font as `P_Font::validate` reads it (`e2mfc.dll` `0x10001e60`).
 #[derive(Debug, Clone)]
 pub struct HudFont {
@@ -406,6 +510,125 @@ mod tests {
             x += run + 1;
         }
         HudFont::new(sheet(width, height, pixels)).expect("font")
+    }
+
+    fn inventory() -> PlayerInventory {
+        let def = |id: &str, clip_size, pocket_size| WeaponDef {
+            id: id.into(),
+            clip_size,
+            pocket_size,
+        };
+        let mut defs = BTreeMap::new();
+        defs.insert("beretta".to_string(), def("WEAPONID_BERETTA", 18, 162));
+        defs.insert("painkiller".to_string(), def("WEAPONID_PAINKILLER", 1, 8));
+        PlayerInventory {
+            defs,
+            ..PlayerInventory::default()
+        }
+    }
+
+    fn stock(clip: u32, pocket: u32, infinite: bool) -> WeaponStock {
+        WeaponStock {
+            clip,
+            pocket,
+            infinite,
+        }
+    }
+
+    #[test]
+    fn a_weapon_file_gives_its_id_and_sizes_through_shooting_h() {
+        let def = WeaponDef::parse(
+            "#define\tBERETTA_CLIPSIZE\t\t18\n#define BERETTA_POCKETSIZE 162\n",
+            "[Properties]\nWeaponID \t= WEAPONID_BERETTA;\nClipsize \t= BERETTA_CLIPSIZE;\nPocketsize\t= BERETTA_POCKETSIZE;\n",
+        );
+        assert_eq!(
+            def,
+            Some(WeaponDef {
+                id: "WEAPONID_BERETTA".into(),
+                clip_size: 18,
+                pocket_size: 162,
+            })
+        );
+    }
+
+    #[test]
+    fn the_house_script_gives_a_clip_of_18_and_99_in_the_pocket() {
+        // `Part0_Level1`: the order of these messages is the level's.
+        let mut player = inventory();
+        player.remove_all("beretta");
+        player.set_infinite("beretta", false);
+        player.pickup_weapon("painkiller");
+        player.pickup_weapon("beretta");
+        player.pickup_ammo("beretta", 99);
+        assert_eq!(player.weapons["beretta"], stock(18, 99, false));
+        assert_eq!(player.current.as_deref(), Some("beretta"));
+    }
+
+    #[test]
+    fn removing_all_weapons_gives_the_named_one_unlimited_ammo() {
+        let mut player = inventory();
+        player.pickup_weapon("painkiller");
+        player.remove_all("beretta");
+        assert_eq!(player.weapons.len(), 1);
+        assert!(player.weapons["beretta"].infinite);
+        assert_eq!(player.current.as_deref(), Some("beretta"));
+    }
+
+    #[test]
+    fn removing_all_weapons_for_empty_leaves_nothing() {
+        let mut player = inventory();
+        player.pickup_weapon("beretta");
+        player.remove_all("empty");
+        assert!(player.weapons.is_empty());
+        assert_eq!(player.current, None);
+    }
+
+    #[test]
+    fn a_painkiller_is_not_taken_in_hand() {
+        let mut player = inventory();
+        player.pickup_weapon("painkiller");
+        assert_eq!(player.current, None);
+    }
+
+    #[test]
+    fn ammo_stops_at_the_pocket_size() {
+        let mut player = inventory();
+        player.pickup_weapon("beretta");
+        player.pickup_ammo("beretta", 500);
+        assert_eq!(player.weapons["beretta"].pocket, 162);
+    }
+
+    #[test]
+    fn firing_empties_the_clip_then_reloads_from_the_pocket() {
+        let mut player = inventory();
+        player.pickup_weapon("beretta");
+        player.pickup_ammo("beretta", 20);
+        for _ in 0..18 {
+            assert!(player.fire());
+        }
+        assert_eq!(player.weapons["beretta"], stock(0, 20, false));
+        assert!(player.fire());
+        assert_eq!(player.weapons["beretta"], stock(17, 2, false));
+    }
+
+    #[test]
+    fn with_nothing_left_a_weapon_does_not_fire() {
+        let mut player = inventory();
+        player.pickup_weapon("beretta");
+        for _ in 0..18 {
+            player.fire();
+        }
+        assert!(!player.fire());
+        assert!(!PlayerInventory::default().fire());
+    }
+
+    #[test]
+    fn infinite_ammo_never_runs_out() {
+        let mut player = inventory();
+        player.remove_all("beretta");
+        for _ in 0..100 {
+            assert!(player.fire());
+        }
     }
 
     #[test]

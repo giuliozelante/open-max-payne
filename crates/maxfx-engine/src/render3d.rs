@@ -280,6 +280,7 @@ pub fn run_3d_walkthrough(
             .unwrap_or_default();
     let mut particle_lights = ParticleLights::default();
     let mut particle_sprites = ParticleSprites::default();
+    scene.inventory.defs = crate::load_weapon_defs(&game_root);
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
@@ -478,7 +479,7 @@ pub fn run_3d_walkthrough(
         let fire_pressed = window.is_key_pressed(Key::F, KeyRepeat::No)
             || window.is_key_pressed(Key::LeftCtrl, KeyRepeat::No)
             || window.is_key_pressed(Key::RightCtrl, KeyRepeat::No);
-        if fire_pressed && scene.player_controls && shot_timer <= 0.0 {
+        if fire_pressed && scene.player_controls && shot_timer <= 0.0 && scene.inventory.fire() {
             shot_timer = 0.18;
             let aim_dir = [sy * cp, sp, cy * cp];
             // Raycast against living enemies
@@ -4170,6 +4171,7 @@ mod tests {
             fog_fade: None,
             widescreen: crate::scene::Ramp::at(0.0),
             fov_multiplier: crate::scene::Ramp::at(1.0),
+            inventory: Default::default(),
             gravity: None,
         }
     }

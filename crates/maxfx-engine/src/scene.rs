@@ -676,6 +676,8 @@ pub struct LdbScene {
     /// `gm_changeFOV(multiplier, time)`: multiplier on the view angle (1 = default; 0 in a
     /// `Default` scene, which `render3d::fov_scale` also treats as the default).
     pub fov_multiplier: Ramp,
+    /// The player's weapons, as the `C_PickupWeapon` family of messages leaves them.
+    pub inventory: crate::hud::PlayerInventory,
 }
 
 /// A value moving linearly to its target (script verbs with a fade time).
@@ -1126,6 +1128,33 @@ impl LdbScene {
                 };
                 self.fov_multiplier
                     .set(multiplier, number(1).unwrap_or(0.0));
+                true
+            }
+            verb @ ("c_removeallweapons" | "c_pickupweapon" | "c_pickupammo"
+            | "c_setinfiniteammo")
+                if msg.receiver.eq_ignore_ascii_case("player") =>
+            {
+                let Some(weapon) = msg.args.first().map(|arg| arg.trim().to_ascii_lowercase())
+                else {
+                    return false;
+                };
+                let second = msg.args.get(1).copied();
+                match verb {
+                    "c_removeallweapons" => self.inventory.remove_all(&weapon),
+                    "c_pickupweapon" => self.inventory.pickup_weapon(&weapon),
+                    "c_pickupammo" => {
+                        let Some(amount) = second.and_then(|a| a.trim().parse().ok()) else {
+                            return false;
+                        };
+                        self.inventory.pickup_ammo(&weapon, amount);
+                    }
+                    _ => {
+                        let Some(on) = script_bool(second) else {
+                            return false;
+                        };
+                        self.inventory.set_infinite(&weapon, on);
+                    }
+                }
                 true
             }
             "gm_setplayercontrols" => {
@@ -2918,6 +2947,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         fog_fade: None,
         widescreen: Ramp::at(0.0),
         fov_multiplier: Ramp::at(1.0),
+        inventory: Default::default(),
         gravity: None,
     })
 }
@@ -3032,6 +3062,7 @@ mod tests {
             fog_fade: None,
             widescreen: Ramp::at(0.0),
             fov_multiplier: Ramp::at(1.0),
+            inventory: Default::default(),
             gravity: None,
         }
     }
@@ -4333,6 +4364,40 @@ mod tests {
         assert!(!scene.dynamic_meshes[0].collisions);
         assert!(scene.dispatch_message("", "::startroom::door.DO->DO_EnableCollisions(true);"));
         assert!(scene.dynamic_meshes[0].collisions);
+    }
+
+    #[test]
+    fn the_house_weapon_messages_reach_the_player_inventory() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene.inventory.defs.insert(
+            "beretta".into(),
+            crate::hud::WeaponDef {
+                id: "WEAPONID_BERETTA".into(),
+                clip_size: 18,
+                pocket_size: 162,
+            },
+        );
+        for message in [
+            "player->c_removeallweapons(beretta);",
+            "player->c_setinfiniteammo(beretta, false);",
+            "player->c_pickupweapon(beretta);",
+            "player->c_pickupammo(beretta, 99);",
+        ] {
+            assert!(scene.dispatch_message("", message), "{message}");
+        }
+        let stock = scene.inventory.weapons["beretta"];
+        assert_eq!((stock.clip, stock.pocket, stock.infinite), (18, 99, false));
+    }
+
+    #[test]
+    fn an_enemys_weapon_messages_leave_the_player_alone() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        scene
+            .inventory
+            .defs
+            .insert("beretta".into(), Default::default());
+        assert!(!scene.dispatch_message("", "::babys_room::e1->C_RemoveAllWeapons(beretta);"));
+        assert!(scene.inventory.weapons.is_empty());
     }
 
     #[test]

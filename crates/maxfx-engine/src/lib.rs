@@ -2564,6 +2564,35 @@ pub fn read_game_bytes(game_dir: &Path, win_path: &str) -> Option<Vec<u8>> {
     GameSource::open(game_dir).read(win_path)
 }
 
+/// Every weapon in `database/weapons`, by lower-case file name, as the archives list them.
+pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
+    const DIR: &str = r"\data\database\weapons\";
+    let mut source = GameSource::open(game_dir);
+    let Some(shooting) = source.read(r"\data\database\shooting.h") else {
+        return BTreeMap::new();
+    };
+    let shooting = String::from_utf8_lossy(&shooting).into_owned();
+    let mut names = Vec::new();
+    for path in ras_candidates(game_dir) {
+        let Ok(index) = openras::archive::RasIndex::open(&path) else {
+            continue;
+        };
+        names.extend(index.paths().filter_map(|member| {
+            let lower = member.to_ascii_lowercase();
+            let name = lower.strip_prefix(DIR)?.strip_suffix(".txt")?;
+            (!name.contains('\\')).then(|| name.to_string())
+        }));
+    }
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let text = source.read(&format!("{DIR}{name}.txt"))?;
+            let def = hud::WeaponDef::parse(&shooting, &String::from_utf8_lossy(&text))?;
+            Some((name, def))
+        })
+        .collect()
+}
+
 /// Raw SharedDB text for `breakable` and `dynamic`, from loose `data/` or `x_data.ras`.
 pub fn load_sound_catalogs(game_dir: &Path) -> BTreeMap<String, String> {
     ["breakable", "dynamic"]
@@ -4146,6 +4175,22 @@ mod tests {
         assert_eq!(entries[0].ambient, Some([140.0, 135.0, 110.0]));
         assert_eq!(entries[1].ambient, Some([32.0, 33.0, 34.0]));
         assert_eq!(entries[2].ambient, None);
+    }
+
+    #[test]
+    fn retail_weapon_files_give_their_clip_sizes() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let defs = load_weapon_defs(&std::path::PathBuf::from(home).join("Games/MaxPayne1"));
+        if defs.is_empty() {
+            return;
+        }
+        assert_eq!(defs.len(), 17, "{:?}", defs.keys());
+        assert_eq!(defs["beretta"].clip_size, 18);
+        assert_eq!(defs["beretta"].pocket_size, 162);
+        assert_eq!(defs["mp5"].id, "WEAPONID_MP5");
+        assert_eq!(defs["painkiller"].pocket_size, 8);
     }
 
     #[test]
