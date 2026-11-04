@@ -2098,25 +2098,6 @@ pub fn world_sphere_export(catalog: &str, name: &str) -> Option<String> {
     prop_value(&body[..end], "ExportData")
 }
 
-/// First `*.tga` / `*.jpg` string embedded in a world-sphere `.kf2`.
-pub fn first_image_name(bytes: &[u8]) -> Option<String> {
-    let mut cur = Vec::new();
-    for &b in bytes {
-        if b.is_ascii_graphic() && b != b';' {
-            cur.push(b);
-        } else if !cur.is_empty() {
-            if let Ok(s) = std::str::from_utf8(&cur) {
-                let ext = s.to_ascii_lowercase();
-                if ext.ends_with(".tga") || ext.ends_with(".jpg") {
-                    return Some(s.to_string());
-                }
-            }
-            cur.clear();
-        }
-    }
-    None
-}
-
 fn prop_value(body: &str, key: &str) -> Option<String> {
     for line in body.lines() {
         let line = line.trim();
@@ -4188,8 +4169,6 @@ mod tests {
             world_sphere_export(catalog, "SUNSET").as_deref(),
             Some("bg_sunset.kf2")
         );
-        let kf2 = b"textures;..\\sharedtextures\0SkyboxDefault\0bg_sunset_all.tga\0";
-        assert_eq!(first_image_name(kf2).as_deref(), Some("bg_sunset_all.tga"));
     }
 
     #[test]

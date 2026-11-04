@@ -90,3 +90,19 @@ twice as fast.
 1. `tools/blender_io_kf2` — Blender 4.x addon (stub registered); import strings + bones first.
 2. Synthetic unit tests once chunk header layout is locked (no retail `.kf2` in git).
 3. Cross-check writer against `KFExport.dle` REA (local vendor only).
+
+## World spheres (`database/worldspheres/bg_*.kf2`)
+
+Static meshes in a packed variant of the chunks, checked on all 11 retail files. A count is `0x10` + `u16` or `0x11` + `u8`.
+
+| Chunk | Payload |
+|---|---|
+| `0x0001000f` | Search path, material count, one chunk per material: name, then bitmaps (colour, then opacity) |
+| `0x00010005` | One mesh, holding the five chunks below |
+| `0x00010000` | Name, parent, `0x1a` + 12 floats: three matrix columns, then position |
+| `0x00010006` | Count, positions (`f32` x3), then as many normals, packed with no tags |
+| `0x00010007` | Count of `u16` indices, a triangle list |
+| `0x0001000c` | Material count, material name |
+| `0x0001000e` | Channel, count, one `(u, v, w)` per vertex; `v` runs from −1 at the zenith to 0, wrapping |
+
+Every sphere has `Sphere01` (`SkyboxDefault`). The skyline spheres add `Cylinder01` (`SkyboxBuildings`) with a colour and an opacity bitmap. The root matrix turns and lowers each sphere, which is how `intro` differs from `docks`.

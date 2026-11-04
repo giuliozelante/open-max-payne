@@ -255,7 +255,7 @@ fn fullscreen_pipeline(
 }
 
 /// `paint_sky_strip` per pixel: the view direction through the pixel centre, then
-/// `sky_strip_uv`. Without a sphere, the flat two-tone background of the software path.
+/// `sky_uv`. Without a sphere, the flat two-tone background of the software path.
 const SKY_SHADER: &str = r#"
 struct Camera { pos: vec4f, right: vec4f, up: vec4f, fwd: vec4f, params: vec4f, params2: vec4f, fog: vec4f, fog_range: vec4f };
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -276,8 +276,7 @@ fn fs_sky(v: V) -> @location(0) vec4f {
     let cy = (h * 0.5 - v.uv.y * h) / fov;
     let d = normalize(cam.right.xyz * cx + cam.up.xyz * cy + cam.fwd.xyz);
     let u = fract(atan2(d.x, d.z) / 6.2831853 + 0.5);
-    let lat = max(asin(clamp(d.y, -1.0, 1.0)), 0.0);
-    let t = clamp(1.0 - lat / 1.5707963, 0.0, 0.999);
+    let t = clamp(0.5 - asin(clamp(d.y, -1.0, 1.0)) / 3.14159265, 0.0, 0.999);
     return textureSampleLevel(img, img_sampler, vec2f(u, t), 0.0);
 }
 "#;
@@ -1670,7 +1669,7 @@ impl GpuRenderer {
 }
 
 impl GpuRenderer {
-    /// The level's world sphere strip (`sky_strip_uv`), or `None` for the flat background.
+    /// The level's baked world sphere (`sky_uv`), or `None` for the flat background.
     pub fn set_sky(&mut self, sky: Option<&crate::scene::DecodedTexture>) {
         let view = sky.filter(|t| t.width > 0 && t.height > 0).map(|t| {
             upload(

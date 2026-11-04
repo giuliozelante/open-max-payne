@@ -1246,9 +1246,242 @@ pub fn parse_kf2_or_skd(data: &[u8]) -> Option<Kf2Summary> {
     }
 }
 
+/// One mesh of a world sphere (`bg_*.kf2`), in level axes around the eye.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SkyMesh {
+    pub vertices: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    /// Triangle list into `vertices` and `uvs`.
+    pub indices: Vec<usize>,
+    /// The material's bitmaps: colour, then the opacity map when it has one.
+    pub textures: Vec<String>,
+}
+
+/// Element count of a packed array: `0x10` then a `u16`, or `0x11` then a `u8`.
+fn read_count(data: &[u8], i: &mut usize) -> Option<usize> {
+    match *data.get(*i)? {
+        0x10 => {
+            let v = u16::from_le_bytes(data.get(*i + 1..*i + 3)?.try_into().ok()?);
+            *i += 3;
+            Some(v as usize)
+        }
+        0x11 => {
+            let v = *data.get(*i + 1)?;
+            *i += 2;
+            Some(v as usize)
+        }
+        _ => None,
+    }
+}
+
+fn read_f32s<const N: usize>(data: &[u8], at: usize) -> Option<[f32; N]> {
+    let mut out = [0.0; N];
+    for (k, v) in out.iter_mut().enumerate() {
+        let o = at + k * 4;
+        *v = f32::from_le_bytes(data.get(o..o + 4)?.try_into().ok()?);
+    }
+    Some(out)
+}
+
+/// Each `(id, payload range)` of the `0x0c` chunks in `start..end`.
+fn chunks(data: &[u8], start: usize, end: usize) -> Vec<(u32, usize, usize)> {
+    let mut out = Vec::new();
+    let mut at = start;
+    while at + 13 <= end && data[at] == 0x0c {
+        let id = u32::from_le_bytes([data[at + 1], data[at + 2], data[at + 3], data[at + 4]]);
+        let size = u32::from_le_bytes([data[at + 9], data[at + 10], data[at + 11], data[at + 12]])
+            as usize;
+        if size < 13 || at + size > end {
+            break;
+        }
+        out.push((id, at + 13, at + size));
+        at += size;
+    }
+    out
+}
+
+/// Name and bitmaps of each material in a `0x0001000f` chunk.
+fn sky_materials(data: &[u8], start: usize, end: usize) -> Option<BTreeMap<String, Vec<String>>> {
+    let mut at = start;
+    let _search_path = read_str(data, &mut at)?;
+    let _count = read_i32(data, &mut at)?;
+    let mut materials = BTreeMap::new();
+    for (_, mut p, stop) in chunks(data, at, end) {
+        let mut strings = Vec::new();
+        while p < stop {
+            if data[p] == 0x0d {
+                if let Some(s) = read_str(data, &mut p) {
+                    strings.push(s);
+                    continue;
+                }
+            }
+            p += 1;
+        }
+        let mut strings = strings.into_iter();
+        if let Some(name) = strings.next() {
+            let bitmaps = strings.filter(|s| {
+                let lower = s.to_ascii_lowercase();
+                lower.ends_with(".tga") || lower.ends_with(".jpg")
+            });
+            materials.insert(name, bitmaps.collect());
+        }
+    }
+    Some(materials)
+}
+
+/// The meshes of a world sphere. They use packed arrays, unlike character meshes: positions,
+/// then normals; `u16` triangle indices; one `(u, v, w)` per vertex.
+pub fn parse_world_sphere(data: &[u8]) -> Option<Vec<SkyMesh>> {
+    let mut materials = BTreeMap::new();
+    let mut meshes = Vec::new();
+    for (id, start, end) in chunks(data, 0, data.len()) {
+        if id == 0x0001_000f {
+            materials = sky_materials(data, start, end)?;
+        } else if id == 0x0001_0005 {
+            let mut mesh = SkyMesh::default();
+            let mut root = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+            for (sub, mut p, _) in chunks(data, start, end) {
+                match sub {
+                    0x0001_0000 => {
+                        let _name = read_str(data, &mut p)?;
+                        let _parent = read_str(data, &mut p)?;
+                        if *data.get(p)? != 0x1a {
+                            return None;
+                        }
+                        root = read_f32s::<12>(data, p + 1)?;
+                    }
+                    0x0001_0006 => {
+                        let count = read_count(data, &mut p)?;
+                        for k in 0..count {
+                            let [x, y, z] = read_f32s::<3>(data, p + k * 12)?;
+                            mesh.vertices.push([
+                                root[0] * x + root[3] * y + root[6] * z + root[9],
+                                root[1] * x + root[4] * y + root[7] * z + root[10],
+                                root[2] * x + root[5] * y + root[8] * z + root[11],
+                            ]);
+                        }
+                    }
+                    0x0001_0007 => {
+                        let count = read_count(data, &mut p)?;
+                        for k in 0..count {
+                            let bytes = data.get(p + k * 2..p + k * 2 + 2)?;
+                            mesh.indices
+                                .push(u16::from_le_bytes([bytes[0], bytes[1]]) as usize);
+                        }
+                    }
+                    0x0001_000c => {
+                        let _count = read_i32(data, &mut p)?;
+                        let name = read_str(data, &mut p)?;
+                        mesh.textures = materials.get(&name).cloned().unwrap_or_default();
+                    }
+                    0x0001_000e => {
+                        let _channel = read_count(data, &mut p)?;
+                        let count = read_count(data, &mut p)?;
+                        for k in 0..count {
+                            let [u, v] = read_f32s::<2>(data, p + k * 12)?;
+                            mesh.uvs.push([u, v]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let corners = mesh.vertices.len().min(mesh.uvs.len());
+            if mesh.indices.iter().any(|&index| index >= corners) {
+                return None;
+            }
+            meshes.push(mesh);
+        }
+    }
+    (!meshes.is_empty()).then_some(meshes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `0x0c`, id, version, size, payload.
+    fn chunk(id: u32, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x0c];
+        out.extend_from_slice(&id.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&(13 + payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn text(s: &str) -> Vec<u8> {
+        let mut out = vec![0x0d, 0x14, s.len() as u8];
+        out.extend_from_slice(s.as_bytes());
+        out
+    }
+
+    fn floats(values: &[f32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    /// One triangle with the given root matrix columns and position.
+    fn sky_file(root: [f32; 12]) -> Vec<u8> {
+        let mut material = text("SkyboxBuildings");
+        material.extend(text("bg_c.tga"));
+        material.extend(text("bg_a.tga"));
+        let mut materials = text("textures");
+        materials.extend([0x14, 1]);
+        materials.extend(chunk(0x0001_0010, &material));
+        let mut node = text("Cylinder01");
+        node.extend(text(""));
+        node.push(0x1a);
+        node.extend(floats(&root));
+        let mut points = vec![0x11, 3];
+        points.extend(floats(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]));
+        let mut faces = vec![0x11, 3];
+        faces.extend([2, 0, 0, 0, 1, 0]);
+        let mut slots = vec![0x14, 1];
+        slots.extend(text("SkyboxBuildings"));
+        let mut map = vec![0x11, 0, 0x11, 3];
+        map.extend(floats(&[0.25, -0.5, 0.0, 0.5, -0.25, 0.0, 0.75, -1.0, 0.0]));
+        let mut mesh = chunk(0x0001_0000, &node);
+        mesh.extend(chunk(0x0001_0006, &points));
+        mesh.extend(chunk(0x0001_0007, &faces));
+        mesh.extend(chunk(0x0001_000c, &slots));
+        mesh.extend(chunk(0x0001_000e, &map));
+        let mut file = chunk(0x0001_000f, &materials);
+        file.extend(chunk(0x0001_0005, &mesh));
+        file
+    }
+
+    #[test]
+    fn a_world_sphere_mesh_reads_its_triangles_uvs_and_bitmaps() {
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let meshes = parse_world_sphere(&sky_file(identity)).expect("sky");
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(
+            meshes[0].vertices,
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+        );
+        assert_eq!(meshes[0].indices, [2, 0, 1]);
+        assert_eq!(meshes[0].uvs, [[0.25, -0.5], [0.5, -0.25], [0.75, -1.0]]);
+        assert_eq!(meshes[0].textures, ["bg_c.tga", "bg_a.tga"]);
+    }
+
+    #[test]
+    fn a_world_sphere_with_an_index_past_its_vertices_is_rejected() {
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let mut file = sky_file(identity);
+        let faces = [0x11, 3, 2, 0, 0, 0, 1, 0];
+        let at = file.windows(8).position(|w| w == faces).expect("faces");
+        file[at + 2] = 9;
+        assert_eq!(parse_world_sphere(&file), None);
+    }
+
+    #[test]
+    fn a_world_sphere_mesh_goes_through_its_root_transform() {
+        // Max's z up becomes y up, as in `bg_coldsteel.kf2`, then the root moves it down.
+        let root = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, -10.0, 0.0,
+        ];
+        let meshes = parse_world_sphere(&sky_file(root)).expect("sky");
+        assert_eq!(meshes[0].vertices[0], [1.0, -13.0, 2.0]);
+    }
 
     #[test]
     fn skin_lod_reads_the_geometry_line() {
