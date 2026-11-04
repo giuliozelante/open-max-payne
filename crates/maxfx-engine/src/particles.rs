@@ -113,9 +113,9 @@ impl ParticleField {
                 let gravity = self.gravity.map(|g| g * emitter.particle.gravity);
                 let list = &mut run.particles[k];
                 for p in list.iter_mut() {
-                    for c in 0..3 {
-                        p.vel[c] += gravity[c] * dt;
-                        p.pos[c] += p.vel[c] * dt;
+                    for ((pos, vel), g) in p.pos.iter_mut().zip(&mut p.vel).zip(gravity) {
+                        *vel += g * dt;
+                        *pos += *vel * dt;
                     }
                     p.age += dt;
                 }
@@ -479,8 +479,10 @@ mod tests {
         // the editor's gravity "does not affect the gravity setting used in the game".
         let mut def = effect(10.0, 5.0, 0.5);
         def.emitters[0].emission.velocity = flat(2, &[0.0, 0.0]);
-        let mut field = ParticleField::default();
-        field.gravity = [0.0, -20.0, 0.0];
+        let mut field = ParticleField {
+            gravity: [0.0, -20.0, 0.0],
+            ..Default::default()
+        };
         field.start("e".into(), "k".into(), std::sync::Arc::new(def), false);
         field.step(0.1, at_origin);
         field.stop("e");
