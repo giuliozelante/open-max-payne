@@ -232,6 +232,9 @@ pub struct DoAnimState {
 #[derive(Debug, Clone)]
 pub struct SceneDynamicMesh {
     pub name: String,
+    /// Parent DO from the mesh record. It can skip a path segment: `::Y::X::ALTITUDE.DO` hangs
+    /// from `::Y.DO`, because `X` is an FSM with no mesh.
+    pub parent: String,
     pub room_id: i32,
     pub world_mat: [f32; 9],
     pub world_pos: [f32; 3],
@@ -877,8 +880,10 @@ impl LdbScene {
     pub fn dynamic_world_pose(&self, index: usize) -> ([f32; 9], [f32; 3]) {
         let mesh = &self.dynamic_meshes[index];
         let own = mesh.posed_local();
-        let Some(pi) = parent_name(&mesh.name)
-            .and_then(|p| self.dynamic_meshes.iter().position(|m| m.name == p))
+        let Some(pi) = self
+            .dynamic_meshes
+            .iter()
+            .position(|m| m.name == mesh.parent)
         else {
             return own;
         };
@@ -2637,11 +2642,11 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     read_i32(data, &mut i)?;
                     read_vec3_tag(data, &mut i)?;
                 }
-                let _parent = read_str(data, &mut i)?;
+                let _unk_s = read_str(data, &mut i)?;
                 let (world_mat, world_pos) = read_xform(data, &mut i)?;
                 let _x2 = read_xform_pos(data, &mut i)?;
                 let room_id = read_i32(data, &mut i)?;
-                let _unk_s = read_str(data, &mut i)?;
+                let parent = read_str(data, &mut i)?;
                 let anim_cnt = read_i32(data, &mut i)? as usize;
                 let mut anims = Vec::with_capacity(anim_cnt);
                 for _ in 0..anim_cnt {
@@ -2686,6 +2691,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                 }
                 dynamic_meshes.push(SceneDynamicMesh {
                     name,
+                    parent,
                     room_id,
                     world_mat,
                     world_pos,
@@ -3346,6 +3352,7 @@ mod tests {
     fn door_mesh(anims: Vec<SceneDynamicAnim>) -> SceneDynamicMesh {
         SceneDynamicMesh {
             name: "::startroom::door.DO".into(),
+            parent: String::new(),
             room_id: 1,
             world_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             world_pos: [1.0, 0.0, 2.0],
@@ -3512,6 +3519,7 @@ mod tests {
         parent.world_pos = [0.0; 3];
         let mut child = door_mesh(Vec::new());
         child.name = "::room::hinge::panel.DO".into();
+        child.parent = "::room::hinge.DO".into();
         child.local_start_pos = [1.0, 0.0, 0.0];
         child.world_pos = [1.0, 0.0, 0.0];
         scene.dynamic_meshes.push(parent);
@@ -3522,6 +3530,40 @@ mod tests {
         // Parent end pose maps x to -z, so the panel swings from +x to -z.
         assert_eq!(pos, [0.0, 0.0, -1.0]);
         assert_eq!(&mat[0..3], &[0.0, 0.0, -1.0]);
+    }
+
+    /// A hinge at the origin, opened by a quarter turn, and a mesh 1 m along its x axis.
+    fn opened_hinge_with(child_name: &str, child_parent: &str) -> LdbScene {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        let mut hinge = door_mesh(vec![track("open", [0.0; 3])]);
+        hinge.name = "::room::hinge.DO".into();
+        hinge.world_pos = [0.0; 3];
+        let mut child = door_mesh(Vec::new());
+        child.name = child_name.into();
+        child.parent = child_parent.into();
+        child.local_start_pos = [1.0, 0.0, 0.0];
+        child.world_pos = [1.0, 0.0, 0.0];
+        scene.dynamic_meshes.push(hinge);
+        scene.dynamic_meshes.push(child);
+        scene.dynamic_meshes[0].play_track("open");
+        scene.dynamic_meshes[0].track_time = 1.3;
+        scene
+    }
+
+    #[test]
+    fn a_mesh_follows_its_record_parent_past_a_path_segment_without_a_mesh() {
+        // `::Y::X::ALTITUDE.DO` hangs from `::Y.DO`: `X` is an FSM, so the path has no mesh there.
+        let scene = opened_hinge_with("::room::hinge::fsm::panel.DO", "::room::hinge.DO");
+        let (_, pos) = scene.dynamic_world_pose(1);
+        assert!(dist3(pos, [0.0, 0.0, -1.0]) < 1e-5, "{pos:?}");
+    }
+
+    #[test]
+    fn a_mesh_with_an_empty_record_parent_ignores_a_mesh_on_its_path() {
+        // `::08::…::mine08::d_laser.DO`: the record has no parent and its rest pose is world.
+        let scene = opened_hinge_with("::room::hinge::panel.DO", "");
+        let (_, pos) = scene.dynamic_world_pose(1);
+        assert_eq!(pos, [1.0, 0.0, 0.0]);
     }
 
     #[test]

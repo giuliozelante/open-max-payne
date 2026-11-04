@@ -3937,6 +3937,7 @@ mod tests {
         };
         scene.dynamic_meshes.push(SceneDynamicMesh {
             name: "StartRoom::door".into(),
+            parent: String::new(),
             room_id: 1,
             world_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             world_pos: [0.0; 3],
@@ -4296,6 +4297,7 @@ mod tests {
     pub(super) fn glass_quad(hidden: bool) -> SceneDynamicMesh {
         SceneDynamicMesh {
             name: "::Bathroom::glass01.DO".into(),
+            parent: String::new(),
             room_id: 0,
             world_mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             world_pos: [0.0; 3],
