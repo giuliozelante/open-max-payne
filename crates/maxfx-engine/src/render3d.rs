@@ -294,6 +294,7 @@ pub fn run_3d_walkthrough(
         .unwrap_or(RETAIL_RIG);
     // The mesh the player last ran into: `DO_CharacterCollides` fires once per contact.
     let mut last_contact = None;
+    let mut decals = crate::decals::DecalField::load(&game_root);
     let mut mouse_fire_held = false;
     let mut slow_motion = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt")
         .and_then(|bytes| {
@@ -561,10 +562,20 @@ pub fn run_3d_walkthrough(
                     }
                 }
             }
+            let level_hit = aim_hit_level(&scene, aim_from, aim_dir);
             let mesh_hit = aim_hit_dynamic(&scene, &room_origins, aim_from, aim_dir)
-                .filter(|(_, t)| segment_hit(&scene, aim_from, aim_dir.map(|c| c * t)).is_none());
+                .filter(|hit| level_hit.is_none_or(|level| hit.1 < level.0));
+            let category = |scene: &LdbScene, id: i32| {
+                let material = scene.materials.get(&id);
+                material.map_or(String::new(), |m| m.category.clone())
+            };
+            let at = |t: f32| [0, 1, 2].map(|c| aim_from[c] + aim_dir[c] * t);
             match (mesh_hit, best_hit) {
-                (Some((midx, mt)), enemy) if enemy.is_none_or(|(_, et)| mt < et) => {
+                (Some((midx, mt, normal, material)), enemy)
+                    if enemy.is_none_or(|(_, et)| mt < et) =>
+                {
+                    let kind = category(&scene, material);
+                    decals.add(&kind, at(mt), normal, aim_dir, Some(midx));
                     let scripted = scene.bullet_hits(midx);
                     println!(
                         "  3D Engine: shot hit {} at {mt:.1} m (scripted: {scripted})",
@@ -598,7 +609,12 @@ pub fn run_3d_walkthrough(
                         en.health.max(0)
                     );
                 }
-                _ => {}
+                _ => {
+                    if let Some((t, normal, material)) = level_hit {
+                        let kind = category(&scene, material);
+                        decals.add(&kind, at(t), normal, aim_dir, None);
+                    }
+                }
             }
         }
 
@@ -655,7 +671,10 @@ pub fn run_3d_walkthrough(
         );
         particle_lights.step(base_dt);
         particle_sprites.step(&scene, &room_origins, base_dt);
-        let sprites = particle_sprites.sprites();
+        let mut sprites = particle_sprites.sprites();
+        sprites.extend(
+            decals.sprites(|mesh| scene.dynamic_meshes.get(mesh).is_none_or(|dm| dm.hidden)),
+        );
         let frame_lights: Vec<ScenePointLight> = world_lights
             .iter()
             .cloned()
@@ -899,7 +918,11 @@ pub fn run_3d_walkthrough(
                 fov_scale,
                 scene.fog,
                 &sprites,
-                |key| particle_sprites.texture(key),
+                |key| {
+                    particle_sprites
+                        .texture(key)
+                        .or_else(|| decals.texture(key))
+                },
             );
         }
 
@@ -939,7 +962,11 @@ pub fn run_3d_walkthrough(
         }
 
         if let (Some((renderer, _)), Some(view)) = (gpu.as_mut(), scene_view) {
-            renderer.set_sprites(&sprites, view, |key| particle_sprites.texture(key));
+            renderer.set_sprites(&sprites, view, |key| {
+                particle_sprites
+                    .texture(key)
+                    .or_else(|| decals.texture(key))
+            });
         }
         match gpu.as_mut() {
             Some((renderer, surface)) => renderer.present(
@@ -1378,7 +1405,12 @@ fn blocks_camera(scene: &LdbScene, material_id: i32) -> bool {
 
 /// Smallest `t` in `0..=1` where `from + t * d` crosses a static polygon.
 fn segment_hit(scene: &LdbScene, from: [f32; 3], d: [f32; 3]) -> Option<f32> {
-    let mut best: Option<f32> = None;
+    segment_surface(scene, from, d).map(|hit| hit.0)
+}
+
+/// First camera-blocking polygon along the segment: its `t` in 0..1, normal and material.
+fn segment_surface(scene: &LdbScene, from: [f32; 3], d: [f32; 3]) -> Option<(f32, [f32; 3], i32)> {
+    let mut best: Option<(f32, [f32; 3], i32)> = None;
     for sm in &scene.static_meshes {
         let o = sm.world_origin;
         for poly in sm
@@ -1393,12 +1425,12 @@ fn segment_hit(scene: &LdbScene, from: [f32; 3], d: [f32; 3]) -> Option<f32> {
             }
             let world = poly_world(&poly.vertices, o);
             let t = dot3(n, sub3(world[0], from)) / denom;
-            if !(0.0..=1.0).contains(&t) || best.is_some_and(|b| t >= b) {
+            if !(0.0..=1.0).contains(&t) || best.is_some_and(|b| t >= b.0) {
                 continue;
             }
             let hit = [from[0] + d[0] * t, from[1] + d[1] * t, from[2] + d[2] * t];
             if inside_convex(&world, n, hit) {
-                best = Some(t);
+                best = Some((t, n, poly.material_id));
             }
         }
     }
@@ -1471,14 +1503,27 @@ fn ray_hits_character(origin: [f32; 3], dir: [f32; 3], feet: [f32; 3]) -> Option
     (t > 0.0 && inside && (0.0..=ENEMY_HEIGHT).contains(&height)).then_some(t)
 }
 
+/// `shooting.h` `CROSSHAIR_CASTLENGTH`.
+const SHOT_RANGE: f32 = 100.0;
+
+/// Where a shot stops on the level: distance, polygon normal and material.
+fn aim_hit_level(
+    scene: &LdbScene,
+    origin: [f32; 3],
+    dir: [f32; 3],
+) -> Option<(f32, [f32; 3], i32)> {
+    let hit = segment_surface(scene, origin, dir.map(|c| c * SHOT_RANGE))?;
+    Some((hit.0 * SHOT_RANGE, hit.1, hit.2))
+}
+
 /// Closest dynamic mesh that bullets affect and whose polygons the ray crosses.
 fn aim_hit_dynamic(
     scene: &LdbScene,
     rooms: &BTreeMap<i32, [f32; 3]>,
     origin: [f32; 3],
     dir: [f32; 3],
-) -> Option<(usize, f32)> {
-    let mut best: Option<(usize, f32)> = None;
+) -> Option<(usize, f32, [f32; 3], i32)> {
+    let mut best: Option<(usize, f32, [f32; 3], i32)> = None;
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
         let shootable = dm.hitpoints.is_some() || scene.reacts_to_bullets(idx);
         if dm.hidden || !shootable || dm.polys.is_empty() {
@@ -1497,11 +1542,11 @@ fn aim_hit_dynamic(
                 continue;
             }
             let t = dot3(n, sub3(world[0], origin)) / along;
-            if !(0.2..=100.0).contains(&t) || best.is_some_and(|(_, b)| t >= b) {
+            if !(0.2..=SHOT_RANGE).contains(&t) || best.is_some_and(|hit| t >= hit.1) {
                 continue;
             }
             if inside_convex(&world, n, [0, 1, 2].map(|c| origin[c] + dir[c] * t)) {
-                best = Some((idx, t));
+                best = Some((idx, t, n, poly.material_id));
             }
         }
     }
@@ -2264,6 +2309,19 @@ pub(crate) fn draw_sprites<'a>(
         let Some(tex) = texture(&sprite.texture) else {
             continue;
         };
+        if let Some(axes) = sprite.facing {
+            draw_world_quad(
+                fb,
+                zb,
+                (cam, right, up, fwd),
+                fov_scale,
+                sprite,
+                axes,
+                tex,
+                fog,
+            );
+            continue;
+        }
         let sx = W as f32 * 0.5 + dot3(d, right) * fov_scale / cz;
         let sy = H as f32 * 0.5 - dot3(d, up) * fov_scale / cz;
         let half = sprite.size * 0.5 * fov_scale / cz;
@@ -2301,6 +2359,94 @@ pub(crate) fn draw_sprites<'a>(
                         src * a + back * (1.0 - a)
                     };
                     (out.round().clamp(0.0, 255.0) as u32) << shift
+                };
+                fb[idx] = channel(16, 0) | channel(8, 1) | channel(0, 2);
+            }
+        }
+    }
+}
+
+/// A sprite fixed in the world, such as a decal: two triangles with affine texture coordinates,
+/// which is close enough at decal size.
+#[allow(clippy::too_many_arguments)]
+fn draw_world_quad(
+    fb: &mut [u32],
+    zb: &[f32],
+    (cam, right, up, fwd): View,
+    fov_scale: f32,
+    sprite: &crate::particles::Sprite,
+    [axis_x, axis_y]: [[f32; 3]; 2],
+    tex: &crate::scene::DecodedTexture,
+    fog: Option<LevelFog>,
+) {
+    let half = sprite.size * 0.5;
+    let corner = |a: f32, b: f32| {
+        let p = [0, 1, 2].map(|k| sprite.pos[k] + (axis_x[k] * a + axis_y[k] * b) * half);
+        let d = sub3(p, cam);
+        let cz = dot3(d, fwd);
+        (cz >= NEAR_Z).then(|| {
+            [
+                W as f32 * 0.5 + dot3(d, right) * fov_scale / cz,
+                H as f32 * 0.5 - dot3(d, up) * fov_scale / cz,
+                cz,
+            ]
+        })
+    };
+    let (Some(a), Some(b), Some(c), Some(d)) = (
+        corner(-1.0, 1.0),
+        corner(1.0, 1.0),
+        corner(1.0, -1.0),
+        corner(-1.0, -1.0),
+    ) else {
+        return;
+    };
+    let haze = fog.map_or(0.0, |fog| fog_amount(&fog, a[2]));
+    let fog_colour = fog.map_or([0.0; 3], |fog| fog.color);
+    for (p, uv) in [
+        ([a, b, c], [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]),
+        ([a, c, d], [[0.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+    ] {
+        let area =
+            (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+        if area.abs() < 1e-3 {
+            continue;
+        }
+        let min = |k: usize| p.iter().map(|v| v[k]).fold(f32::MAX, f32::min);
+        let max = |k: usize| p.iter().map(|v| v[k]).fold(f32::MIN, f32::max);
+        let (x0, x1) = (
+            min(0).floor().max(0.0) as usize,
+            (max(0).ceil().max(0.0) as usize).min(W),
+        );
+        let (y0, y1) = (
+            min(1).floor().max(0.0) as usize,
+            (max(1).ceil().max(0.0) as usize).min(H),
+        );
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let w0 = ((p[1][0] - px) * (p[2][1] - py) - (p[2][0] - px) * (p[1][1] - py)) / area;
+                let w1 = ((p[2][0] - px) * (p[0][1] - py) - (p[0][0] - px) * (p[2][1] - py)) / area;
+                let w2 = 1.0 - w0 - w1;
+                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                    continue;
+                }
+                let idx = y * W + x;
+                if w0 * p[0][2] + w1 * p[1][2] + w2 * p[2][2] >= zb[idx] {
+                    continue;
+                }
+                let u = w0 * uv[0][0] + w1 * uv[1][0] + w2 * uv[2][0];
+                let v = w0 * uv[0][1] + w1 * uv[1][1] + w2 * uv[2][1];
+                let texel = sample_texture(tex, u, v);
+                let alpha = ((texel >> 24) as f32 / 255.0) * sprite.rgba[3];
+                let dst = fb[idx];
+                let channel = |shift: u32, k: usize| {
+                    let src = ((texel >> shift) & 0xff) as f32 * sprite.rgba[k];
+                    let src = src + (fog_colour[k] - src) * haze;
+                    let back = ((dst >> shift) & 0xff) as f32;
+                    ((src * alpha + back * (1.0 - alpha))
+                        .round()
+                        .clamp(0.0, 255.0) as u32)
+                        << shift
                 };
                 fb[idx] = channel(16, 0) | channel(8, 1) | channel(0, 2);
             }
@@ -4061,6 +4207,7 @@ mod tests {
                     sequence: 0,
                     frame: 0,
                 },
+                facing: None,
             };
             let (mut fb, mut zb) = (vec![0u32; W * H], vec![f32::INFINITY; W * H]);
             let view = test_view([0.0; 3], [0.0, 0.0, 1.0]);
@@ -4101,6 +4248,7 @@ mod tests {
             rgba,
             additive,
             texture: key.clone(),
+            facing: None,
         };
         let view = test_view([0.0; 3], [0.0, 0.0, 1.0]);
         let centre = (H / 2) * W + W / 2;
@@ -4317,6 +4465,94 @@ mod tests {
             ray_hits_character([0.0, 1.0, 0.0], dir, [0.0, 0.0, -10.0]),
             None
         );
+    }
+
+    fn wall_scene() -> LdbScene {
+        let mut scene = empty_scene();
+        let v = |x: f32, y: f32| SceneVertex {
+            pos: [x, y, 5.0],
+            uv: [0.0; 2],
+            luv: [0.0; 2],
+        };
+        scene.static_meshes.push(crate::scene::SceneStaticMesh {
+            mesh_id: 0,
+            room_id: None,
+            world_origin: [0.0; 3],
+            polys: vec![ScenePoly {
+                vertices: vec![v(-5.0, -5.0), v(5.0, -5.0), v(5.0, 5.0), v(-5.0, 5.0)],
+                normal: [0.0, 0.0, -1.0],
+                material_id: 7,
+                lightmap_id: -1,
+            }],
+        });
+        scene
+    }
+
+    #[test]
+    fn a_shot_reports_the_wall_it_stops_at() {
+        let hit = aim_hit_level(&wall_scene(), [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+        let (t, normal, material) = hit.expect("wall");
+        assert!((t - 5.0).abs() < 1e-3);
+        assert_eq!(normal, [0.0, 0.0, -1.0]);
+        assert_eq!(material, 7);
+    }
+
+    #[test]
+    fn a_shot_into_the_open_stops_at_nothing() {
+        assert_eq!(
+            aim_hit_level(&wall_scene(), [0.0; 3], [0.0, 0.0, -1.0]),
+            None
+        );
+    }
+
+    fn quad_sprite(facing: [[f32; 3]; 2]) -> crate::particles::Sprite {
+        crate::particles::Sprite {
+            pos: [0.0, 0.0, 5.0],
+            size: 2.0,
+            rgba: [1.0; 4],
+            additive: false,
+            texture: crate::particles::SpriteTexture {
+                effect: "k".into(),
+                emitter: 0,
+                sequence: 0,
+                frame: 0,
+            },
+            facing: Some(facing),
+        }
+    }
+
+    fn drawn_quad(facing: [[f32; 3]; 2]) -> Vec<u32> {
+        let white = crate::scene::DecodedTexture {
+            path: String::new(),
+            flag: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![0xffff_ffff],
+        };
+        let (mut fb, mut zb) = (vec![0u32; W * H], vec![f32::INFINITY; W * H]);
+        draw_sprites(
+            &mut fb,
+            &mut zb,
+            test_view([0.0; 3], [0.0, 0.0, 1.0]),
+            fov_scale(1.0),
+            None,
+            &[quad_sprite(facing)],
+            |_| Some(&white),
+        );
+        fb
+    }
+
+    #[test]
+    fn a_decal_facing_the_view_covers_its_square() {
+        let fb = drawn_quad([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        assert_eq!(fb[(H / 2) * W + W / 2 + 40], 0x00ff_ffff);
+    }
+
+    #[test]
+    fn a_decal_seen_edge_on_covers_almost_nothing() {
+        // A camera-facing square would cover these pixels.
+        let fb = drawn_quad([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0]]);
+        assert_eq!(fb[(H / 2) * W + W / 2 + 40], 0);
     }
 
     #[test]
