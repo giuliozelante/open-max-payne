@@ -2708,6 +2708,25 @@ pub fn particle_effect_file(particles_txt: &str, effect: &str) -> Option<(String
     ))
 }
 
+/// The model a weapon file names (`WeaponDef::model`) with its bitmaps.
+pub fn load_weapon_model(game_dir: &Path, model: &str) -> Option<kf2::KfsMesh> {
+    const DIR: &str = r"\data\database\weapons\";
+    let mut source = GameSource::open(game_dir);
+    let parts = kf2::parse_world_sphere(&source.read(&format!("{DIR}{model}"))?)?;
+    let (folder, _) = model.rsplit_once('\\')?;
+    Some(kf2::mesh_from_parts(model, &parts, |file| {
+        let bytes = source.read(&format!(r"{DIR}{folder}\textures\{file}"))?;
+        let (width, height, pixels) = scene::decode_texture_blob(&bytes)?;
+        Some(scene::DecodedTexture {
+            path: file.to_string(),
+            flag: 4,
+            width,
+            height,
+            pixels,
+        })
+    }))
+}
+
 /// `Filename`s of `block`'s `[Material]` named `material`, or of its `[Default]` when it has none.
 pub fn material_files(text: &str, block: &str, material: &str) -> Vec<String> {
     let header = format!("[{}]", block.trim());
@@ -4149,6 +4168,25 @@ mod tests {
             ))
         );
         assert_eq!(particle_effect_file(text, "missing"), None);
+    }
+
+    #[test]
+    fn retail_weapon_models_load_with_their_bitmaps() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        let defs = load_weapon_defs(&game);
+        if defs.is_empty() {
+            return;
+        }
+        let model = defs["beretta"].model.as_deref().expect("model");
+        let mesh = load_weapon_model(&game, model).expect("beretta");
+        assert_eq!(mesh.material_textures.len(), 3);
+        assert!(mesh.material_textures.iter().all(Option::is_some));
+        // `ProjectileOffset = (0, 0.06, 0)`: the barrel runs along +z, above the grip's pivot.
+        let barrel = mesh.vertices.iter().map(|v| v[2]).fold(f32::MIN, f32::max);
+        assert!((0.1..0.4).contains(&barrel), "front {barrel}");
     }
 
     #[test]

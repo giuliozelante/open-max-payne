@@ -1257,6 +1257,45 @@ pub struct SkyMesh {
     pub textures: Vec<String>,
 }
 
+/// One mesh from the parts of a weapon's `.kf2`, a material per part.
+pub fn mesh_from_parts(
+    name: &str,
+    parts: &[SkyMesh],
+    mut resolve: impl FnMut(&str) -> Option<DecodedTexture>,
+) -> KfsMesh {
+    let mut mesh = KfsMesh {
+        name: name.to_string(),
+        vertices: Vec::new(),
+        faces: Vec::new(),
+        material_textures: Vec::new(),
+    };
+    for (mat_index, part) in parts.iter().enumerate() {
+        let base = mesh.vertices.len();
+        mesh.vertices.extend(&part.vertices);
+        mesh.faces
+            .extend(part.indices.chunks_exact(3).map(|tri| KfsFace {
+                indices: [base + tri[0], base + tri[1], base + tri[2]],
+                uvs: [part.uvs[tri[0]], part.uvs[tri[1]], part.uvs[tri[2]]],
+                mat_index,
+            }));
+        let texture = part.textures.first().and_then(|file| resolve(file));
+        mesh.material_textures.push(texture);
+    }
+    mesh
+}
+
+/// `verts` carried by `bone` of `anim` at `time_s`, in character space.
+pub fn bone_verts(
+    verts: &[[f32; 3]],
+    anim: &Kf2Anim,
+    bone: &str,
+    time_s: f32,
+) -> Option<Vec<[f32; 3]>> {
+    let world = compose_world(anim, &sample_locals(anim, time_s));
+    let (mat, pos) = *world.get(&bone.to_ascii_lowercase())?;
+    Some(verts.iter().map(|v| xform(mat, pos, *v)).collect())
+}
+
 /// Element count of a packed array: `0x10` then a `u16`, or `0x11` then a `u8`.
 fn read_count(data: &[u8], i: &mut usize) -> Option<usize> {
     match *data.get(*i)? {
@@ -1334,17 +1373,20 @@ fn sky_materials(data: &[u8], start: usize, end: usize) -> Option<BTreeMap<Strin
 pub fn parse_world_sphere(data: &[u8]) -> Option<Vec<SkyMesh>> {
     let mut materials = BTreeMap::new();
     let mut meshes = Vec::new();
+    // Name, parent and root transform of each mesh.
+    let mut nodes: Vec<(String, String, [f32; 12])> = Vec::new();
     for (id, start, end) in chunks(data, 0, data.len()) {
         if id == 0x0001_000f {
             materials = sky_materials(data, start, end)?;
         } else if id == 0x0001_0005 {
             let mut mesh = SkyMesh::default();
+            let mut node = (String::new(), String::new());
             let mut root = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
             for (sub, mut p, _) in chunks(data, start, end) {
                 match sub {
                     0x0001_0000 => {
-                        let _name = read_str(data, &mut p)?;
-                        let _parent = read_str(data, &mut p)?;
+                        node.0 = read_str(data, &mut p)?;
+                        node.1 = read_str(data, &mut p)?;
                         if *data.get(p)? != 0x1a {
                             return None;
                         }
@@ -1389,7 +1431,22 @@ pub fn parse_world_sphere(data: &[u8]) -> Option<Vec<SkyMesh>> {
             if mesh.indices.iter().any(|&index| index >= corners) {
                 return None;
             }
+            nodes.push((node.0, node.1, root));
             meshes.push(mesh);
+        }
+    }
+    // Parts of a weapon are local to their parent; a sky's meshes have none.
+    for (index, mesh) in meshes.iter_mut().enumerate() {
+        let mut parent = &nodes[index].1;
+        while let Some((_, grandparent, m)) = nodes.iter().find(|node| node.0 == *parent) {
+            for [x, y, z] in &mut mesh.vertices {
+                [*x, *y, *z] = [
+                    m[0] * *x + m[3] * *y + m[6] * *z + m[9],
+                    m[1] * *x + m[4] * *y + m[7] * *z + m[10],
+                    m[2] * *x + m[5] * *y + m[8] * *z + m[11],
+                ];
+            }
+            parent = grandparent;
         }
     }
     (!meshes.is_empty()).then_some(meshes)
@@ -1421,14 +1478,18 @@ mod tests {
 
     /// One triangle with the given root matrix columns and position.
     fn sky_file(root: [f32; 12]) -> Vec<u8> {
+        sky_file_named(root, "Cylinder01", "")
+    }
+
+    fn sky_file_named(root: [f32; 12], name: &str, parent: &str) -> Vec<u8> {
         let mut material = text("SkyboxBuildings");
         material.extend(text("bg_c.tga"));
         material.extend(text("bg_a.tga"));
         let mut materials = text("textures");
         materials.extend([0x14, 1]);
         materials.extend(chunk(0x0001_0010, &material));
-        let mut node = text("Cylinder01");
-        node.extend(text(""));
+        let mut node = text(name);
+        node.extend(text(parent));
         node.push(0x1a);
         node.extend(floats(&root));
         let mut points = vec![0x11, 3];
@@ -1481,6 +1542,69 @@ mod tests {
         ];
         let meshes = parse_world_sphere(&sky_file(root)).expect("sky");
         assert_eq!(meshes[0].vertices[0], [1.0, -13.0, 2.0]);
+    }
+
+    #[test]
+    fn a_child_mesh_goes_through_its_parents_transform() {
+        // `beretta_lod0.kf2`: `Breach` under `Beretta`, whose root turns Max's z up into y up.
+        let turn = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0];
+        let shift = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 5.0];
+        let mut file = sky_file_named(turn, "Beretta", "");
+        file.extend(sky_file_named(shift, "Breach", "Beretta"));
+        let meshes = parse_world_sphere(&file).expect("parts");
+        // sky_file's first vertex (1, 2, 3), up 5 in z, then turned.
+        assert_eq!(meshes[1].vertices[0], [1.0, -8.0, 2.0]);
+    }
+
+    #[test]
+    fn parts_become_one_mesh_with_a_material_each() {
+        let part = |x: f32, texture: &str| SkyMesh {
+            vertices: vec![[x, 0.0, 0.0], [x, 1.0, 0.0], [x, 0.0, 1.0]],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2],
+            textures: vec![texture.to_string()],
+        };
+        let mesh = mesh_from_parts("gun", &[part(1.0, "a.jpg"), part(2.0, "b.jpg")], |file| {
+            (file == "b.jpg").then(|| DecodedTexture {
+                path: file.to_string(),
+                flag: 4,
+                width: 1,
+                height: 1,
+                pixels: vec![0],
+            })
+        });
+        assert_eq!(mesh.vertices.len(), 6);
+        assert_eq!(mesh.faces[1].indices, [3, 4, 5]);
+        assert_eq!(mesh.faces[1].mat_index, 1);
+        assert_eq!(mesh.faces[1].uvs[1], [1.0, 0.0]);
+        assert!(mesh.material_textures[0].is_none());
+        assert!(mesh.material_textures[1].is_some());
+    }
+
+    #[test]
+    fn bone_verts_carry_a_mesh_on_the_named_bone() {
+        let bone = |name: &str, parent: Option<&str>, pos: [f32; 3]| AnimBone {
+            name: name.to_string(),
+            parent: parent.map(str::to_string),
+            fps: 1.0,
+            duration: 1,
+            keys: vec![AnimKeyframe {
+                frame: 0,
+                mat: identity_mat(),
+                pos,
+            }],
+        };
+        let anim = Kf2Anim {
+            bones: vec![
+                bone("Hand-R", None, [1.0, 0.0, 0.0]),
+                bone("Gun", Some("Hand-R"), [0.0, 2.0, 0.0]),
+            ],
+        };
+        assert_eq!(
+            bone_verts(&[[0.0, 0.0, 3.0]], &anim, "gun", 0.0),
+            Some(vec![[1.0, 2.0, 3.0]])
+        );
+        assert_eq!(bone_verts(&[[0.0; 3]], &anim, "missing", 0.0), None);
     }
 
     #[test]

@@ -106,3 +106,10 @@ Static meshes in a packed variant of the chunks, checked on all 11 retail files.
 | `0x0001000e` | Channel, count, one `(u, v, w)` per vertex; `v` runs from −1 at the zenith to 0, wrapping |
 
 Every sphere has `Sphere01` (`SkyboxDefault`). The skyline spheres add `Cylinder01` (`SkyboxBuildings`) with a colour and an opacity bitmap. The root matrix turns and lowers each sphere, which is how `intro` differs from `docks`.
+
+## Weapon models
+
+A weapon's `*_Lod0.kf2` uses the packed mesh layout of world spheres. Its meshes are a hierarchy: `Beretta` is the root and
+turns Max's z up into y up, and `Breach` and `Barrel` sit under it with local transforms (`0x00010000` stores name, parent
+and root). VERIFIED by plotting the Beretta on the `Gun` bone of `Stand.kf2` and `idle_aim_beretta.kf2`: the grip sits in
+the hand and the barrel points along the arm. `beretta_shoot.kf2` animates `Breach`, which the engine does not play yet.

@@ -286,6 +286,15 @@ pub fn run_3d_walkthrough(
     let mut particle_lights = ParticleLights::default();
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
+    let weapon_models: BTreeMap<String, crate::kf2::KfsMesh> = scene
+        .inventory
+        .defs
+        .iter()
+        .filter_map(|(name, def)| {
+            let model = crate::load_weapon_model(&game_root, def.model.as_deref()?)?;
+            Some((name.clone(), model))
+        })
+        .collect();
     scene.inventory.best_weapons = crate::load_best_weapons(&game_root);
     scene.apply_startup_player_scripts();
     let hud_assets = crate::hud::HudAssets::load(&game_root);
@@ -835,6 +844,35 @@ pub fn run_3d_walkthrough(
                     dead: false,
                     light,
                 });
+                let mesh_yaw = player_mesh_yaw(yaw);
+                if let Some((weapon, verts)) =
+                    held_weapon(&scene, &weapon_models).and_then(|weapon| {
+                        let verts = held_weapon_verts(
+                            prig,
+                            weapon,
+                            player_feet,
+                            mesh_yaw,
+                            time,
+                            player_moving,
+                        )?;
+                        Some((weapon, verts))
+                    })
+                {
+                    let light = character_vertex_light(
+                        weapon,
+                        &verts,
+                        player_feet,
+                        false,
+                        &frame_lights,
+                        scene.ambient,
+                    );
+                    characters.push(crate::gpu::GpuCharacter {
+                        mesh: weapon,
+                        verts,
+                        dead: false,
+                        light,
+                    });
+                }
             }
             scene_view = Some((cam_pos, cam_right, cam_up, cam_fwd));
         } else {
@@ -883,17 +921,15 @@ pub fn run_3d_walkthrough(
         let cpu_characters = gpu.is_none() || wireframe;
         for en in enemies.iter().filter(|_| cpu_characters) {
             if let Some(erig) = bodies.get(en.rig_index) {
+                let moving = en.walk_phase > 0.0;
+                let time = if moving { en.walk_phase } else { anim_clock };
+                let dead = en.health <= 0;
+                let verts = character_world_verts(erig, en.world_pos, en.yaw, time, moving, dead);
                 render_kfs_character(
-                    erig,
+                    &erig.mesh,
+                    &verts,
                     en.world_pos,
-                    en.yaw,
-                    if en.walk_phase > 0.0 {
-                        en.walk_phase
-                    } else {
-                        anim_clock
-                    },
-                    en.walk_phase > 0.0,
-                    en.health <= 0,
+                    dead,
                     en.hit_flash > 0.0,
                     &frame_lights,
                     scene.ambient,
@@ -912,29 +948,44 @@ pub fn run_3d_walkthrough(
         // 4. Render Player (`Payne_Max_L0.KFS`) in 3rd-person view
         if third_person && !fly_mode && cpu_characters {
             if let Some(ref prig) = player_rig {
-                render_kfs_character(
-                    prig,
-                    player_feet,
-                    player_mesh_yaw(yaw),
-                    if player_moving {
-                        walk_phase
-                    } else {
-                        anim_clock
-                    },
-                    player_moving,
-                    false,
-                    false,
-                    &frame_lights,
-                    scene.ambient,
-                    cam_pos,
-                    cam_right,
-                    cam_up,
-                    cam_fwd,
-                    fov_scale,
-                    wireframe,
-                    &mut fb,
-                    &mut zb,
-                );
+                let time = if player_moving {
+                    walk_phase
+                } else {
+                    anim_clock
+                };
+                let mesh_yaw = player_mesh_yaw(yaw);
+                let verts =
+                    character_world_verts(prig, player_feet, mesh_yaw, time, player_moving, false);
+                let weapon = held_weapon(&scene, &weapon_models).and_then(|weapon| {
+                    let held = held_weapon_verts(
+                        prig,
+                        weapon,
+                        player_feet,
+                        mesh_yaw,
+                        time,
+                        player_moving,
+                    )?;
+                    Some((weapon, held))
+                });
+                for (mesh, verts) in std::iter::once((&prig.mesh, verts)).chain(weapon) {
+                    render_kfs_character(
+                        mesh,
+                        &verts,
+                        player_feet,
+                        false,
+                        false,
+                        &frame_lights,
+                        scene.ambient,
+                        cam_pos,
+                        cam_right,
+                        cam_up,
+                        cam_fwd,
+                        fov_scale,
+                        wireframe,
+                        &mut fb,
+                        &mut zb,
+                    );
+                }
             }
         }
 
@@ -2772,6 +2823,45 @@ fn point_in_xz_tri(px: f32, pz: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> b
 }
 
 /// Character vertices posed (or laid flat when dead) and placed in the world.
+/// The model of the weapon the player holds.
+fn held_weapon<'a>(
+    scene: &LdbScene,
+    models: &'a BTreeMap<String, crate::kf2::KfsMesh>,
+) -> Option<&'a crate::kf2::KfsMesh> {
+    models.get(scene.inventory.current.as_ref()?)
+}
+
+fn character_clip(rig: &CharacterRig, moving: bool) -> Option<&crate::kf2::Kf2Anim> {
+    if moving {
+        rig.walk.as_ref().or(rig.idle.as_ref())
+    } else {
+        rig.idle.as_ref().or(rig.walk.as_ref())
+    }
+}
+
+/// `weapon` on the `Gun` bone of `rig`, in the world (`LeftHandGunBone` and `RightHandGunBone`
+/// name the bones of dual weapons).
+pub(crate) fn held_weapon_verts(
+    rig: &CharacterRig,
+    weapon: &crate::kf2::KfsMesh,
+    world_pos: [f32; 3],
+    yaw: f32,
+    anim_time: f32,
+    moving: bool,
+) -> Option<Vec<[f32; 3]>> {
+    let anim = character_clip(rig, moving)?;
+    let held = crate::kf2::bone_verts(&weapon.vertices, anim, "Gun", anim_time)?;
+    let (sy, cy) = yaw.sin_cos();
+    let place = |[x, y, z]: [f32; 3]| {
+        [
+            world_pos[0] + x * cy + z * sy,
+            world_pos[1] + y,
+            world_pos[2] - x * sy + z * cy,
+        ]
+    };
+    Some(held.into_iter().map(place).collect())
+}
+
 pub(crate) fn character_world_verts(
     rig: &CharacterRig,
     world_pos: [f32; 3],
@@ -2782,11 +2872,7 @@ pub(crate) fn character_world_verts(
 ) -> Vec<[f32; 3]> {
     let (sy, cy) = yaw.sin_cos();
     let mesh = &rig.mesh;
-    let anim = if moving {
-        rig.walk.as_ref().or(rig.idle.as_ref())
-    } else {
-        rig.idle.as_ref().or(rig.walk.as_ref())
-    };
+    let anim = character_clip(rig, moving);
     let posed = if dead {
         mesh.vertices.clone()
     } else {
@@ -2874,11 +2960,9 @@ pub(crate) fn character_vertex_light(
 
 #[allow(clippy::too_many_arguments)]
 fn render_kfs_character(
-    rig: &CharacterRig,
+    mesh: &crate::kf2::KfsMesh,
+    world: &[[f32; 3]],
     world_pos: [f32; 3],
-    yaw: f32,
-    anim_time: f32,
-    moving: bool,
     dead: bool,
     hit_flash: bool,
     lights: &[ScenePointLight],
@@ -2894,12 +2978,10 @@ fn render_kfs_character(
 ) {
     let half_w = W as f32 * 0.5;
     let half_h = H as f32 * 0.5;
-    let mesh = &rig.mesh;
-    let world = character_world_verts(rig, world_pos, yaw, anim_time, moving, dead);
 
     // Pre-transform character vertices into camera space
     let mut cam_pts = Vec::with_capacity(world.len());
-    for &[wx, wy, wz] in &world {
+    for &[wx, wy, wz] in world {
         let dx = wx - cam_pos[0];
         let dy = wy - cam_pos[1];
         let dz = wz - cam_pos[2];
@@ -2909,7 +2991,7 @@ fn render_kfs_character(
         cam_pts.push([cx, cy_c, cz]);
     }
 
-    let vertex_light = character_vertex_light(mesh, &world, world_pos, hit_flash, lights, ambient);
+    let vertex_light = character_vertex_light(mesh, world, world_pos, hit_flash, lights, ambient);
     let mut tris = Vec::new();
     for face in &mesh.faces {
         let [i0, i1, i2] = face.indices;
@@ -2922,7 +3004,7 @@ fn render_kfs_character(
         if c0[2] > FAR_Z && c1[2] > FAR_Z && c2[2] > FAR_Z {
             continue;
         }
-        let n = character_face_normal(&world, face.indices, dead);
+        let n = character_face_normal(world, face.indices, dead);
         if !wireframe && dot3(sub3(world[i0], cam_pos), n) >= 0.05 {
             continue;
         }
@@ -3710,12 +3792,11 @@ pub(crate) fn test_software_character(
 ) -> (Vec<u32>, Vec<f32>) {
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
+    let verts = character_world_verts(rig, pos, 0.0, 0.0, false, false);
     render_kfs_character(
-        rig,
+        &rig.mesh,
+        &verts,
         pos,
-        0.0,
-        0.0,
-        false,
         false,
         hit_flash,
         &[],
