@@ -391,3 +391,18 @@ which matches the retail frame. It had stayed 500 m away. The same chain break a
 
 Ruled out on the way: a backwards `C3`. The chopper starts along −z from it, and the camera's yaw at t = 20 agrees
 with the retail frame, so this does not undercut the particle z mirror in `2026-11-03-particle-emitters.md`.
+
+## `DO_CharacterCollides` as a trigger (2026-11-04)
+
+**VERIFIED (data, `Part0_Level1`):** `::entrance06::cin_trigger.DO` is an invisible `CharacterCollision_NoDraw` box across the
+upper flight of the stairs. Its FSM's `DO_CharacterCollides` event runs `do_enablecollisions(false)`, plays
+`smash_muffled` and starts `do_animate(delay)`. So levels use collision boxes as triggers that clear themselves.
+`cin_trigger2` works the same way.
+
+**Engine:** `LdbScene::character_collides` runs the event when the player runs into a mesh, once per contact.
+HYPOTHESIS: retail may send it on every contact, and to other characters too; neither is read.
+
+**Floor test:** `point_in_xz_tri` had its tolerance inverted, so points beside a triangle's edge were rejected. Slim
+floor triangles left strips with no floor, and the "never step into the void" rule stopped the player at the foot of the
+stairs. `find_floor_y` also accepted surfaces 1.15 m up; it now takes `STEP_UP`, the capsule radius 0.48 (HYPOTHESIS:
+retail moves a capsule with a round bottom and has no step value).

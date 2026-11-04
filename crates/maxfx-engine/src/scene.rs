@@ -1521,6 +1521,15 @@ impl LdbScene {
         self.dispatch_hook(&fsm_name, "DO_OnDeath")
     }
 
+    /// The player ran into mesh `index`: its `DO_CharacterCollides` event.
+    pub fn character_collides(&mut self, index: usize) -> bool {
+        let Some(mesh) = self.dynamic_meshes.get(index) else {
+            return false;
+        };
+        let fsm_name = strip_mesh_suffix(&mesh.name).to_string();
+        self.dispatch_hook(&fsm_name, "DO_CharacterCollides")
+    }
+
     fn dispatch_hook(&mut self, fsm_name: &str, hook_name: &str) -> bool {
         let Some(index) = self.fsm_index(fsm_name) else {
             return false;
@@ -4364,6 +4373,27 @@ mod tests {
         assert!(!scene.dynamic_meshes[0].collisions);
         assert!(scene.dispatch_message("", "::startroom::door.DO->DO_EnableCollisions(true);"));
         assert!(scene.dynamic_meshes[0].collisions);
+    }
+
+    #[test]
+    fn running_into_a_mesh_runs_its_character_collides_event() {
+        // `::entrance06::cin_trigger`: an invisible box that clears itself and starts a scare.
+        let mut scene = door_fsm_scene();
+        scene.fsms[0].hooks.push((
+            "DO_CharacterCollides".into(),
+            vec!["::startroom::door.DO->do_enablecollisions(false);".into()],
+            Vec::new(),
+        ));
+        assert!(scene.dynamic_meshes[0].collisions);
+        assert!(scene.character_collides(0));
+        assert!(!scene.dynamic_meshes[0].collisions);
+    }
+
+    #[test]
+    fn a_mesh_without_the_event_ignores_the_contact() {
+        let mut scene = door_fsm_scene();
+        assert!(!scene.character_collides(0));
+        assert!(!scene.character_collides(99));
     }
 
     #[test]
