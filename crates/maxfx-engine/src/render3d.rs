@@ -388,6 +388,9 @@ pub fn run_3d_walkthrough(
         // Interact (`E`): the action button trigger in reach
         if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+            if let Some((name, gap)) = scene.nearest_action_trigger(&room_origins, feet) {
+                println!("  3D Engine: use: {name} is {gap:.2} m out of reach");
+            }
             if scene.activate_nearest_trigger(&room_origins, feet) {
                 play_queued_sounds(
                     &mut scene,
@@ -552,19 +555,8 @@ pub fn run_3d_walkthrough(
                 if en.health <= 0 || en.invulnerable {
                     continue;
                 }
-                let center = [en.world_pos[0], en.world_pos[1] + 1.0, en.world_pos[2]];
-                let to_en = [
-                    center[0] - aim_from[0],
-                    center[1] - aim_from[1],
-                    center[2] - aim_from[2],
-                ];
-                let t = to_en[0] * aim_dir[0] + to_en[1] * aim_dir[1] + to_en[2] * aim_dir[2];
-                if (0.5..=65.0).contains(&t) {
-                    let cx = aim_from[0] + aim_dir[0] * t - center[0];
-                    let cy_d = (aim_from[1] + aim_dir[1] * t - center[1]) * 0.55;
-                    let cz = aim_from[2] + aim_dir[2] * t - center[2];
-                    let dist_sq = cx * cx + cy_d * cy_d + cz * cz;
-                    if dist_sq < 0.65 && best_hit.is_none_or(|(_, b)| t < b) {
+                if let Some(t) = ray_hits_character(aim_from, aim_dir, en.world_pos) {
+                    if t <= 100.0 && best_hit.is_none_or(|(_, b)| t < b) {
                         best_hit = Some((idx, t));
                     }
                 }
@@ -1458,7 +1450,28 @@ fn draw_dynamic_meshes(
     flush_tris(&tris, fb, zb, raster_threads());
 }
 
-/// Closest dynamic mesh that bullets affect and whose posed bounds meet the ray.
+/// `globalconfig.txt` `AICapsuleRadius` and `max_payne.txt` `CapsuleTop`.
+const ENEMY_RADIUS: f32 = 0.31;
+const ENEMY_HEIGHT: f32 = 1.95;
+
+/// Distance along the ray to a standing character whose feet are at `feet`.
+fn ray_hits_character(origin: [f32; 3], dir: [f32; 3], feet: [f32; 3]) -> Option<f32> {
+    let to = sub3(feet, origin);
+    let flat = dir[0] * dir[0] + dir[2] * dir[2];
+    if flat < 1e-8 {
+        return None;
+    }
+    let t = (to[0] * dir[0] + to[2] * dir[2]) / flat;
+    let (dx, dz) = (
+        origin[0] + dir[0] * t - feet[0],
+        origin[2] + dir[2] * t - feet[2],
+    );
+    let height = origin[1] + dir[1] * t - feet[1];
+    let inside = dx * dx + dz * dz <= ENEMY_RADIUS * ENEMY_RADIUS;
+    (t > 0.0 && inside && (0.0..=ENEMY_HEIGHT).contains(&height)).then_some(t)
+}
+
+/// Closest dynamic mesh that bullets affect and whose polygons the ray crosses.
 fn aim_hit_dynamic(
     scene: &LdbScene,
     rooms: &BTreeMap<i32, [f32; 3]>,
@@ -1472,55 +1485,27 @@ fn aim_hit_dynamic(
             continue;
         }
         let (mat, pos) = dynamic_world(scene, idx, rooms);
-        let mut min = [f32::INFINITY; 3];
-        let mut max = [f32::NEG_INFINITY; 3];
-        for poly in &dm.polys {
-            for v in &poly.vertices {
-                let p = xform_point(mat, pos, v.pos);
-                for axis in 0..3 {
-                    min[axis] = min[axis].min(p[axis]);
-                    max[axis] = max[axis].max(p[axis]);
-                }
+        for poly in dm.polys.iter().filter(|p| p.vertices.len() >= 3) {
+            let world: Vec<[f32; 3]> = poly
+                .vertices
+                .iter()
+                .map(|v| xform_point(mat, pos, v.pos))
+                .collect();
+            let n = xform_dir(mat, poly.normal);
+            let along = dot3(n, dir);
+            if along.abs() < 1e-6 {
+                continue;
             }
-        }
-        for axis in 0..3 {
-            min[axis] -= 0.2;
-            max[axis] += 0.2;
-        }
-        if let Some(t) = ray_slab(origin, dir, min, max) {
-            if (0.2..=40.0).contains(&t) && best.is_none_or(|(_, b)| t < b) {
+            let t = dot3(n, sub3(world[0], origin)) / along;
+            if !(0.2..=100.0).contains(&t) || best.is_some_and(|(_, b)| t >= b) {
+                continue;
+            }
+            if inside_convex(&world, n, [0, 1, 2].map(|c| origin[c] + dir[c] * t)) {
                 best = Some((idx, t));
             }
         }
     }
     best
-}
-
-fn ray_slab(origin: [f32; 3], dir: [f32; 3], min: [f32; 3], max: [f32; 3]) -> Option<f32> {
-    let mut tmin = 0.0f32;
-    let mut tmax = f32::INFINITY;
-    for i in 0..3 {
-        if dir[i].abs() < 1e-8 {
-            if origin[i] < min[i] || origin[i] > max[i] {
-                return None;
-            }
-            continue;
-        }
-        let inv = 1.0 / dir[i];
-        let (mut t1, mut t2) = ((min[i] - origin[i]) * inv, (max[i] - origin[i]) * inv);
-        if t1 > t2 {
-            std::mem::swap(&mut t1, &mut t2);
-        }
-        tmin = tmin.max(t1);
-        tmax = tmax.min(t2);
-        if tmin > tmax {
-            return None;
-        }
-    }
-    if tmax < 0.0 {
-        return None;
-    }
-    Some(if tmin >= 0.0 { tmin } else { tmax })
 }
 
 /// Sound voices, each tagged with its emitter. Dropping it stops them all (end of level).
@@ -4284,6 +4269,54 @@ mod tests {
     fn looking_up_and_down_stops_short_of_vertical() {
         assert_eq!(mouse_look(0.0, 1.2, (0.0, -1000.0)).1, 1.25);
         assert_eq!(mouse_look(0.0, -1.2, (0.0, 1000.0)).1, -1.25);
+    }
+
+    #[test]
+    fn a_shot_past_a_meshs_edge_misses_it() {
+        // The quad spans z -1..1: padded bounds counted a shot 0.1 m beyond its edge.
+        let mut scene = empty_scene();
+        let mut quad = glass_quad(false);
+        quad.hitpoints = Some(10);
+        scene.dynamic_meshes.push(quad);
+        let rooms = BTreeMap::new();
+        let dir = [1.0, 0.0, 0.0];
+        assert_eq!(
+            aim_hit_dynamic(&scene, &rooms, [-4.0, 1.0, 0.9], dir).map(|hit| hit.0),
+            Some(0)
+        );
+        assert_eq!(aim_hit_dynamic(&scene, &rooms, [-4.0, 1.0, 1.1], dir), None);
+    }
+
+    #[test]
+    fn a_shot_lands_on_the_surface_it_crosses() {
+        let mut scene = empty_scene();
+        let mut quad = glass_quad(false);
+        quad.hitpoints = Some(10);
+        scene.dynamic_meshes.push(quad);
+        let hit = aim_hit_dynamic(&scene, &BTreeMap::new(), [-4.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        assert!((hit.expect("hit").1 - 4.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_shot_hits_a_character_inside_the_capsule_radius_only() {
+        let dir = [0.0, 0.0, 1.0];
+        let feet = [0.0, 0.0, 10.0];
+        let hit = ray_hits_character([0.25, 1.0, 0.0], dir, feet);
+        assert!((hit.expect("hit") - 10.0).abs() < 0.1);
+        assert_eq!(ray_hits_character([0.4, 1.0, 0.0], dir, feet), None);
+    }
+
+    #[test]
+    fn a_shot_over_a_characters_head_or_behind_the_shooter_misses() {
+        let dir = [0.0, 0.0, 1.0];
+        assert_eq!(
+            ray_hits_character([0.0, 2.5, 0.0], dir, [0.0, 0.0, 10.0]),
+            None
+        );
+        assert_eq!(
+            ray_hits_character([0.0, 1.0, 0.0], dir, [0.0, 0.0, -10.0]),
+            None
+        );
     }
 
     #[test]

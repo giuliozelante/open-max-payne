@@ -1691,6 +1691,22 @@ impl LdbScene {
         (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - CAPSULE_RADIUS - trigger.radius
     }
 
+    /// The closest enabled action button and how far it is from reach (0 or less is in reach).
+    pub fn nearest_action_trigger(
+        &self,
+        room_origins: &BTreeMap<i32, [f32; 3]>,
+        feet: [f32; 3],
+    ) -> Option<(String, f32)> {
+        self.triggers
+            .iter()
+            .filter(|trigger| trigger.enabled && trigger.trigger_type == TRIGGER_ACTION_BUTTON)
+            .map(|trigger| {
+                let gap = Self::capsule_gap(trigger, room_origins, feet);
+                (trigger.name.clone(), gap)
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
     /// `E` within reach of an enabled action button trigger runs its `T_Activate` calls.
     pub fn activate_nearest_trigger(
         &mut self,
