@@ -4373,8 +4373,11 @@ mod tests {
             "beretta".into(),
             crate::hud::WeaponDef {
                 id: "WEAPONID_BERETTA".into(),
+                inventory_id: "INVENTORYID_BERETTA".into(),
                 clip_size: 18,
                 pocket_size: 162,
+                reload_seconds: 1.3,
+                reload_amount: -1,
             },
         );
         for message in [
@@ -4385,7 +4388,7 @@ mod tests {
         ] {
             assert!(scene.dispatch_message("", message), "{message}");
         }
-        let stock = scene.inventory.weapons["beretta"];
+        let stock = scene.inventory.stock("beretta").expect("beretta");
         assert_eq!((stock.clip, stock.pocket, stock.infinite), (18, 99, false));
     }
 
@@ -4397,7 +4400,7 @@ mod tests {
             .defs
             .insert("beretta".into(), Default::default());
         assert!(!scene.dispatch_message("", "::babys_room::e1->C_RemoveAllWeapons(beretta);"));
-        assert!(scene.inventory.weapons.is_empty());
+        assert!(scene.inventory.carried.is_empty());
     }
 
     #[test]

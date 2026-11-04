@@ -281,6 +281,7 @@ pub fn run_3d_walkthrough(
     let mut particle_lights = ParticleLights::default();
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
+    scene.inventory.best_weapons = crate::load_best_weapons(&game_root);
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
@@ -474,6 +475,8 @@ pub fn run_3d_walkthrough(
                 vel_y = 0.0;
             }
         }
+
+        scene.inventory.step(world_dt);
 
         // Shoot (`F` or `LeftCtrl` / `RightCtrl`)
         let fire_pressed = window.is_key_pressed(Key::F, KeyRepeat::No)

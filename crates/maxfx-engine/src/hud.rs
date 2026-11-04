@@ -217,8 +217,14 @@ pub fn load_font(game_dir: &std::path::Path, base: &str) -> Option<HudFont> {
 pub struct WeaponDef {
     /// `WeaponID`, the key of the weapon's `[ActiveWeapon]` sprite.
     pub id: String,
+    /// `InventoryID`. Weapons that share it share ammunition, like single and dual Berettas.
+    pub inventory_id: String,
     pub clip_size: u32,
     pub pocket_size: u32,
+    /// Time from the start of the reload animation to its `C_Reload` frame.
+    pub reload_seconds: f32,
+    /// `ReloadAmount`: rounds per `C_Reload`, or -1 to fill the clip.
+    pub reload_amount: i32,
 }
 
 impl WeaponDef {
@@ -228,13 +234,66 @@ impl WeaponDef {
         let key = |name: &str| sections.iter().find_map(|s| s.text(name));
         Some(Self {
             id: key("weaponid")?.to_string(),
+            inventory_id: key("inventoryid")?.to_string(),
             clip_size: key("clipsize")?.parse().ok()?,
             pocket_size: key("pocketsize")?.parse().ok()?,
+            reload_seconds: 0.0,
+            reload_amount: key("reloadamount")?.parse().ok()?,
         })
     }
 }
 
-/// One weapon the player carries.
+/// The weapon IDs of `weaponpriority.txt` `[BestWeapons]`, strongest first.
+pub fn parse_best_weapons(text: &str) -> Vec<String> {
+    let Some((_, block)) = text.split_once("[BestWeapons]") else {
+        return Vec::new();
+    };
+    let block = block.split('}').next().unwrap_or("");
+    block
+        .lines()
+        .filter_map(|line| line.split_once("ID =")?.1.split(';').next())
+        .map(|id| id.trim().to_string())
+        .collect()
+}
+
+/// `(animation file, frame of its C_Reload)` per `CHARANIM_RELOAD<WEAPON>` block of a skeleton.
+pub fn parse_reload_animations(skeleton: &str) -> BTreeMap<String, (String, u32)> {
+    let mut reloads = BTreeMap::new();
+    let mut animation: Option<(String, String)> = None;
+    let mut reverts = Vec::new();
+    let reload_after = |line: &str, key: &str| {
+        let value = line.split_once(key)?.1.split(';').next()?;
+        Some(value.trim().to_ascii_lowercase())
+    };
+    for line in skeleton.lines() {
+        if line.contains("[Revert]") {
+            let from = reload_after(line, "From = CHARANIM_RELOAD");
+            reverts.extend(from.zip(reload_after(line, "To = CHARANIM_RELOAD")));
+        } else if line.contains("[Animation]") {
+            let field = |key: &str| {
+                let value = line.split_once(key)?.1.split(';').next()?;
+                Some(value.trim().to_string())
+            };
+            let weapon = reload_after(line, "CHARANIM_RELOAD");
+            animation = weapon.zip(field("Filename ="));
+        } else if line.contains("C_Reload") {
+            let frame = line
+                .split_once("Frame =")
+                .and_then(|(_, rest)| rest.split(';').next()?.trim().parse::<u32>().ok());
+            if let (Some((weapon, file)), Some(frame)) = (&animation, frame) {
+                reloads.insert(weapon.clone(), (file.clone(), frame));
+            }
+        }
+    }
+    for (from, to) in reverts {
+        if let Some(reload) = reloads.get(&to).cloned() {
+            reloads.insert(from, reload);
+        }
+    }
+    reloads
+}
+
+/// The rounds of one `InventoryID`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct WeaponStock {
     pub clip: u32,
@@ -247,72 +306,160 @@ pub struct WeaponStock {
 pub struct PlayerInventory {
     /// Weapon definitions by lower-case file name, such as `beretta`.
     pub defs: BTreeMap<String, WeaponDef>,
-    pub weapons: BTreeMap<String, WeaponStock>,
+    /// `weaponpriority.txt` `[BestWeapons]`.
+    pub best_weapons: Vec<String>,
+    /// Carried weapons, by lower-case file name.
+    pub carried: std::collections::BTreeSet<String>,
+    /// Rounds by `InventoryID`.
+    pub ammo: BTreeMap<String, WeaponStock>,
     /// The weapon in hand, by lower-case file name.
     pub current: Option<String>,
+    /// Seconds until the running reload's `C_Reload`.
+    pub reloading: Option<f32>,
 }
 
 impl PlayerInventory {
+    /// The rounds `name` uses.
+    pub fn stock(&self, name: &str) -> Option<WeaponStock> {
+        self.ammo.get(&self.defs.get(name)?.inventory_id).copied()
+    }
+
     /// `C_RemoveAllWeapons(name)`: strips the player and gives `name` with unlimited ammo.
     pub fn remove_all(&mut self, name: &str) {
-        self.weapons.clear();
+        self.carried.clear();
+        self.ammo.clear();
         self.current = None;
-        if self.defs.contains_key(name) {
+        self.reloading = None;
+        if self
+            .defs
+            .get(name)
+            .is_some_and(|def| def.id != "WEAPONID_EMPTY")
+        {
             self.pickup_weapon(name);
             self.set_infinite(name, true);
         }
     }
 
-    /// `C_PickupWeapon(name)`: a full clip. A weapon already carried gains nothing: the house
-    /// script picks up a Beretta it has and the retail HUD still reads `18 + 99`.
+    /// `C_PickupWeapon(name)`: a full clip the first time. It adds no ammo otherwise: level items
+    /// follow it with `C_PickupAmmo`.
     pub fn pickup_weapon(&mut self, name: &str) {
         let Some(def) = self.defs.get(name) else {
             return;
         };
-        self.weapons.entry(name.to_string()).or_insert(WeaponStock {
-            clip: def.clip_size,
-            ..WeaponStock::default()
-        });
-        if self.current.is_none() && def.id != "WEAPONID_PAINKILLER" {
+        if !self.carried.insert(name.to_string()) {
+            return;
+        }
+        self.ammo
+            .entry(def.inventory_id.clone())
+            .or_insert(WeaponStock {
+                clip: def.clip_size,
+                ..WeaponStock::default()
+            });
+        let rank = |id: &str| self.best_weapons.iter().position(|best| best == id);
+        let stronger = match self.current.as_ref().and_then(|name| self.defs.get(name)) {
+            None => def.id != "WEAPONID_PAINKILLER",
+            Some(held) => match (rank(&def.id), rank(&held.id)) {
+                (Some(new), Some(old)) => new < old,
+                (Some(_), None) => true,
+                _ => false,
+            },
+        };
+        if stronger {
             self.current = Some(name.to_string());
         }
     }
 
     /// `C_PickupAmmo(name, amount)`: into the pocket, up to its size.
     pub fn pickup_ammo(&mut self, name: &str, amount: u32) {
-        if let (Some(def), Some(stock)) = (self.defs.get(name), self.weapons.get_mut(name)) {
+        let Some(def) = self.defs.get(name) else {
+            return;
+        };
+        if let Some(stock) = self.ammo.get_mut(&def.inventory_id) {
             stock.pocket = (stock.pocket + amount).min(def.pocket_size);
         }
     }
 
     /// `C_SetInfiniteAmmo(name, on)`.
     pub fn set_infinite(&mut self, name: &str, on: bool) {
-        if let Some(stock) = self.weapons.get_mut(name) {
+        let Some(def) = self.defs.get(name) else {
+            return;
+        };
+        if let Some(stock) = self.ammo.get_mut(&def.inventory_id) {
             stock.infinite = on;
         }
     }
 
-    /// Spends a round of the weapon in hand; `false` when it has none.
+    /// Spends a round of the weapon in hand. An empty clip starts a reload instead.
     pub fn fire(&mut self) -> bool {
-        let Some(name) = &self.current else {
+        if self.reloading.is_some() {
+            return false;
+        }
+        let Some(def) = self.current.as_ref().and_then(|name| self.defs.get(name)) else {
             return false;
         };
-        let (Some(def), Some(stock)) = (self.defs.get(name), self.weapons.get_mut(name)) else {
+        let reload_seconds = def.reload_seconds;
+        let Some(stock) = self.ammo.get_mut(&def.inventory_id) else {
             return false;
         };
         if stock.infinite {
             return true;
         }
-        if stock.clip == 0 {
-            let reload = stock.pocket.min(def.clip_size);
-            stock.pocket -= reload;
-            stock.clip = reload;
+        if stock.clip > 0 {
+            stock.clip -= 1;
+            return true;
         }
-        if stock.clip == 0 {
-            return false;
+        if stock.pocket > 0 {
+            self.reloading = Some(reload_seconds);
+        } else {
+            self.take_best_loaded();
         }
-        stock.clip -= 1;
-        true
+        false
+    }
+
+    /// `weaponpriority.txt`: out of ammo, the player takes the best weapon that can still fire.
+    fn take_best_loaded(&mut self) {
+        let loaded = |name: &&String| {
+            let def = &self.defs[*name];
+            let stock = self.ammo.get(&def.inventory_id);
+            stock.is_some_and(|s| s.infinite || s.clip + s.pocket > 0)
+        };
+        let best = self.best_weapons.iter().find_map(|id| {
+            let mut carried = self.carried.iter();
+            carried
+                .find(|name| self.defs[*name].id == *id)
+                .filter(loaded)
+        });
+        if let Some(name) = best {
+            self.current = Some(name.clone());
+        }
+    }
+
+    /// Advances a running reload, which refills the clip at its `C_Reload` frame.
+    pub fn step(&mut self, seconds: f32) {
+        let Some(left) = self.reloading else {
+            return;
+        };
+        if left > seconds {
+            self.reloading = Some(left - seconds);
+            return;
+        }
+        self.reloading = None;
+        let Some(def) = self.current.as_ref().and_then(|name| self.defs.get(name)) else {
+            return;
+        };
+        if let Some(stock) = self.ammo.get_mut(&def.inventory_id) {
+            let room = def.clip_size - stock.clip;
+            let rounds = match u32::try_from(def.reload_amount) {
+                Ok(amount) => amount.min(room),
+                Err(_) => room,
+            };
+            let rounds = rounds.min(stock.pocket);
+            stock.pocket -= rounds;
+            stock.clip += rounds;
+            if stock.clip < def.clip_size && stock.pocket > 0 {
+                self.reloading = Some(def.reload_seconds);
+            }
+        }
     }
 }
 
@@ -513,41 +660,86 @@ mod tests {
     }
 
     fn inventory() -> PlayerInventory {
-        let def = |id: &str, clip_size, pocket_size| WeaponDef {
+        let def = |id: &str, inventory: &str, clip_size, pocket_size| WeaponDef {
             id: id.into(),
+            inventory_id: inventory.into(),
             clip_size,
             pocket_size,
+            reload_seconds: 1.3,
+            reload_amount: -1,
         };
         let mut defs = BTreeMap::new();
-        defs.insert("beretta".to_string(), def("WEAPONID_BERETTA", 18, 162));
-        defs.insert("painkiller".to_string(), def("WEAPONID_PAINKILLER", 1, 8));
+        for (name, weapon) in [
+            ("beretta", def("WEAPONID_BERETTA", "INV_BERETTA", 18, 162)),
+            (
+                "berettadual",
+                def("WEAPONID_BERETTADUAL", "INV_BERETTA", 18, 162),
+            ),
+            ("painkiller", def("WEAPONID_PAINKILLER", "INV_PAIN", 1, 8)),
+            ("ingram", def("WEAPONID_INGRAM", "INV_INGRAM", 30, 180)),
+            ("leadpipe", def("WEAPONID_LEADPIPE", "INV_PIPE", 1, 1)),
+            ("molotov", def("WEAPONID_MOLOTOV", "INV_MOLOTOV", 1, 10)),
+        ] {
+            defs.insert(name.to_string(), weapon);
+        }
         PlayerInventory {
             defs,
+            best_weapons: [
+                "WEAPONID_INGRAM",
+                "WEAPONID_BERETTADUAL",
+                "WEAPONID_BERETTA",
+                "WEAPONID_LEADPIPE",
+            ]
+            .map(String::from)
+            .to_vec(),
             ..PlayerInventory::default()
         }
     }
 
-    fn stock(clip: u32, pocket: u32, infinite: bool) -> WeaponStock {
-        WeaponStock {
+    fn stock(clip: u32, pocket: u32, infinite: bool) -> Option<WeaponStock> {
+        Some(WeaponStock {
             clip,
             pocket,
             infinite,
-        }
+        })
     }
 
     #[test]
     fn a_weapon_file_gives_its_id_and_sizes_through_shooting_h() {
         let def = WeaponDef::parse(
             "#define\tBERETTA_CLIPSIZE\t\t18\n#define BERETTA_POCKETSIZE 162\n",
-            "[Properties]\nWeaponID \t= WEAPONID_BERETTA;\nClipsize \t= BERETTA_CLIPSIZE;\nPocketsize\t= BERETTA_POCKETSIZE;\n",
+            "[Properties]\nInventoryID = INVENTORYID_BERETTA;\nWeaponID \t= WEAPONID_BERETTA;\nClipsize \t= BERETTA_CLIPSIZE;\nPocketsize\t= BERETTA_POCKETSIZE;\nReloadAmount = -1;\n",
         );
         assert_eq!(
             def,
             Some(WeaponDef {
                 id: "WEAPONID_BERETTA".into(),
+                inventory_id: "INVENTORYID_BERETTA".into(),
                 clip_size: 18,
                 pocket_size: 162,
+                reload_seconds: 0.0,
+                reload_amount: -1,
             })
+        );
+    }
+
+    #[test]
+    fn best_weapons_keep_their_order_and_stop_at_their_block() {
+        let text = "[BestWeapons]\n{\n\t[weapon] ID = WEAPONID_MP5;\n\t[weapon] ID = WEAPONID_BERETTA;\n}\n[CycleWeapons]\n{\n\t[weapon] ID = WEAPONID_M79;\n}\n";
+        assert_eq!(
+            parse_best_weapons(text),
+            ["WEAPONID_MP5", "WEAPONID_BERETTA"]
+        );
+    }
+
+    #[test]
+    fn a_reload_animation_names_its_file_and_c_reload_frame() {
+        let text = "\t[Revert] From = CHARANIM_RELOADEMPTY; To = CHARANIM_RELOADGRENADE;\n\t[Animation] Index = CHARANIM_RELOADBERETTA; Filename = anim\\reloadberetta.kf2;\n\t[Properties]\n\t{\n\t\t[Message] Frame = 10; String = \"RightHandWeapon->WS_Animate(\" WEAPONANIM_RELOAD \");\";\n\t\t[Message] Frame = 39; String = \"this->C_Reload();\";\n\t}\n\t[Animation] Index = CHARANIM_JUMP; Filename = anim\\jump.kf2;\n\t[Properties]\n\t{\n\t\t[Message] Frame = 8; String = \"this->C_Reload();\";\n\t}\n";
+        let reloads = parse_reload_animations(text);
+        assert_eq!(reloads.len(), 1);
+        assert_eq!(
+            reloads["beretta"],
+            (r"anim\reloadberetta.kf2".to_string(), 39)
         );
     }
 
@@ -560,7 +752,7 @@ mod tests {
         player.pickup_weapon("painkiller");
         player.pickup_weapon("beretta");
         player.pickup_ammo("beretta", 99);
-        assert_eq!(player.weapons["beretta"], stock(18, 99, false));
+        assert_eq!(player.stock("beretta"), stock(18, 99, false));
         assert_eq!(player.current.as_deref(), Some("beretta"));
     }
 
@@ -569,8 +761,8 @@ mod tests {
         let mut player = inventory();
         player.pickup_weapon("painkiller");
         player.remove_all("beretta");
-        assert_eq!(player.weapons.len(), 1);
-        assert!(player.weapons["beretta"].infinite);
+        assert_eq!(player.carried.len(), 1);
+        assert!(player.stock("beretta").is_some_and(|s| s.infinite));
         assert_eq!(player.current.as_deref(), Some("beretta"));
     }
 
@@ -579,7 +771,7 @@ mod tests {
         let mut player = inventory();
         player.pickup_weapon("beretta");
         player.remove_all("empty");
-        assert!(player.weapons.is_empty());
+        assert!(player.carried.is_empty());
         assert_eq!(player.current, None);
     }
 
@@ -591,34 +783,111 @@ mod tests {
     }
 
     #[test]
+    fn a_stronger_weapon_is_taken_in_hand_on_pickup() {
+        let mut player = inventory();
+        player.pickup_weapon("beretta");
+        player.pickup_weapon("ingram");
+        assert_eq!(player.current.as_deref(), Some("ingram"));
+    }
+
+    #[test]
+    fn a_weaker_weapon_stays_in_the_inventory_on_pickup() {
+        let mut player = inventory();
+        player.pickup_weapon("ingram");
+        player.pickup_weapon("beretta");
+        assert_eq!(player.current.as_deref(), Some("ingram"));
+        assert!(player.carried.contains("beretta"));
+    }
+
+    #[test]
+    fn a_weapon_outside_the_best_list_is_not_switched_to() {
+        let mut player = inventory();
+        player.pickup_weapon("beretta");
+        player.pickup_weapon("molotov");
+        assert_eq!(player.current.as_deref(), Some("beretta"));
+    }
+
+    #[test]
+    fn the_second_beretta_switches_to_dual_with_the_same_rounds() {
+        // `level_items/beretta.txt`: both pickups, then `C_PickupAmmo(beretta, 10)`.
+        let mut player = inventory();
+        player.pickup_weapon("beretta");
+        player.fire();
+        player.pickup_weapon("berettadual");
+        player.pickup_ammo("beretta", 10);
+        assert_eq!(player.current.as_deref(), Some("berettadual"));
+        assert_eq!(player.stock("berettadual"), stock(17, 10, false));
+        assert_eq!(player.stock("beretta"), stock(17, 10, false));
+    }
+
+    #[test]
     fn ammo_stops_at_the_pocket_size() {
         let mut player = inventory();
         player.pickup_weapon("beretta");
         player.pickup_ammo("beretta", 500);
-        assert_eq!(player.weapons["beretta"].pocket, 162);
+        assert_eq!(player.stock("beretta"), stock(18, 162, false));
     }
 
-    #[test]
-    fn firing_empties_the_clip_then_reloads_from_the_pocket() {
+    fn emptied_beretta(pocket: u32) -> PlayerInventory {
         let mut player = inventory();
         player.pickup_weapon("beretta");
-        player.pickup_ammo("beretta", 20);
+        player.pickup_ammo("beretta", pocket);
         for _ in 0..18 {
             assert!(player.fire());
         }
-        assert_eq!(player.weapons["beretta"], stock(0, 20, false));
-        assert!(player.fire());
-        assert_eq!(player.weapons["beretta"], stock(17, 2, false));
+        player
     }
 
     #[test]
-    fn with_nothing_left_a_weapon_does_not_fire() {
+    fn an_empty_clip_reloads_over_time_and_cannot_fire_meanwhile() {
+        let mut player = emptied_beretta(20);
+        assert!(!player.fire(), "the empty clip starts the reload");
+        player.step(1.0);
+        assert!(!player.fire());
+        assert_eq!(player.stock("beretta"), stock(0, 20, false));
+        player.step(0.4);
+        assert_eq!(player.stock("beretta"), stock(18, 2, false));
+        assert!(player.fire());
+    }
+
+    #[test]
+    fn a_reload_of_one_round_repeats_until_the_clip_is_full() {
+        let mut player = emptied_beretta(20);
+        player.defs.get_mut("beretta").expect("def").reload_amount = 1;
+        player.fire();
+        player.step(1.4);
+        assert_eq!(player.stock("beretta"), stock(1, 19, false));
+        assert!(player.reloading.is_some());
+        for _ in 0..17 {
+            player.step(1.4);
+        }
+        assert_eq!(player.stock("beretta"), stock(18, 2, false));
+        assert_eq!(player.reloading, None);
+    }
+
+    #[test]
+    fn a_reverted_reload_uses_the_animation_it_points_to() {
+        let text = "\t[Animation] Index = CHARANIM_RELOADMP5; Filename = anim\\reloadmp5.kf2;\n\t\t[Message] Frame = 39; String = \"this->C_Reload();\";\n\t[Revert] From = CHARANIM_RELOADSNIPER; To = CHARANIM_RELOADMP5;\n";
+        let reloads = parse_reload_animations(text);
+        assert_eq!(reloads["sniper"], reloads["mp5"]);
+    }
+
+    #[test]
+    fn with_no_rounds_left_the_best_loaded_weapon_is_taken_in_hand() {
         let mut player = inventory();
+        player.pickup_weapon("leadpipe");
+        player.set_infinite("leadpipe", true);
         player.pickup_weapon("beretta");
         for _ in 0..18 {
             player.fire();
         }
         assert!(!player.fire());
+        assert_eq!(player.reloading, None);
+        assert_eq!(player.current.as_deref(), Some("leadpipe"));
+    }
+
+    #[test]
+    fn nothing_in_hand_does_not_fire() {
         assert!(!PlayerInventory::default().fire());
     }
 
