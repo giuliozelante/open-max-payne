@@ -301,6 +301,9 @@ pub fn run_3d_walkthrough(
             active: false,
             seconds: 15.0,
             threshold: 0.001,
+            heartbeat_message: String::new(),
+            heartbeat_interval: 1.25,
+            heartbeat_in: 0.0,
         });
 
     let mut fb = vec![0u32; W * H];
@@ -334,6 +337,9 @@ pub fn run_3d_walkthrough(
             bullet_time || window.get_mouse_down(MouseButton::Right),
             base_dt,
         );
+        if let Some(message) = slow_motion.heartbeat(base_dt).map(str::to_string) {
+            scene.dispatch_message("", &message);
+        }
         let bullet_time_active = slow_motion.active;
         let world_dt = if bullet_time_active {
             base_dt * 0.30
