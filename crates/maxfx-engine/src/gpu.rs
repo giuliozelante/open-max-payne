@@ -2139,6 +2139,9 @@ mod tests {
             walk: None,
             bind: None,
             action: None,
+            two_handed_idle: None,
+            two_handed_walk: None,
+            two_handed: false,
         }
     }
 

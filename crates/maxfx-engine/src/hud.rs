@@ -492,6 +492,8 @@ pub struct WeaponDef {
     pub fire_clip: Option<crate::kf2::Kf2Anim>,
     /// `CHARANIM_RELOAD<WEAPON>`.
     pub reload_clip: Option<crate::kf2::Kf2Anim>,
+    /// `TwoHandedAnimation`: Max carries it with the `CHARANIM_2_*` clips.
+    pub two_handed: bool,
     /// Metres a melee weapon reaches; `None` for a gun.
     pub melee_reach: Option<f32>,
     /// Seconds into the shoot clip of each melee blow.
@@ -524,6 +526,8 @@ impl WeaponDef {
             reload_sound_delay: 0.0,
             fire_clip: None,
             reload_clip: None,
+            two_handed: key("twohandedanimation")
+                .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
             melee_reach: None,
             melee_blows: Vec::new(),
             model: weapon_txt
@@ -1389,6 +1393,23 @@ mod tests {
                 (0, "enemy".to_string(), "mobster_death".to_string()),
                 (40, "characters".to_string(), "death_medium".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn a_weapon_file_says_whether_it_is_two_handed() {
+        let file = |flag: &str| {
+            format!("[Attributes]\nTwoHandedAnimation \t= {flag};\nInventoryID = I;\nWeaponID = W;\nClipsize = 1;\nPocketsize = 2;\nReloadAmount = -1;\n")
+        };
+        assert!(
+            WeaponDef::parse("", &file("YES"))
+                .expect("weapon")
+                .two_handed
+        );
+        assert!(
+            !WeaponDef::parse("", &file("NO"))
+                .expect("weapon")
+                .two_handed
         );
     }
 

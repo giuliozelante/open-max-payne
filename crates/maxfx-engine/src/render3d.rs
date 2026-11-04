@@ -713,6 +713,12 @@ pub fn run_3d_walkthrough(
         let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
         level_items.step(&mut scene, feet, world_dt);
 
+        if let Some(rig) = player_rig.as_mut() {
+            let weapon = scene.inventory.current.as_ref();
+            let def = weapon.and_then(|name| scene.inventory.defs.get(name));
+            rig.two_handed = def.is_some_and(|def| def.two_handed);
+        }
+
         let reloading = scene.inventory.reloading.is_some();
         if reloading && !reload_seen {
             let def = scene.inventory.current.as_ref();
@@ -2999,13 +3005,17 @@ fn held_weapon<'a>(
 }
 
 fn character_clip(rig: &CharacterRig, moving: bool) -> Option<&crate::kf2::Kf2Anim> {
-    if moving {
-        rig.walk.as_ref().or(rig.idle.as_ref())
+    let (idle, walk) = if rig.two_handed {
+        (rig.two_handed_idle.as_ref(), rig.two_handed_walk.as_ref())
     } else {
-        rig.action
-            .as_ref()
-            .or(rig.idle.as_ref())
-            .or(rig.walk.as_ref())
+        (None, None)
+    };
+    let idle = idle.or(rig.idle.as_ref());
+    let walk = walk.or(rig.walk.as_ref());
+    if moving {
+        walk.or(idle)
+    } else {
+        rig.action.as_ref().or(idle).or(walk)
     }
 }
 
@@ -4276,10 +4286,45 @@ mod tests {
             walk: Some(clip("run", [0.0; 3])),
             bind: None,
             action: Some(clip("shoot", [0.0; 3])),
+            two_handed_idle: None,
+            two_handed_walk: None,
+            two_handed: false,
         };
         let name = |moving| character_clip(&rig, moving).map(|c| c.bones[0].name.as_str());
         assert_eq!(name(false), Some("shoot"));
         assert_eq!(name(true), Some("run"));
+    }
+
+    #[test]
+    fn a_two_handed_weapon_uses_the_two_handed_clips() {
+        let mesh = crate::kf2::KfsMesh {
+            name: String::new(),
+            vertices: Vec::new(),
+            faces: Vec::new(),
+            material_textures: Vec::new(),
+        };
+        let mut rig = CharacterRig {
+            mesh,
+            skin: None,
+            idle: Some(clip("idle", [0.0; 3])),
+            walk: Some(clip("run", [0.0; 3])),
+            bind: None,
+            action: None,
+            two_handed_idle: Some(clip("2_idle", [0.0; 3])),
+            two_handed_walk: Some(clip("2_run", [0.0; 3])),
+            two_handed: true,
+        };
+        let name = |rig: &CharacterRig, moving: bool| {
+            let clip = character_clip(rig, moving).expect("clip");
+            clip.bones[0].name.clone()
+        };
+        assert_eq!(name(&rig, false), "2_idle");
+        assert_eq!(name(&rig, true), "2_run");
+        rig.action = Some(clip("shoot", [0.0; 3]));
+        assert_eq!(name(&rig, false), "shoot");
+        rig.two_handed = false;
+        rig.action = None;
+        assert_eq!(name(&rig, false), "idle");
     }
 
     #[test]
