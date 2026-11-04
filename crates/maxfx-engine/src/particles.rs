@@ -317,7 +317,7 @@ fn between(minmax: &[f32], seed: &mut u32) -> f32 {
 }
 
 /// xorshift32 in 0..1.
-fn random(seed: &mut u32) -> f32 {
+pub(crate) fn random(seed: &mut u32) -> f32 {
     *seed ^= *seed << 13;
     *seed ^= *seed >> 17;
     *seed ^= *seed << 5;

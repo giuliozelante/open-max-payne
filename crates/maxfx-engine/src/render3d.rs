@@ -44,7 +44,6 @@ const EYE_HEIGHT: f32 = 1.65;
 /// One `DetailOffset` step from `materials.txt`, in metres toward the camera.
 pub(crate) const DETAIL_OFFSET_M: f32 = 0.02;
 /// `data/database/shooting.h` `#define BERETTA_BULLETDAMAGE 5`.
-const BERETTA_BULLET_DAMAGE: i32 = 5;
 
 #[derive(Clone, Copy)]
 struct ProjVert {
@@ -164,7 +163,11 @@ pub fn run_3d_walkthrough(
             world_pos: [ro[0] + ch.pos[0], wy, ro[2] + ch.pos[2]],
             yaw: 0.0,
             walk_phase: 0.0,
-            health: if ch.starts_dead() { 0 } else { 2 },
+            health: if ch.starts_dead() {
+                0
+            } else {
+                bodies[rig_index].max_health.max(1)
+            },
             hit_flash: 0.0,
             rig_index,
             pursues: ch.pursues(),
@@ -185,6 +188,8 @@ pub fn run_3d_walkthrough(
                 let gz = alley_ro[2] + 1.0;
                 let gy =
                     find_floor_y(&scene, gx, alley_ro[1] - 5.0, gz).unwrap_or(alley_ro[1] - 10.0);
+                // This rig has no skin file, so the guard matches the level's own enemies.
+                let guard_health = enemies.iter().map(|en| en.health).max().unwrap_or(1);
                 if let Some(rig_index) = johnny_index {
                     enemies.push(EnemyState {
                         name: "::Alley2::Guard_01".into(),
@@ -192,7 +197,7 @@ pub fn run_3d_walkthrough(
                         world_pos: [gx, gy, gz],
                         yaw: 0.0,
                         walk_phase: 0.0,
-                        health: 2,
+                        health: guard_health,
                         hit_flash: 0.0,
                         rig_index,
                         pursues: true,
@@ -219,6 +224,10 @@ pub fn run_3d_walkthrough(
     let mut reload_seen = false;
     // Reach of the melee weapon swung last, and the clip times of its blows still to land.
     let mut melee: Option<f32> = None;
+    // What the last trigger pull creates.
+    let mut shot: Vec<crate::hud::ProjectileDef> = Vec::new();
+    let mut shot_seed: u32 = 0x2545_f491;
+    let mut round: usize = 0;
     let mut melee_blows: Vec<f32> = Vec::new();
     // Seconds until the reload's sound, and its cue.
     let mut reload_cue: Option<(f32, String)> = None;
@@ -341,7 +350,15 @@ pub fn run_3d_walkthrough(
         }
         FrameCapture::new(dir, title)
     });
-    let mut decals = crate::decals::DecalField::load(&game_root);
+    let mut decals = crate::decals::DecalField::load(
+        &game_root,
+        scene
+            .inventory
+            .defs
+            .values()
+            .flat_map(|def| def.projectiles.iter().chain(&def.quiet_projectiles))
+            .filter_map(|projectile| projectile.decal.as_deref()),
+    );
     let mut mouse_fire_held = false;
     let mut slow_motion = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt")
         .and_then(|bytes| {
@@ -600,6 +617,8 @@ pub fn run_3d_walkthrough(
                 queue_weapon_sound(&mut scene, cue, feet);
             }
             melee = def.melee_reach;
+            shot = def.round_projectiles(round).to_vec();
+            round += 1;
             melee_blows.clone_from(&def.melee_blows);
             if let Some(rig) = player_rig.as_mut() {
                 rig.action = def.fire_clip.clone();
@@ -629,82 +648,109 @@ pub fn run_3d_walkthrough(
                 player_pos
             };
             let within = |t: f32| reach.is_none_or(|reach| t <= reach);
-            // Raycast against living enemies
-            let mut best_hit: Option<(usize, f32)> = None;
-            for (idx, en) in enemies.iter().enumerate() {
-                if en.health <= 0 || en.invulnerable {
-                    continue;
-                }
-                if let Some(t) = ray_hits_character(aim_from, aim_dir, en.world_pos) {
-                    if t <= 100.0 && within(t) && best_hit.is_none_or(|(_, b)| t < b) {
-                        best_hit = Some((idx, t));
+            let aim = aim_dir;
+            let rays = shot
+                .iter()
+                .flat_map(|projectile| std::iter::repeat_n(projectile, projectile.count as usize));
+            for projectile in rays {
+                let aim_dir = spread_aim(aim, projectile.accuracy, &mut shot_seed);
+                let block = projectile.decal.as_deref().unwrap_or_default();
+                // Raycast against living enemies
+                let mut best_hit: Option<(usize, f32)> = None;
+                for (idx, en) in enemies.iter().enumerate() {
+                    if en.health <= 0 || en.invulnerable {
+                        continue;
+                    }
+                    if let Some(t) = ray_hits_character(aim_from, aim_dir, en.world_pos) {
+                        if t <= 100.0 && within(t) && best_hit.is_none_or(|(_, b)| t < b) {
+                            best_hit = Some((idx, t));
+                        }
                     }
                 }
-            }
-            let level_hit = aim_hit_level(&scene, aim_from, aim_dir).filter(|hit| within(hit.0));
-            let mesh_hit = aim_hit_dynamic(&scene, &room_origins, aim_from, aim_dir)
-                .filter(|hit| within(hit.1))
-                .filter(|hit| level_hit.is_none_or(|level| hit.1 < level.0));
-            let category = |scene: &LdbScene, id: i32| {
-                let material = scene.materials.get(&id);
-                material.map_or(String::new(), |m| m.category.clone())
-            };
-            let at = |t: f32| [0, 1, 2].map(|c| aim_from[c] + aim_dir[c] * t);
-            match (mesh_hit, best_hit) {
-                (Some((midx, mt, normal, material)), enemy)
-                    if enemy.is_none_or(|(_, et)| mt < et) =>
-                {
-                    if reach.is_none() {
+                let level_hit =
+                    aim_hit_level(&scene, aim_from, aim_dir).filter(|hit| within(hit.0));
+                let mesh_hit = aim_hit_dynamic(&scene, &room_origins, aim_from, aim_dir)
+                    .filter(|hit| within(hit.1))
+                    .filter(|hit| level_hit.is_none_or(|level| hit.1 < level.0));
+                let category = |scene: &LdbScene, id: i32| {
+                    let material = scene.materials.get(&id);
+                    material.map_or(String::new(), |m| m.category.clone())
+                };
+                let at = |t: f32| [0, 1, 2].map(|c| aim_from[c] + aim_dir[c] * t);
+                match (mesh_hit, best_hit) {
+                    (Some((midx, mt, normal, material)), enemy)
+                        if enemy.is_none_or(|(_, et)| mt < et) =>
+                    {
                         let kind = category(&scene, material);
-                        decals.add(&kind, at(mt), normal, aim_dir, Some(midx));
-                        let frame = crate::decals::surface_frame(normal, aim_dir);
-                        let hit = at(mt);
-                        hit_effects.start(&mut scene, &mut particle_sprites, &kind, hit, frame);
+                        decals.add(block, &kind, at(mt), normal, aim_dir, Some(midx));
+                        if let Some(set) = decals.sets.get(block) {
+                            let frame = crate::decals::surface_frame(normal, aim_dir);
+                            let hit = at(mt);
+                            hit_effects.start(
+                                &mut scene,
+                                &mut particle_sprites,
+                                set,
+                                &kind,
+                                hit,
+                                frame,
+                            );
+                        }
+                        let scripted = scene.bullet_hits(midx);
+                        println!(
+                            "  3D Engine: shot hit {} at {mt:.1} m (scripted: {scripted})",
+                            scene.dynamic_meshes[midx].name
+                        );
+                        let broke = scene.damage_mesh(midx, projectile.damage);
+                        if broke {
+                            println!("  3D Engine: {} broke", scene.dynamic_meshes[midx].name);
+                        }
+                        if scripted || broke {
+                            play_queued_sounds(
+                                &mut scene,
+                                &catalog_root(level_path),
+                                &mut sounds,
+                                &room_origins,
+                                listener,
+                            );
+                        }
                     }
-                    let scripted = scene.bullet_hits(midx);
-                    println!(
-                        "  3D Engine: shot hit {} at {mt:.1} m (scripted: {scripted})",
-                        scene.dynamic_meshes[midx].name
-                    );
-                    let broke = scene.damage_mesh(midx, BERETTA_BULLET_DAMAGE);
-                    if broke {
-                        println!("  3D Engine: {} broke", scene.dynamic_meshes[midx].name);
-                    }
-                    if scripted || broke {
-                        play_queued_sounds(
-                            &mut scene,
-                            &catalog_root(level_path),
-                            &mut sounds,
-                            &room_origins,
-                            listener,
+                    (_, Some((idx, _))) => {
+                        let en = &mut enemies[idx];
+                        let alive = en.health > 0;
+                        en.health -= projectile.damage;
+                        en.hit_flash = 0.25;
+                        if alive && en.health <= 0 {
+                            scene.kill_character(&en.name);
+                            slow_motion.reward_kill();
+                            // `DeathCause = PROJECTILEDEATH_RANDOM`.
+                            let pick = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |time| time.subsec_nanos() as usize);
+                            en.death = Some((pick % death_clips.len().max(1), 0.0, 0));
+                        }
+                        println!(
+                            "  3D Engine: Hit {}! (health={})",
+                            en.name,
+                            en.health.max(0)
                         );
                     }
-                }
-                (_, Some((idx, _))) => {
-                    let en = &mut enemies[idx];
-                    en.health -= 1;
-                    en.hit_flash = 0.25;
-                    if en.health == 0 {
-                        scene.kill_character(&en.name);
-                        slow_motion.reward_kill();
-                        // `DeathCause = PROJECTILEDEATH_RANDOM`.
-                        let pick = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |time| time.subsec_nanos() as usize);
-                        en.death = Some((pick % death_clips.len().max(1), 0.0, 0));
-                    }
-                    println!(
-                        "  3D Engine: Hit {}! (health={})",
-                        en.name,
-                        en.health.max(0)
-                    );
-                }
-                _ => {
-                    if let Some((t, normal, material)) = level_hit.filter(|_| reach.is_none()) {
-                        let kind = category(&scene, material);
-                        decals.add(&kind, at(t), normal, aim_dir, None);
-                        let frame = crate::decals::surface_frame(normal, aim_dir);
-                        hit_effects.start(&mut scene, &mut particle_sprites, &kind, at(t), frame);
+                    _ => {
+                        if let Some((t, normal, material)) = level_hit {
+                            let kind = category(&scene, material);
+                            decals.add(block, &kind, at(t), normal, aim_dir, None);
+                            if let Some(set) = decals.sets.get(block) {
+                                let frame = crate::decals::surface_frame(normal, aim_dir);
+                                let hit = at(t);
+                                hit_effects.start(
+                                    &mut scene,
+                                    &mut particle_sprites,
+                                    set,
+                                    &kind,
+                                    hit,
+                                    frame,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -2178,9 +2224,6 @@ fn start_queued_effects(
     }
 }
 
-/// `decals.txt` `[bullethit_generic]`'s `[Message]`s name its sound and effect by the same word.
-const BULLET_HIT: &str = "bullethit_generic";
-
 /// What a bullet hit starts: the `[Material]` variant of its sound and effect, or the `[Default]`.
 struct HitEffects<'a> {
     game_dir: &'a Path,
@@ -2208,11 +2251,14 @@ impl HitEffects<'_> {
         &self,
         scene: &mut LdbScene,
         sprites: &mut ParticleSprites,
+        set: &crate::decals::DecalSet,
         category: &str,
         point: [f32; 3],
         frame: [f32; 9],
     ) {
-        let files = crate::material_files(self.particles_txt, BULLET_HIT, category);
+        let files = set.effect.as_deref().map_or(Vec::new(), |effect| {
+            crate::material_files(self.particles_txt, effect, category)
+        });
         let effect = files.first().and_then(|file| {
             let win_path = format!("\\data\\database\\particles\\{file}");
             sprites.effect(self.game_dir, &win_path)
@@ -2220,7 +2266,10 @@ impl HitEffects<'_> {
         if let Some((key, effect)) = effect {
             sprites.field.start_at((point, frame), key, effect);
         }
-        let files = crate::material_files(&self.sounds_txt, BULLET_HIT, category);
+        let Some(cue) = set.sound.as_deref() else {
+            return;
+        };
+        let files = crate::material_files(&self.sounds_txt, cue, category);
         // HYPOTHESIS: retail picks among a cue's `[Sound]`s at random.
         let pick = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2228,11 +2277,11 @@ impl HitEffects<'_> {
         if let Some(file) = files.get(pick % files.len().max(1)) {
             scene.sound_queue.push(crate::scene::QueuedSound {
                 category: "projectiles".to_string(),
-                cue: BULLET_HIT.to_string(),
+                cue: cue.to_string(),
                 filename: Some(file.clone()),
                 emitter: String::new(),
                 looping: false,
-                range: crate::sound_cue_3d(&self.sounds_txt, BULLET_HIT),
+                range: crate::sound_cue_3d(&self.sounds_txt, cue),
                 at: Some(point),
             });
         }
@@ -3024,6 +3073,22 @@ fn clip_seconds(clip: &crate::kf2::Kf2Anim) -> f32 {
         .first()
         .filter(|bone| bone.fps > 0.0)
         .map_or(0.0, |bone| bone.duration as f32 / bone.fps)
+}
+
+/// `dir` thrown off by `accuracy`, as retail does at `0x7068cd`: a random unit vector scaled by
+/// `rand * Accuracy / 2500` added to the aim, then normalised again.
+fn spread_aim(dir: [f32; 3], accuracy: f32, seed: &mut u32) -> [f32; 3] {
+    let offset = loop {
+        let v: [f32; 3] = std::array::from_fn(|_| crate::particles::random(seed) * 2.0 - 1.0);
+        let length = dot3(v, v).sqrt();
+        if length > 1e-6 && length <= 1.0 {
+            break v.map(|c| c / length);
+        }
+    };
+    let scale = crate::particles::random(seed) * accuracy / 2500.0;
+    let spread: [f32; 3] = std::array::from_fn(|c| dir[c] + offset[c] * scale);
+    let length = dot3(spread, spread).sqrt();
+    spread.map(|c| c / length)
 }
 
 /// Where the player's current clip is.
@@ -4289,10 +4354,24 @@ mod tests {
             two_handed_idle: None,
             two_handed_walk: None,
             two_handed: false,
+            max_health: 0,
         };
         let name = |moving| character_clip(&rig, moving).map(|c| c.bones[0].name.as_str());
         assert_eq!(name(false), Some("shoot"));
         assert_eq!(name(true), Some("run"));
+    }
+
+    #[test]
+    fn a_shot_strays_within_its_accuracy() {
+        let mut seed = 0x1234_5678;
+        let aim = [0.0, 0.0, 1.0];
+        assert_eq!(spread_aim(aim, 0.0, &mut seed), aim);
+        let shots: Vec<[f32; 3]> = (0..200)
+            .map(|_| spread_aim(aim, 150.0, &mut seed))
+            .collect();
+        // Pump shotgun: at most 150 / 2500 = 0.06 off a unit aim.
+        let widest = shots.iter().map(|s| s[0].hypot(s[1])).fold(0.0, f32::max);
+        assert!((0.02..=0.0601).contains(&widest), "{widest}");
     }
 
     #[test]
@@ -4313,6 +4392,7 @@ mod tests {
             two_handed_idle: Some(clip("2_idle", [0.0; 3])),
             two_handed_walk: Some(clip("2_run", [0.0; 3])),
             two_handed: true,
+            max_health: 0,
         };
         let name = |rig: &CharacterRig, moving: bool| {
             let clip = character_clip(rig, moving).expect("clip");
@@ -4392,8 +4472,17 @@ mod tests {
         let mut scene = LdbScene::default();
         let mut sprites = ParticleSprites::default();
         let frame = crate::decals::surface_frame([0.0, 1.0, 0.0], [0.0, -1.0, 0.0]);
+        let decals = crate::decals::DecalField::load(&game, ["bullethit_generic"].into_iter());
+        let set = &decals.sets["bullethit_generic"];
         for material in ["wood", "no such material"] {
-            hits.start(&mut scene, &mut sprites, material, [1.0, 2.0, 3.0], frame);
+            hits.start(
+                &mut scene,
+                &mut sprites,
+                set,
+                material,
+                [1.0, 2.0, 3.0],
+                frame,
+            );
         }
         sprites.step(&scene, &BTreeMap::new(), 0.05);
         let live = sprites.sprites();

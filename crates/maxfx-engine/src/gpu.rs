@@ -2142,6 +2142,7 @@ mod tests {
             two_handed_idle: None,
             two_handed_walk: None,
             two_handed: false,
+            max_health: 0,
         }
     }
 
