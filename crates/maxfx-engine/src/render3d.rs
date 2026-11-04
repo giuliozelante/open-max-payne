@@ -282,6 +282,7 @@ pub fn run_3d_walkthrough(
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
     scene.inventory.best_weapons = crate::load_best_weapons(&game_root);
+    scene.apply_startup_weapons();
     let hud_assets = crate::hud::HudAssets::load(&game_root);
     let text = |path: &str| {
         crate::read_game_bytes(&game_root, path)

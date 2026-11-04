@@ -1432,6 +1432,30 @@ impl LdbScene {
         }
     }
 
+    /// Startup weapon messages, in order, once the weapon definitions are loaded.
+    pub fn apply_startup_weapons(&mut self) {
+        let is_weapon = |act: &String| {
+            let verb = Message::parse(act).map(|msg| msg.verb.to_ascii_lowercase());
+            verb.is_some_and(|verb| {
+                matches!(
+                    verb.as_str(),
+                    "c_removeallweapons" | "c_pickupweapon" | "c_pickupammo" | "c_setinfiniteammo"
+                )
+            })
+        };
+        let scripts: Vec<(String, String)> = self
+            .fsms
+            .iter()
+            .flat_map(|fsm| {
+                let actions = fsm.startup_actions.iter().filter(|act| is_weapon(act));
+                actions.map(|act| (fsm.name.clone(), act.clone()))
+            })
+            .collect();
+        for (name, act) in scripts {
+            self.dispatch_message(&name, &act);
+        }
+    }
+
     /// Startup `DO_Hide` only. Other startup verbs stay untouched.
     pub fn apply_startup_hides(&mut self) {
         let scripts: Vec<(String, String)> = self
@@ -4421,6 +4445,49 @@ mod tests {
         }
         let stock = scene.inventory.stock("beretta").expect("beretta");
         assert_eq!((stock.clip, stock.pocket, stock.infinite), (18, 99, false));
+    }
+
+    #[test]
+    fn startup_weapon_messages_equip_the_player_in_their_order() {
+        // `Tutorial.ldb` `::StartRoom::Start_FSM`.
+        let mut scene = door_fsm_scene();
+        let def = |id: &str, inventory: &str, clip_size, pocket_size| crate::hud::WeaponDef {
+            id: id.into(),
+            inventory_id: inventory.into(),
+            clip_size,
+            pocket_size,
+            reload_seconds: 1.3,
+            reload_amount: -1,
+            shows_dot: true,
+        };
+        scene.inventory.defs.extend([
+            (
+                "beretta".to_string(),
+                def("WEAPONID_BERETTA", "INV_B", 18, 162),
+            ),
+            (
+                "leadpipe".to_string(),
+                def("WEAPONID_LEADPIPE", "INV_L", 1, 1),
+            ),
+        ]);
+        scene.fsms[0].startup_actions = [
+            "maxpayne_gamemode->gm_resetlevelitems();",
+            "player->c_removeallweapons(beretta);",
+            "player->c_pickupweapon(leadpipe);",
+            "player->c_setinfiniteammo(leadpipe, true);",
+            "player->c_setinfiniteammo(beretta, false);",
+            "player->c_pickupammo(beretta, 60);",
+        ]
+        .map(String::from)
+        .to_vec();
+        scene.apply_startup_weapons();
+        let stock = scene.inventory.stock("beretta").expect("beretta");
+        assert_eq!((stock.clip, stock.pocket, stock.infinite), (18, 60, false));
+        assert!(scene
+            .inventory
+            .stock("leadpipe")
+            .is_some_and(|s| s.infinite));
+        assert_eq!(scene.inventory.current.as_deref(), Some("beretta"));
     }
 
     #[test]
