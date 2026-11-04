@@ -282,6 +282,15 @@ pub fn run_3d_walkthrough(
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
     scene.inventory.best_weapons = crate::load_best_weapons(&game_root);
+    let hud_assets = crate::hud::HudAssets::load(&game_root);
+    let mut slow_motion = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt")
+        .and_then(|bytes| crate::hud::SlowMotion::parse(&String::from_utf8_lossy(&bytes)))
+        .unwrap_or(crate::hud::SlowMotion {
+            level: 1.0,
+            active: false,
+            seconds: 15.0,
+            threshold: 0.001,
+        });
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
@@ -310,7 +319,11 @@ pub fn run_3d_walkthrough(
         if window.is_key_pressed(Key::B, KeyRepeat::No) {
             bullet_time = !bullet_time;
         }
-        let bullet_time_active = bullet_time || window.get_mouse_down(MouseButton::Right);
+        slow_motion.step(
+            bullet_time || window.get_mouse_down(MouseButton::Right),
+            base_dt,
+        );
+        let bullet_time_active = slow_motion.active;
         let world_dt = if bullet_time_active {
             base_dt * 0.30
         } else {
@@ -865,6 +878,20 @@ pub fn run_3d_walkthrough(
                 (H as f32) * 0.50,
                 0x00ffee77,
             );
+        }
+
+        if let Some(assets) = hud_assets.as_ref().filter(|_| crosshair_visible(&scene)) {
+            let mut target = crate::hud::HudTarget {
+                pixels: &mut fb,
+                width: W,
+                height: H,
+            };
+            let state = crate::hud::HudState {
+                health: 1.0,
+                slow_motion: &slow_motion,
+                inventory: &scene.inventory,
+            };
+            target.draw_hud(assets, &state);
         }
 
         // Draw crosshair (gold in Bullet-Time, white/amber normally)

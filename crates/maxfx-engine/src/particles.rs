@@ -255,7 +255,7 @@ pub fn frame_texture(frame: &openpfx::effect::RpsFrame) -> Option<crate::scene::
 }
 
 /// 8-bit, one-plane RLE PCX as a grey image (the red channel of its 256-colour palette).
-fn decode_pcx_grey(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+pub(crate) fn decode_pcx_grey(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     if data.len() < 128 || data[0] != 0x0a || data[2] != 1 || data[3] != 8 || data[65] != 1 {
         return None;
     }

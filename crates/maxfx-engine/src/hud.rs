@@ -38,6 +38,68 @@ pub struct HudLayout {
     pub ammo_in_pocket: HudText,
     /// `[ActiveWeapon]` sprites by `id`, such as `WEAPONID_BERETTA`.
     pub weapons: BTreeMap<String, HudSprite>,
+    /// `UnlimitedAmmoText` by `id`.
+    pub unlimited_text: BTreeMap<String, String>,
+    pub hourglass_colors: HourglassColors,
+}
+
+/// `[SlowMotionSpecific]`, as RGBA.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct HourglassColors {
+    pub active: [u8; 4],
+    pub normal: [u8; 4],
+    pub unavailable: [u8; 4],
+}
+
+impl HourglassColors {
+    /// `0x4aef24`: the state of the slow motion picks the hourglass colour.
+    pub fn pick(&self, gauge: &SlowMotion) -> [u8; 4] {
+        if gauge.active {
+            self.active
+        } else if gauge.level > gauge.threshold {
+            self.normal
+        } else {
+            self.unavailable
+        }
+    }
+}
+
+/// The bullet-time gauge of `globalconfig.txt` `[slowmotion]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SlowMotion {
+    /// 0..1.
+    pub level: f32,
+    pub active: bool,
+    /// `SlowMotionTime`: seconds a full gauge lasts.
+    pub seconds: f32,
+    /// `Threshold`: the level it takes to start.
+    pub threshold: f32,
+}
+
+impl SlowMotion {
+    pub fn parse(globalconfig: &str) -> Option<Self> {
+        let sections = parse_sections(globalconfig);
+        let general = sections.iter().find(|s| s.path == "slowmotion/general")?;
+        let threshold = general.text("threshold")?.strip_suffix('%')?;
+        Some(Self {
+            level: 1.0,
+            active: false,
+            seconds: general.number("slowmotiontime")?,
+            threshold: threshold.trim().parse::<f32>().ok()? / 100.0,
+        })
+    }
+
+    /// Advances `seconds` of real time while the player does or does not ask for slow motion.
+    pub fn step(&mut self, wanted: bool, seconds: f32) {
+        self.active = wanted && (self.active || self.level > self.threshold);
+        if self.active {
+            self.level -= seconds / self.seconds;
+            if self.level <= 0.0 {
+                self.level = 0.0;
+                self.active = false;
+            }
+        }
+    }
 }
 
 /// One `[Section]` of `hud.txt`: its lower-case path, such as `health/sprite`, and its keys.
@@ -80,6 +142,22 @@ impl Section {
             alpha_file: self.file("alphafilename")?,
             alpha: self.number("defaultvertexalpha")? as u8,
         })
+    }
+
+    /// `rrggbbaa`.
+    fn color(&self, key: &str) -> [u8; 4] {
+        let value = self
+            .text(key)
+            .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+        value.unwrap_or(0).to_be_bytes()
+    }
+
+    fn hourglass_colors(&self) -> HourglassColors {
+        HourglassColors {
+            active: self.color("coloractive"),
+            normal: self.color("colornormal"),
+            unavailable: self.color("colorunavailable"),
+        }
     }
 
     fn anchor(&self) -> Option<HudText> {
@@ -168,10 +246,16 @@ impl HudLayout {
         let sprite = |path: &str| find(path)?.sprite();
         let anchor = |path: &str| find(path)?.anchor();
         let mut weapons = BTreeMap::new();
+        let mut unlimited_text = BTreeMap::new();
         let mut id = None;
         for section in &sections {
             match section.path.as_str() {
-                "weapons/activeweapon/weaponspecific" => id = section.text("id"),
+                "weapons/activeweapon/weaponspecific" => {
+                    id = section.text("id");
+                    if let (Some(id), Some(text)) = (id, section.file("unlimitedammotext")) {
+                        unlimited_text.insert(id.to_string(), text);
+                    }
+                }
                 "weapons/activeweapon/sprite" => {
                     weapons.insert(id?.to_string(), section.sprite()?);
                 }
@@ -188,6 +272,10 @@ impl HudLayout {
             ammo_in_clip: anchor("weapons/ammoinclipstext")?,
             ammo_in_pocket: anchor("weapons/ammoinpockettext")?,
             weapons,
+            unlimited_text,
+            hourglass_colors: find("slowmotion/slowmotionspecific")
+                .map(Section::hourglass_colors)
+                .unwrap_or_default(),
         })
     }
 }
@@ -322,6 +410,28 @@ impl PlayerInventory {
     /// The rounds `name` uses.
     pub fn stock(&self, name: &str) -> Option<WeaponStock> {
         self.ammo.get(&self.defs.get(name)?.inventory_id).copied()
+    }
+
+    /// `WeaponID` of the weapon in hand.
+    pub fn weapon_id(&self) -> Option<&str> {
+        Some(&self.defs.get(self.current.as_ref()?)?.id)
+    }
+
+    /// The HUD's `(clip, pocket)` texts, as `0x4afe14` writes them: with infinite ammo, the
+    /// `unlimited` text goes in the pocket slot and the clip slot stays empty.
+    pub fn ammo_text(&self, unlimited: &str) -> Option<(String, String)> {
+        let stock = self.stock(self.current.as_ref()?)?;
+        Some(if stock.infinite {
+            (String::new(), unlimited.to_string())
+        } else {
+            (stock.clip.to_string(), stock.pocket.to_string())
+        })
+    }
+
+    /// Painkillers to show. The house gives one with `c_pickupweapon` and retail shows none, so
+    /// this is the pocket and not the clip.
+    pub fn painkillers(&self) -> u32 {
+        self.stock("painkiller").map_or(0, |stock| stock.pocket)
     }
 
     /// `C_RemoveAllWeapons(name)`: strips the player and gives `name` with unlimited ammo.
@@ -544,6 +654,75 @@ pub fn blend(dst: u32, source: u32, alpha: u32) -> u32 {
     ((255 - total / 255) << 24) | channel(16) | channel(8) | channel(0)
 }
 
+/// A sprite's colour file with its alpha file in the top byte.
+fn load_bitmap(
+    game_dir: &std::path::Path,
+    sprite: &HudSprite,
+) -> Option<crate::scene::DecodedTexture> {
+    let read = |file: &str| crate::read_game_bytes(game_dir, &format!(r"\data\hud\{file}"));
+    let (width, height, colour) =
+        crate::scene::decode_texture_blob(&read(&sprite.file)?).or_else(|| {
+            let (w, h, grey) = crate::particles::decode_pcx_grey(&read(&sprite.file)?)?;
+            let rgb = |g: &u8| u32::from(*g) * 0x0001_0101;
+            Some((w, h, grey.iter().map(rgb).collect()))
+        })?;
+    let (_, _, alpha) = crate::particles::decode_pcx_grey(&read(&sprite.alpha_file)?)?;
+    let pixels = colour
+        .iter()
+        .zip(&alpha)
+        .map(|(rgb, a)| (u32::from(*a) << 24) | (rgb & 0x00ff_ffff))
+        .collect();
+    Some(crate::scene::DecodedTexture {
+        path: sprite.file.clone(),
+        flag: 0,
+        width,
+        height,
+        pixels,
+    })
+}
+
+/// `hud.txt` and the bitmaps and font it names.
+#[derive(Debug, Clone)]
+pub struct HudAssets {
+    pub layout: HudLayout,
+    pub font: HudFont,
+    /// Colour with alpha in the top byte, by `Filename`.
+    pub bitmaps: BTreeMap<String, crate::scene::DecodedTexture>,
+}
+
+impl HudAssets {
+    pub fn load(game_dir: &std::path::Path) -> Option<Self> {
+        let text = crate::read_game_bytes(game_dir, r"\data\hud\hud.txt")?;
+        let layout = HudLayout::parse(&String::from_utf8_lossy(&text))?;
+        let font = load_font(game_dir, r"\data\hud\bitmaps\Hud_Universal_Medium")?;
+        let sprites = [
+            &layout.health_background,
+            &layout.health_pain,
+            &layout.hourglass_background,
+            &layout.hourglass,
+            &layout.painkiller_icon,
+        ];
+        let bitmaps = sprites
+            .into_iter()
+            .chain(layout.weapons.values())
+            .filter_map(|sprite| Some((sprite.file.clone(), load_bitmap(game_dir, sprite)?)))
+            .collect();
+        Some(Self {
+            layout,
+            font,
+            bitmaps,
+        })
+    }
+}
+
+/// What the HUD shows this frame.
+pub struct HudState<'a> {
+    /// Normalized health, 0..1.
+    pub health: f32,
+    pub slow_motion: &'a SlowMotion,
+    pub inventory: &'a PlayerInventory,
+}
+
 /// A frame to draw on, `width` x `height`, showing the 640x480 HUD space.
 pub struct HudTarget<'a> {
     pub pixels: &'a mut [u32],
@@ -559,6 +738,17 @@ impl HudTarget<'_> {
         bitmap: &crate::scene::DecodedTexture,
         visible: f32,
     ) {
+        self.draw_tinted(sprite, bitmap, visible, [255, 255, 255, sprite.alpha]);
+    }
+
+    /// As [`Self::draw_sprite`], with `rgba` in place of the sprite's own alpha.
+    fn draw_tinted(
+        &mut self,
+        sprite: &HudSprite,
+        bitmap: &crate::scene::DecodedTexture,
+        visible: f32,
+        rgba: [u8; 4],
+    ) {
         let size = [sprite.width, sprite.height];
         let [x, y] = top_left(sprite.reference, sprite.position, size);
         let hidden = 1.0 - visible;
@@ -571,8 +761,52 @@ impl HudTarget<'_> {
             ],
             [0.0, hidden, 1.0, 1.0],
             bitmap,
-            [255, 255, 255, sprite.alpha],
+            rgba,
         );
+    }
+
+    /// The whole HUD, as `0x4aee20` updates it.
+    pub fn draw_hud(&mut self, assets: &HudAssets, state: &HudState) {
+        let layout = &assets.layout;
+        let bitmap = |sprite: &HudSprite| assets.bitmaps.get(&sprite.file);
+        if let Some(figure) = bitmap(&layout.health_background) {
+            self.draw_sprite(&layout.health_background, figure, 1.0);
+        }
+        if let Some(pain) = bitmap(&layout.health_pain) {
+            self.draw_sprite(
+                &layout.health_pain,
+                pain,
+                1.0 - state.health.clamp(0.0, 1.0),
+            );
+        }
+        let color = layout.hourglass_colors.pick(state.slow_motion);
+        if let Some(glass) = bitmap(&layout.hourglass_background) {
+            self.draw_tinted(&layout.hourglass_background, glass, 1.0, color);
+        }
+        if let Some(glass) = bitmap(&layout.hourglass) {
+            self.draw_tinted(&layout.hourglass, glass, state.slow_motion.level, color);
+        }
+        let painkillers = state.inventory.painkillers();
+        if painkillers > 0 {
+            if let Some(cross) = bitmap(&layout.painkiller_icon) {
+                self.draw_sprite(&layout.painkiller_icon, cross, 1.0);
+            }
+            let count = painkillers.to_string();
+            self.draw_text(&assets.font, layout.painkiller_count, &count, [255; 4]);
+        }
+        let Some(id) = state.inventory.weapon_id() else {
+            return;
+        };
+        if let Some(sprite) = layout.weapons.get(id) {
+            if let Some(image) = bitmap(sprite) {
+                self.draw_sprite(sprite, image, 1.0);
+            }
+        }
+        let unlimited = layout.unlimited_text.get(id).map_or("", String::as_str);
+        if let Some((clip, pocket)) = state.inventory.ammo_text(unlimited) {
+            self.draw_text(&assets.font, layout.ammo_in_clip, &clip, [255; 4]);
+            self.draw_text(&assets.font, layout.ammo_in_pocket, &pocket, [255; 4]);
+        }
     }
 
     /// `text` anchored at `anchor`, tinted by `rgba`.
@@ -587,7 +821,8 @@ impl HudTarget<'_> {
                 [x, y, x + width, y + size[1]],
                 [
                     start / sheet_w,
-                    1.0 / sheet_h,
+                    // Half a texel in, so the filter does not reach the ruler above.
+                    1.5 / sheet_h,
                     (start + width) / sheet_w,
                     (1.0 + size[1]) / sheet_h,
                 ],
@@ -900,6 +1135,105 @@ mod tests {
         }
     }
 
+    fn gauge() -> SlowMotion {
+        SlowMotion {
+            level: 1.0,
+            active: false,
+            seconds: 15.0,
+            threshold: 0.001,
+        }
+    }
+
+    #[test]
+    fn globalconfig_gives_the_gauges_length_and_threshold() {
+        let text = "[slowmotion]\n{\n\t[general]\n\tSlowMotionTime\t\t\t= 15.0;\t\t\t// length\n\tThreshold\t\t\t\t= 0.1%;\t\t\t// must be exceeded\n}\n";
+        assert_eq!(SlowMotion::parse(text), Some(gauge()));
+    }
+
+    #[test]
+    fn slow_motion_drains_the_gauge_only_while_active() {
+        let mut slow = gauge();
+        slow.step(false, 3.0);
+        assert_eq!(slow.level, 1.0);
+        slow.step(true, 3.0);
+        assert!(slow.active);
+        assert!((slow.level - 0.8).abs() < 1e-5);
+        slow.step(false, 1.0);
+        assert!(!slow.active);
+    }
+
+    #[test]
+    fn slow_motion_ends_when_the_gauge_is_empty_and_will_not_start_below_the_threshold() {
+        let mut slow = gauge();
+        slow.step(true, 20.0);
+        assert_eq!(slow.level, 0.0);
+        assert!(!slow.active);
+        slow.step(true, 0.1);
+        assert!(!slow.active);
+    }
+
+    #[test]
+    fn the_hourglass_colour_follows_the_gauge() {
+        let colors = HourglassColors {
+            active: [1; 4],
+            normal: [2; 4],
+            unavailable: [3; 4],
+        };
+        let mut slow = gauge();
+        assert_eq!(colors.pick(&slow), [2; 4]);
+        slow.active = true;
+        assert_eq!(colors.pick(&slow), [1; 4]);
+        slow.active = false;
+        slow.level = 0.0;
+        assert_eq!(colors.pick(&slow), [3; 4]);
+    }
+
+    #[test]
+    fn ammo_text_is_the_clip_and_the_pocket() {
+        let mut player = inventory();
+        player.pickup_weapon("beretta");
+        player.pickup_ammo("beretta", 99);
+        assert_eq!(
+            player.ammo_text("-"),
+            Some(("18".to_string(), "99".to_string()))
+        );
+    }
+
+    #[test]
+    fn unlimited_ammo_shows_its_text_in_the_pocket_slot_alone() {
+        let mut player = inventory();
+        player.remove_all("beretta");
+        assert_eq!(
+            player.ammo_text("-"),
+            Some((String::new(), "-".to_string()))
+        );
+        assert_eq!(PlayerInventory::default().ammo_text("-"), None);
+    }
+
+    #[test]
+    fn a_picked_up_painkiller_counts_only_through_its_pocket() {
+        let mut player = inventory();
+        player.pickup_weapon("painkiller");
+        assert_eq!(player.painkillers(), 0);
+        player.pickup_ammo("painkiller", 3);
+        assert_eq!(player.painkillers(), 3);
+    }
+
+    #[test]
+    fn hud_txt_reads_the_hourglass_colours_and_unlimited_text() {
+        let text = format!(
+            "{HUD}\n[SlowMotion]\n{{\n[SlowMotionSpecific]\nColorActive = ffffffff;\nColorNormal = 788088d0;\nColorUnavailable = 000000d0;\n}}\n"
+        );
+        let text = text.replace(
+            "id = WEAPONID_BERETTA;",
+            "id = WEAPONID_BERETTA;\nUnlimitedAmmoText = \"-\";",
+        );
+        let hud = HudLayout::parse(&text).expect("hud");
+        assert_eq!(hud.hourglass_colors.normal, [0x78, 0x80, 0x88, 0xd0]);
+        assert_eq!(hud.hourglass_colors.unavailable, [0, 0, 0, 0xd0]);
+        assert_eq!(hud.unlimited_text["WEAPONID_BERETTA"], "-");
+    }
+
     #[test]
     fn a_glyph_is_one_wider_than_its_ruler_run_and_the_font_two_shorter_than_its_sheet() {
         assert_eq!(ruler_font().size("A"), [4.0, 4.0]);
@@ -1031,6 +1365,141 @@ mod tests {
         assert_eq!(pixels[50 * width + 98], 0x00ff_ffff);
         assert_eq!(pixels[50 * width + 101], 0);
         assert_eq!(pixels[50 * width + 94], 0);
+    }
+
+    /// Solid bitmaps for each sprite: figure grey, pain red, hourglass white.
+    fn test_assets() -> HudAssets {
+        let at = |x: f32, y: f32, w: f32, h: f32, file: &str, alpha: u8| HudSprite {
+            reference: 7,
+            position: [x, y],
+            width: w,
+            height: h,
+            file: file.into(),
+            alpha_file: String::new(),
+            alpha,
+        };
+        let layout = HudLayout {
+            health_background: at(25.0, 478.0, 45.0, 90.0, "figure", 255),
+            health_pain: at(25.0, 478.0, 45.0, 90.0, "pain", 255),
+            hourglass_background: at(60.0, 478.0, 16.0, 54.0, "glass", 255),
+            hourglass: at(60.0, 478.0, 14.0, 50.0, "glass", 255),
+            painkiller_icon: at(120.0, 478.0, 12.0, 20.0, "cross", 255),
+            hourglass_colors: HourglassColors {
+                active: [255; 4],
+                normal: [0, 255, 0, 255],
+                unavailable: [0, 0, 0, 255],
+            },
+            ..HudLayout::default()
+        };
+        let bitmaps = [
+            ("figure", 0x0080_8080),
+            ("pain", 0x00ff_0000),
+            ("glass", 0x00ff_ffff),
+            ("cross", 0x0000_00ff),
+        ]
+        .map(|(name, rgb)| (name.to_string(), solid(rgb)))
+        .into_iter()
+        .collect();
+        HudAssets {
+            layout,
+            font: ruler_font(),
+            bitmaps,
+        }
+    }
+
+    fn drawn(health: f32, slow: &SlowMotion, inventory: &PlayerInventory) -> Vec<u32> {
+        let mut pixels = vec![0u32; 640 * 480];
+        let mut target = HudTarget {
+            pixels: &mut pixels,
+            width: 640,
+            height: 480,
+        };
+        let state = HudState {
+            health,
+            slow_motion: slow,
+            inventory,
+        };
+        target.draw_hud(&test_assets(), &state);
+        pixels
+    }
+
+    #[test]
+    fn at_full_health_only_the_figure_shows() {
+        let pixels = drawn(1.0, &gauge(), &inventory());
+        assert_eq!(pixels[400 * 640 + 25], 0x0080_8080);
+        assert_eq!(pixels[470 * 640 + 25], 0x0080_8080);
+    }
+
+    #[test]
+    fn pain_fills_the_figure_from_the_feet() {
+        let pixels = drawn(0.5, &gauge(), &inventory());
+        assert_eq!(pixels[400 * 640 + 25], 0x0080_8080);
+        assert_eq!(pixels[470 * 640 + 25], 0x00ff_0000);
+    }
+
+    #[test]
+    fn the_hourglass_empties_from_the_top_in_its_state_colour() {
+        let mut slow = gauge();
+        slow.level = 0.5;
+        let pixels = drawn(1.0, &slow, &inventory());
+        assert_eq!(pixels[470 * 640 + 60], 0x0000_ff00);
+    }
+
+    #[test]
+    fn the_painkiller_icon_shows_only_with_painkillers() {
+        let mut player = inventory();
+        player.pickup_weapon("painkiller");
+        assert_eq!(drawn(1.0, &gauge(), &player)[470 * 640 + 120], 0);
+        player.pickup_ammo("painkiller", 2);
+        assert_eq!(drawn(1.0, &gauge(), &player)[470 * 640 + 120], 0x0000_00ff);
+    }
+
+    #[test]
+    fn retail_hud_assets_load_with_every_sprite() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        if crate::read_game_bytes(&game, r"\data\hud\hud.txt").is_none() {
+            return;
+        }
+        let assets = HudAssets::load(&game).expect("assets");
+        let layout = &assets.layout;
+        for sprite in [
+            &layout.health_background,
+            &layout.health_pain,
+            &layout.hourglass,
+            &layout.hourglass_background,
+            &layout.painkiller_icon,
+            &layout.weapons["WEAPONID_BERETTA"],
+        ] {
+            let bitmap = assets.bitmaps.get(&sprite.file);
+            assert!(bitmap.is_some(), "{}", sprite.file);
+        }
+        // The figure's corner is transparent and its middle is not.
+        let figure = &assets.bitmaps[&layout.health_background.file];
+        assert_eq!(figure.pixels[0] >> 24, 0);
+        let middle = (figure.height / 2 * figure.width + figure.width / 2) as usize;
+        assert!(figure.pixels[middle] >> 24 > 200);
+    }
+
+    #[test]
+    fn the_ruler_row_does_not_bleed_into_scaled_text() {
+        // The sheet below the ruler is empty, so nothing may show at any scale.
+        let font = ruler_font();
+        let (width, height) = (1280, 960);
+        let mut pixels = vec![0u32; width * height];
+        let mut target = HudTarget {
+            pixels: &mut pixels,
+            width,
+            height,
+        };
+        let anchor = HudText {
+            reference: 2,
+            position: [100.0, 50.0],
+        };
+        target.draw_text(&font, anchor, "A", [255; 4]);
+        assert!(pixels.iter().all(|px| *px == 0));
     }
 
     #[test]
