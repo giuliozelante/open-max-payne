@@ -2,6 +2,7 @@
 
 pub mod frontend;
 pub mod gpu;
+pub mod hud;
 pub mod kf2;
 pub mod menu_ui;
 pub mod particles;

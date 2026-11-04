@@ -703,12 +703,17 @@ fn fs(i: Out) -> Frag {
 }
 "#;
 
-/// `0x00RRGGBB` frame pixels as RGBA bytes; pixels equal to `transparent` get alpha 0.
+/// `0x00RRGGBB` frame pixels as RGBA bytes. With `transparent` (the HUD layer) the top byte is the
+/// pixel's transparency (`hud::blend`), so `HUD_CLEAR` gets alpha 0.
 fn frame_rgba(pixels: &[u32], transparent: Option<u32>) -> Vec<u8> {
     pixels
         .iter()
         .flat_map(|&p| {
-            let a = if Some(p) == transparent { 0 } else { 255 };
+            let a = if transparent.is_some() {
+                255 - (p >> 24) as u8
+            } else {
+                255
+            };
             [(p >> 16) as u8, (p >> 8) as u8, p as u8, a]
         })
         .collect()
@@ -728,7 +733,8 @@ fn overlay_rgba(hud: &[u32], fade: Option<[u8; 4]>) -> Vec<u8> {
             if p == HUD_CLEAR {
                 fade
             } else {
-                [(f >> 16) as u8, (f >> 8) as u8, f as u8, 255]
+                let alpha = (255 - (p >> 24) as u8).max(fade[3]);
+                [(f >> 16) as u8, (f >> 8) as u8, f as u8, alpha]
             }
         })
         .collect()
@@ -2302,6 +2308,12 @@ mod tests {
         );
         // The background keeps every pixel opaque.
         assert!(frame_rgba(&hud, None).chunks(4).all(|c| c[3] == 0xff));
+    }
+
+    #[test]
+    fn a_translucent_hud_pixel_keeps_its_alpha_in_the_overlay() {
+        let hud = [crate::hud::blend(HUD_CLEAR, 0x00ff_8000, 128)];
+        assert_eq!(frame_rgba(&hud, Some(HUD_CLEAR)), vec![0xff, 0x80, 0, 128]);
     }
 
     #[test]

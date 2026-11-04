@@ -2211,7 +2211,7 @@ pub(crate) fn draw_sprites<'a>(
 /// Bilinear diffuse texel at `(u, v)` with repeat addressing, all four channels (alpha is
 /// filtered before the alpha test, as in D3D). Retail offers bilinear, trilinear and anisotropic
 /// filtering (`FilteringMode`); the software renderer has no mipmaps.
-fn sample_texture(t: &crate::scene::DecodedTexture, u: f32, v: f32) -> u32 {
+pub(crate) fn sample_texture(t: &crate::scene::DecodedTexture, u: f32, v: f32) -> u32 {
     let (w, h) = (t.width.max(1), t.height.max(1));
     let x = (u * w as f32 - 0.5).rem_euclid(w as f32);
     let y = (v * h as f32 - 0.5).rem_euclid(h as f32);
