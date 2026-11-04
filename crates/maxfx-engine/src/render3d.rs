@@ -283,6 +283,14 @@ pub fn run_3d_walkthrough(
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
     scene.inventory.best_weapons = crate::load_best_weapons(&game_root);
     let hud_assets = crate::hud::HudAssets::load(&game_root);
+    let text = |path: &str| {
+        crate::read_game_bytes(&game_root, path)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    };
+    let chase_rig = text(r"\data\globalconfig.txt")
+        .zip(text(r"\data\database\skeletons\default_skeleton.txt"))
+        .and_then(|(config, skeleton)| ChaseRig::parse(&config, &skeleton))
+        .unwrap_or(RETAIL_RIG);
     let mut slow_motion = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt")
         .and_then(|bytes| crate::hud::SlowMotion::parse(&String::from_utf8_lossy(&bytes)))
         .unwrap_or(crate::hud::SlowMotion {
@@ -648,7 +656,7 @@ pub fn run_3d_walkthrough(
         let mut cam_up = [-sy * sp, cp, -cy * sp];
         let mut cam_fwd = [sy * cp, sp, cy * cp];
         let mut cam_pos = if third_person && !fly_mode {
-            chase_camera(&scene, player_pos, cam_fwd)
+            chase_camera(&scene, &chase_rig, player_pos, cam_fwd)
         } else {
             player_pos
         };
@@ -1177,15 +1185,73 @@ fn move_clip_time(time: f32, dt: f32) -> f32 {
     time + dt
 }
 
-const CHASE_BACK: f32 = 2.2;
-const CHASE_UP: f32 = 0.4;
+/// The player camera's offsets, each `(right, up, forward)` in the player's yaw frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ChaseRig {
+    /// `DefaultCameraPointOffset` (skeleton), from the feet: where the camera is cast from.
+    point: [f32; 3],
+    /// `globalconfig.txt` `[camera]` `UpFollowDistance`: the camera above the player.
+    up: [f32; 3],
+    /// `MiddleFollowDistance`: the camera behind the player.
+    middle: [f32; 3],
+    /// `DownFollowDistance`: the camera below the player.
+    down: [f32; 3],
+}
 
-fn chase_eye(player: [f32; 3], cam_fwd: [f32; 3], dist: f32) -> [f32; 3] {
+impl ChaseRig {
+    fn parse(globalconfig: &str, skeleton: &str) -> Option<Self> {
+        Some(Self {
+            point: config_vector(skeleton, "DefaultCameraPointOffset")?,
+            up: config_vector(globalconfig, "UpFollowDistance")?,
+            middle: config_vector(globalconfig, "MiddleFollowDistance")?,
+            down: config_vector(globalconfig, "DownFollowDistance")?,
+        })
+    }
+}
+
+/// `key = ( x, y, z );` in a retail text file.
+fn config_vector(text: &str, key: &str) -> Option<[f32; 3]> {
+    let line = text
+        .lines()
+        .find(|line| line.trim_start().starts_with(key))?;
+    let body = line.split_once('(')?.1.split_once(')')?.0;
+    let mut parts = body.split(',').map(|part| part.trim().parse::<f32>().ok());
+    Some([parts.next()??, parts.next()??, parts.next()??])
+}
+
+/// The retail values, for data that does not load.
+const RETAIL_RIG: ChaseRig = ChaseRig {
+    point: [0.12, 1.75, -0.12],
+    up: [0.06, 0.40, -0.40],
+    middle: [0.06, 0.5, -4.00],
+    down: [0.06, 0.80, -1.00],
+};
+
+/// `offset` from `base` in the yaw frame of `cam_fwd`.
+fn yaw_offset(base: [f32; 3], cam_fwd: [f32; 3], offset: [f32; 3]) -> [f32; 3] {
+    let ahead = normalize([cam_fwd[0], 0.0, cam_fwd[2]]);
+    let right = [ahead[2], 0.0, -ahead[0]];
     [
-        player[0] - cam_fwd[0] * dist,
-        player[1] - cam_fwd[1] * dist + CHASE_UP,
-        player[2] - cam_fwd[2] * dist,
+        base[0] + right[0] * offset[0] + ahead[0] * offset[2],
+        base[1] + offset[1],
+        base[2] + right[2] * offset[0] + ahead[2] * offset[2],
     ]
+}
+
+/// The camera point the follow ray starts from.
+fn chase_start(rig: &ChaseRig, player: [f32; 3], cam_fwd: [f32; 3]) -> [f32; 3] {
+    let feet = [player[0], player[1] - EYE_HEIGHT, player[2]];
+    yaw_offset(feet, cam_fwd, rig.point)
+}
+
+/// The follow position. HYPOTHESIS: the three distances blend linearly with the pitch, from the
+/// middle one when level to the up one looking straight down and the down one looking straight
+/// up. Their comments in `globalconfig.txt` name those positions; the blend itself is not read.
+fn chase_eye(rig: &ChaseRig, player: [f32; 3], cam_fwd: [f32; 3]) -> [f32; 3] {
+    let steep = cam_fwd[1].clamp(-1.0, 1.0).abs().asin() / std::f32::consts::FRAC_PI_2;
+    let end = if cam_fwd[1] < 0.0 { rig.up } else { rig.down };
+    let follow = [0, 1, 2].map(|c| rig.middle[c] + (end[c] - rig.middle[c]) * steep);
+    yaw_offset(chase_start(rig, player, cam_fwd), cam_fwd, follow)
 }
 
 /// How far the chase camera stays off what it hits: `globalconfig.txt` `[camera]`
@@ -1195,26 +1261,16 @@ const CAMERA_CLEARANCE: f32 = 0.1 + NEAR_Z;
 /// Third-person eye: cast from the player toward the follow position and stop before the first
 /// level polygon in the way (retail casts the camera "from its startpoint" toward the follow
 /// distance). `CameraCollision` polygons count: they exist for this.
-fn chase_camera(scene: &LdbScene, player: [f32; 3], cam_fwd: [f32; 3]) -> [f32; 3] {
-    let want = chase_eye(player, cam_fwd, CHASE_BACK);
-    let d = [
-        want[0] - player[0],
-        want[1] - player[1],
-        want[2] - player[2],
-    ];
-    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-    let Some(t) = segment_hit(scene, player, d) else {
+fn chase_camera(scene: &LdbScene, rig: &ChaseRig, player: [f32; 3], cam_fwd: [f32; 3]) -> [f32; 3] {
+    let start = chase_start(rig, player, cam_fwd);
+    let want = chase_eye(rig, player, cam_fwd);
+    let d = sub3(want, start);
+    let len = dot3(d, d).sqrt();
+    let Some(t) = segment_hit(scene, start, d) else {
         return keep_clear(scene, want);
     };
     let k = (t * len - CAMERA_CLEARANCE).max(0.0) / len;
-    keep_clear(
-        scene,
-        [
-            player[0] + d[0] * k,
-            player[1] + d[1] * k,
-            player[2] + d[2] * k,
-        ],
-    )
+    keep_clear(scene, [0, 1, 2].map(|c| start[c] + d[c] * k))
 }
 
 /// Push the eye out to `CAMERA_CLEARANCE` from every camera-blocking polygon it sits over: the
@@ -3867,12 +3923,12 @@ mod tests {
         });
         let player = [0.0, 1.6, 0.0];
         let fwd = [0.0, 0.0, 1.0];
-        let eye = chase_camera(&scene, player, fwd);
+        let eye = chase_camera(&scene, &RETAIL_RIG, player, fwd);
         assert!(eye[2] > -1.0 && eye[2] < -0.5, "{eye:?}");
         // Nothing in the way: the full follow distance.
         assert_eq!(
-            chase_camera(&empty_scene(), player, fwd),
-            chase_eye(player, fwd, CHASE_BACK)
+            chase_camera(&empty_scene(), &RETAIL_RIG, player, fwd),
+            chase_eye(&RETAIL_RIG, player, fwd)
         );
         // A skybox wall does not stop the camera.
         scene.materials.insert(
@@ -3887,8 +3943,8 @@ mod tests {
             },
         );
         assert_eq!(
-            chase_camera(&scene, player, fwd),
-            chase_eye(player, fwd, CHASE_BACK)
+            chase_camera(&scene, &RETAIL_RIG, player, fwd),
+            chase_eye(&RETAIL_RIG, player, fwd)
         );
     }
 
@@ -3898,7 +3954,7 @@ mod tests {
         // wall and the near plane showed the level behind it.
         let mut scene = empty_scene();
         let v = |y: f32, z: f32| SceneVertex {
-            pos: [0.1, y, z],
+            pos: [0.3, y, z],
             uv: [0.0; 2],
             luv: [0.0; 2],
         };
@@ -3913,9 +3969,10 @@ mod tests {
                 lightmap_id: -1,
             }],
         });
-        let eye = chase_camera(&scene, [0.0, 1.6, 0.0], [0.0, 0.0, 1.0]);
-        assert!((eye[0] - (0.1 - CAMERA_CLEARANCE)).abs() < 1e-4, "{eye:?}");
-        assert!((eye[2] + CHASE_BACK).abs() < 1e-4, "{eye:?}");
+        let player = [0.0, EYE_HEIGHT, 0.0];
+        let eye = chase_camera(&scene, &RETAIL_RIG, player, [0.0, 0.0, 1.0]);
+        assert!((eye[0] - (0.3 - CAMERA_CLEARANCE)).abs() < 1e-4, "{eye:?}");
+        assert!((eye[2] + 4.12).abs() < 1e-4, "{eye:?}");
     }
 
     #[test]
@@ -4040,12 +4097,61 @@ mod tests {
         assert_eq!(fb[centre], 0);
     }
 
+    /// `globalconfig.txt` and the skeleton: camera point plus `MiddleFollowDistance`.
     #[test]
-    fn chase_eye_sits_behind_and_above_the_player() {
-        let eye = chase_eye([0.0, 1.6, 0.0], [0.0, 0.0, 1.0], CHASE_BACK);
-        assert!(eye[0].abs() < 1e-4);
-        assert!((eye[1] - 2.0).abs() < 1e-4);
-        assert!((eye[2] + CHASE_BACK).abs() < 1e-4);
+    fn looking_level_the_camera_is_four_metres_behind_the_camera_point() {
+        let eye = chase_eye(&RETAIL_RIG, [0.0, EYE_HEIGHT, 0.0], [0.0, 0.0, 1.0]);
+        for (got, want) in eye.iter().zip([0.18, 2.25, -4.12]) {
+            assert!((got - want).abs() < 1e-5, "{eye:?}");
+        }
+    }
+
+    #[test]
+    fn the_camera_turns_with_the_players_yaw() {
+        // Facing +x, the player's right is -z.
+        let eye = chase_eye(&RETAIL_RIG, [0.0, EYE_HEIGHT, 0.0], [1.0, 0.0, 0.0]);
+        for (got, want) in eye.iter().zip([-4.12, 2.25, -0.18]) {
+            assert!((got - want).abs() < 1e-5, "{eye:?}");
+        }
+    }
+
+    #[test]
+    fn looking_straight_down_the_camera_uses_the_up_distance() {
+        let eye = chase_eye(&RETAIL_RIG, [0.0, EYE_HEIGHT, 0.0], [0.0, -1.0, 0.0001]);
+        for (got, want) in eye.iter().zip([0.18, 2.15, -0.52]) {
+            assert!((got - want).abs() < 1e-3, "{eye:?}");
+        }
+    }
+
+    #[test]
+    fn looking_straight_up_the_camera_uses_the_down_distance() {
+        let eye = chase_eye(&RETAIL_RIG, [0.0, EYE_HEIGHT, 0.0], [0.0, 1.0, 0.0001]);
+        for (got, want) in eye.iter().zip([0.18, 2.55, -1.12]) {
+            assert!((got - want).abs() < 1e-3, "{eye:?}");
+        }
+    }
+
+    #[test]
+    fn the_follow_distance_blends_with_the_pitch() {
+        let (s, c) = std::f32::consts::FRAC_PI_4.sin_cos();
+        let eye = chase_eye(&RETAIL_RIG, [0.0, EYE_HEIGHT, 0.0], [0.0, -s, c]);
+        // Half way from the middle distance to the up distance.
+        assert!((eye[2] + 0.12 + 2.2).abs() < 1e-3, "{eye:?}");
+    }
+
+    #[test]
+    fn the_chase_ray_starts_at_the_camera_point() {
+        let start = chase_start(&RETAIL_RIG, [0.0, EYE_HEIGHT, 0.0], [0.0, 0.0, 1.0]);
+        for (got, want) in start.iter().zip([0.12, 1.75, -0.12]) {
+            assert!((got - want).abs() < 1e-5, "{start:?}");
+        }
+    }
+
+    #[test]
+    fn the_rig_reads_its_offsets_from_the_retail_text() {
+        let config = "[camera]\n{\n\t[general]\n\tUpFollowDistance\t= ( 0.06, 0.40, -0.40 );\n\tMiddleFollowDistance\t= ( 0.06, 0.5, -4.00 ); //was 0,0.75,-3\n\tDownFollowDistance\t= ( 0.06, 0.80, -1.00 );\n}\n";
+        let skeleton = "[Sk]\nDefaultCameraPointOffset\t\t= ( 0.12, 1.75, -0.12 );\n";
+        assert_eq!(ChaseRig::parse(config, skeleton), Some(RETAIL_RIG));
     }
 
     #[test]
