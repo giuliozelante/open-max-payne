@@ -83,6 +83,8 @@ struct EnemyState {
     rig_index: usize,
     pursues: bool,
     invulnerable: bool,
+    /// Index of the death clip, seconds into it, and how many of its sounds have played.
+    death: Option<(usize, f32, usize)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -167,6 +169,7 @@ pub fn run_3d_walkthrough(
             rig_index,
             pursues: ch.pursues(),
             invulnerable,
+            death: None,
         });
     }
     // Tutorial-only stand-in. The house has no room named Alley, so this stays out of New Game.
@@ -194,6 +197,7 @@ pub fn run_3d_walkthrough(
                         rig_index,
                         pursues: true,
                         invulnerable: false,
+                        death: None,
                     });
                 }
             }
@@ -294,6 +298,7 @@ pub fn run_3d_walkthrough(
     let mut particle_lights = ParticleLights::default();
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
+    let death_clips = crate::load_death_clips(&game_root);
     let weapon_models: BTreeMap<String, crate::kf2::KfsMesh> = scene
         .inventory
         .defs
@@ -681,6 +686,11 @@ pub fn run_3d_walkthrough(
                     if en.health == 0 {
                         scene.kill_character(&en.name);
                         slow_motion.reward_kill();
+                        // `DeathCause = PROJECTILEDEATH_RANDOM`.
+                        let pick = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |time| time.subsec_nanos() as usize);
+                        en.death = Some((pick % death_clips.len().max(1), 0.0, 0));
                     }
                     println!(
                         "  3D Engine: Hit {}! (health={})",
@@ -738,6 +748,16 @@ pub fn run_3d_walkthrough(
         let player_feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
         for en in &mut enemies {
             en.hit_flash = (en.hit_flash - base_dt).max(0.0);
+            if let Some((clip, time, played)) = &mut en.death {
+                *time += world_dt;
+                let sounds = death_clips.get(*clip).map_or(&[][..], |d| &d.sounds);
+                while let Some((_, catalog, cue)) =
+                    sounds.get(*played).filter(|sound| sound.0 <= *time)
+                {
+                    *played += 1;
+                    queue_sound(&mut scene, catalog, cue, en.world_pos);
+                }
+            }
             if en.health <= 0 || !en.pursues {
                 continue;
             }
@@ -870,14 +890,22 @@ pub fn run_3d_walkthrough(
                 if let Some(erig) = bodies.get(en.rig_index) {
                     let moving = en.walk_phase > 0.0;
                     let time = if moving { en.walk_phase } else { anim_clock };
-                    let verts = character_world_verts(
-                        erig,
-                        en.world_pos,
-                        en.yaw,
-                        time,
-                        moving,
-                        en.health <= 0,
-                    );
+                    let dying = en
+                        .death
+                        .and_then(|(clip, time, _)| Some((death_clips.get(clip)?, time)));
+                    let verts = match dying {
+                        Some((death, time)) => {
+                            dying_world_verts(erig, death, en.world_pos, en.yaw, time)
+                        }
+                        None => character_world_verts(
+                            erig,
+                            en.world_pos,
+                            en.yaw,
+                            time,
+                            moving,
+                            en.health <= 0,
+                        ),
+                    };
                     let light = character_vertex_light(
                         &erig.mesh,
                         &verts,
@@ -889,7 +917,7 @@ pub fn run_3d_walkthrough(
                     characters.push(crate::gpu::GpuCharacter {
                         mesh: &erig.mesh,
                         verts,
-                        dead: en.health <= 0,
+                        dead: en.health <= 0 && dying.is_none(),
                         light,
                     });
                 }
@@ -998,8 +1026,16 @@ pub fn run_3d_walkthrough(
             if let Some(erig) = bodies.get(en.rig_index) {
                 let moving = en.walk_phase > 0.0;
                 let time = if moving { en.walk_phase } else { anim_clock };
-                let dead = en.health <= 0;
-                let verts = character_world_verts(erig, en.world_pos, en.yaw, time, moving, dead);
+                let dying = en
+                    .death
+                    .and_then(|(clip, time, _)| Some((death_clips.get(clip)?, time)));
+                let dead = en.health <= 0 && dying.is_none();
+                let verts = match dying {
+                    Some((death, time)) => {
+                        dying_world_verts(erig, death, en.world_pos, en.yaw, time)
+                    }
+                    None => character_world_verts(erig, en.world_pos, en.yaw, time, moving, dead),
+                };
                 render_kfs_character(
                     &erig.mesh,
                     &verts,
@@ -2960,8 +2996,13 @@ fn bone_frame(
 
 /// Queue a `sounds/weapons.txt` cue heard from `at`.
 fn queue_weapon_sound(scene: &mut LdbScene, cue: &str, at: [f32; 3]) {
+    queue_sound(scene, "weapons", cue, at);
+}
+
+/// Queue a cue of `sounds/{catalog}.txt` heard from `at`.
+fn queue_sound(scene: &mut LdbScene, catalog: &str, cue: &str, at: [f32; 3]) {
     scene.sound_queue.push(crate::scene::QueuedSound {
-        category: "weapons".to_string(),
+        category: catalog.to_string(),
         cue: cue.to_string(),
         filename: None,
         emitter: String::new(),
@@ -2992,6 +3033,34 @@ pub(crate) fn held_weapon_verts(
         ]
     };
     Some(held.into_iter().map(place).collect())
+}
+
+/// A body in its death clip, held on the last key once it ends.
+fn dying_world_verts(
+    rig: &CharacterRig,
+    death: &crate::kf2::DeathClip,
+    world_pos: [f32; 3],
+    yaw: f32,
+    time: f32,
+) -> Vec<[f32; 3]> {
+    let (sy, cy) = yaw.sin_cos();
+    let time = time.min(crate::kf2::clip_end(&death.clip));
+    pose_mesh(
+        &rig.mesh,
+        rig.skin.as_ref(),
+        rig.bind.as_ref(),
+        Some(&death.clip),
+        time,
+    )
+    .into_iter()
+    .map(|[x, y, z]| {
+        [
+            world_pos[0] + x * cy + z * sy,
+            world_pos[1] + y,
+            world_pos[2] - x * sy + z * cy,
+        ]
+    })
+    .collect()
 }
 
 pub(crate) fn character_world_verts(

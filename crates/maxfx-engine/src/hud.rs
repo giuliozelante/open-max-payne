@@ -584,6 +584,23 @@ pub fn parse_bone_projectiles(skeleton: &str, index: &str) -> Vec<(u32, String)>
         .collect()
 }
 
+/// `(frame, catalog, cue)` of each `A_Play3DSound` in the `[Animation]` of `index`.
+pub fn parse_clip_sounds(skeleton: &str, index: &str) -> Vec<(u32, String, String)> {
+    let header = format!("Index = {index};");
+    skeleton
+        .lines()
+        .skip_while(|line| !line.contains(&header))
+        .skip(1)
+        .take_while(|line| !line.contains("[Animation]"))
+        .filter_map(|line| {
+            let frame = line.split_once("Frame =")?.1.split(';').next()?;
+            let catalog = weapon_cue_line(line, "A_Play3DSound", 0)?;
+            let cue = weapon_cue_line(line, "A_Play3DSound", 1)?;
+            Some((frame.trim().parse().ok()?, catalog, cue))
+        })
+        .collect()
+}
+
 /// Argument `arg` of the first `verb` message in the `[Animation]` of `index`.
 pub(crate) fn weapon_cue(weapon_txt: &str, index: &str, verb: &str, arg: usize) -> Option<String> {
     let header = format!("Index = {index};");
@@ -1359,6 +1376,18 @@ mod tests {
             [
                 (7, "bullet_leadpipe".to_string()),
                 (31, "bullet_leadpipe".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn clip_sounds_list_their_frames_catalogs_and_cues() {
+        let text = "[Animation] Index = CHARANIM_RANDOMDEATH1; Filename = anim\\death_minimum.kf2;\n{\n[Message] Frame = 0; String = \"this->A_Play3DSound ( enemy, mobster_death, head );\";\n[Message] Frame = 40; String = \"this->A_Play3DSound ( characters, death_medium, pelvis );\";\n}\n[Animation] Index = CHARANIM_RANDOMDEATH2; Filename = b.kf2;\n[Message] Frame = 1; String = \"this->A_Play3DSound ( other, cue, head );\";\n";
+        assert_eq!(
+            parse_clip_sounds(text, "CHARANIM_RANDOMDEATH1"),
+            [
+                (0, "enemy".to_string(), "mobster_death".to_string()),
+                (40, "characters".to_string(), "death_medium".to_string()),
             ]
         );
     }

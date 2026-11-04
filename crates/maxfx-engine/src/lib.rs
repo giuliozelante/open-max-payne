@@ -2744,6 +2744,32 @@ pub fn particle_effect_file(particles_txt: &str, effect: &str) -> Option<(String
     ))
 }
 
+/// `CHARANIM_RANDOMDEATH1..4` of the default skeleton, with their sounds.
+pub fn load_death_clips(game_dir: &Path) -> Vec<kf2::DeathClip> {
+    const DIR: &str = r"\data\database\skeletons\";
+    let mut source = GameSource::open(game_dir);
+    let Some(skeleton) = source.read(&format!("{DIR}default_skeleton.txt")) else {
+        return Vec::new();
+    };
+    let skeleton = String::from_utf8_lossy(&skeleton).into_owned();
+    (1..=4)
+        .filter_map(|number| {
+            let index = format!("CHARANIM_RANDOMDEATH{number}");
+            let header = format!("Index = {index};");
+            let line = skeleton.lines().find(|line| line.contains(&header))?;
+            let file = line.split_once("Filename =")?.1.split(';').next()?.trim();
+            let bytes = source.read(&format!(r"{DIR}default_skeleton\{file}"))?;
+            let clip = kf2::parse_kf2_anim(&bytes)?;
+            let fps = clip.bones.first()?.fps.max(1.0);
+            let sounds = hud::parse_clip_sounds(&skeleton, &index)
+                .into_iter()
+                .map(|(frame, catalog, cue)| (frame as f32 / fps, catalog, cue))
+                .collect();
+            Some(kf2::DeathClip { clip, sounds })
+        })
+        .collect()
+}
+
 /// The model a weapon file names (`WeaponDef::model`) with its bitmaps.
 pub fn load_weapon_model(game_dir: &Path, model: &str) -> Option<kf2::KfsMesh> {
     const DIR: &str = r"\data\database\weapons\";
@@ -4271,6 +4297,27 @@ mod tests {
                     particle_effect_file(&particles, effect).unwrap_or_else(|| panic!("{effect}"));
                 assert!(read_game_bytes(&game, &path).is_some(), "{path}");
             }
+        }
+    }
+
+    #[test]
+    fn retail_death_clips_end_with_the_body_on_the_floor() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        if read_game_bytes(&game, r"\data\database\skeletons\default_skeleton.txt").is_none() {
+            return;
+        }
+        let deaths = load_death_clips(&game);
+        assert_eq!(deaths.len(), 4);
+        for death in &deaths {
+            let last = kf2::clip_end(&death.clip);
+            let locals = kf2::sample_locals(&death.clip, last);
+            let world = kf2::compose_world(&death.clip, &locals);
+            let pelvis = world["pelvis"].1[1];
+            assert!(pelvis < 0.5, "pelvis at {pelvis} m");
+            assert_eq!(death.sounds[0].1, "enemy");
         }
     }
 
