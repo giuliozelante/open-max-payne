@@ -1273,7 +1273,7 @@ pub fn mesh_from_parts(
         let base = mesh.vertices.len();
         mesh.vertices.extend(&part.vertices);
         mesh.faces
-            .extend(part.indices.chunks_exact(3).map(|tri| KfsFace {
+            .extend(part.indices.as_chunks::<3>().0.iter().map(|tri| KfsFace {
                 indices: [base + tri[0], base + tri[1], base + tri[2]],
                 uvs: [part.uvs[tri[0]], part.uvs[tri[1]], part.uvs[tri[2]]],
                 mat_index,
