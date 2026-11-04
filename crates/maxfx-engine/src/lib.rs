@@ -2627,6 +2627,19 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
                     .read(&path)
                     .and_then(|bytes| kf2::parse_kf2_anim(&bytes));
             }
+            let blows = hud::parse_bone_projectiles(&skeleton, &body);
+            if let Some((_, projectile)) = blows.first() {
+                let path = format!(r"\data\database\projectiles\{projectile}.txt");
+                def.melee_reach = source
+                    .read(&path)
+                    .and_then(|text| hud::parse_melee_reach(&String::from_utf8_lossy(&text)));
+                let fps = def
+                    .fire_clip
+                    .as_ref()
+                    .and_then(|clip| Some(clip.bones.first()?.fps));
+                let fps = fps.filter(|fps| *fps > 0.0).unwrap_or(1.0);
+                def.melee_blows = blows.iter().map(|(frame, _)| *frame as f32 / fps).collect();
+            }
             Some((name, def))
         })
         .collect()
@@ -4237,6 +4250,10 @@ mod tests {
             defs["leadpipe"].fire_sound.as_deref(),
             Some("shoot_leadpipe")
         );
+        let pipe = defs["leadpipe"].melee_reach.expect("pipe reach");
+        assert!((pipe - 1.8).abs() < 1e-4, "{pipe}");
+        assert_eq!(defs["leadpipe"].melee_blows.len(), 2);
+        assert_eq!(defs["beretta"].melee_reach, None);
         for (name, def) in &defs {
             if !matches!(name.as_str(), "empty" | "painkiller") {
                 let model = def.model.as_deref().unwrap_or_else(|| panic!("{name}"));
