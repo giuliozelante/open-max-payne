@@ -402,7 +402,9 @@ upper flight of the stairs. Its FSM's `DO_CharacterCollides` event runs `do_enab
 **Engine:** `LdbScene::character_collides` runs the event when the player runs into a mesh, once per contact.
 HYPOTHESIS: retail may send it on every contact, and to other characters too; neither is read.
 
-**Floor test:** `point_in_xz_tri` had its tolerance inverted, so points beside a triangle's edge were rejected. Slim
+**Floor test:** `point_in_xz_tri` had its tolerance inverted, so points beside a triangle's edge were rejected. The first
+fix kept a fixed bound on unscaled cross products, which a tiny triangle never exceeds: its slope spread across the
+house as an invisible ramp. The slack is now a distance from each edge, 5 mm. Slim
 floor triangles left strips with no floor, and the "never step into the void" rule stopped the player at the foot of the
 stairs. `find_floor_y` also accepted surfaces 1.15 m up; it now takes `STEP_UP`, the capsule radius 0.48 (HYPOTHESIS:
 retail moves a capsule with a round bottom and has no step value).

@@ -2452,13 +2452,15 @@ fn decal_depth(z: f32, depth_bias: f32) -> f32 {
 }
 
 fn point_in_xz_tri(px: f32, pz: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> bool {
-    let eps = 0.02f32;
-    let d1 = (px - b[0]) * (a[2] - b[2]) - (a[0] - b[0]) * (pz - b[2]);
-    let d2 = (px - c[0]) * (b[2] - c[2]) - (b[0] - c[0]) * (pz - c[2]);
-    let d3 = (px - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (pz - a[2]);
-    let has_neg = (d1 < -eps) || (d2 < -eps) || (d3 < -eps);
-    let has_pos = (d1 > eps) || (d2 > eps) || (d3 > eps);
-    !(has_neg && has_pos)
+    // Signed distance from each edge, so the slack is in metres whatever the triangle's size.
+    const SLACK: f32 = 0.005;
+    let side = |p: [f32; 3], q: [f32; 3]| {
+        let (ex, ez) = (q[0] - p[0], q[2] - p[2]);
+        let length = (ex * ex + ez * ez).sqrt().max(1e-6);
+        ((px - p[0]) * ez - ex * (pz - p[2])) / length
+    };
+    let sides = [side(b, a), side(c, b), side(a, c)];
+    !(sides.iter().any(|d| *d < -SLACK) && sides.iter().any(|d| *d > SLACK))
 }
 
 /// Character vertices posed (or laid flat when dead) and placed in the world.
@@ -4189,6 +4191,16 @@ mod tests {
         assert!(point_in_xz_tri(9.0, -4.0, a, b, c), "on the diagonal");
         assert!(point_in_xz_tri(9.0, -4.06, a, b, c), "on the long edge");
         assert!(point_in_xz_tri(9.5, -4.03, a, b, c), "inside");
+    }
+
+    #[test]
+    fn a_point_far_from_a_tiny_triangle_is_outside() {
+        // Unscaled cross products of a small triangle stay inside any fixed tolerance, so its
+        // slope reached across the house as an invisible ramp in a doorway.
+        let (a, b, c) = ([0.0, 0.0, 0.0], [0.05, 0.0, 0.0], [0.05, 0.0, 0.05]);
+        assert!(!point_in_xz_tri(0.5, 0.5, a, b, c));
+        assert!(!point_in_xz_tri(-0.2, 0.02, a, b, c));
+        assert!(point_in_xz_tri(0.04, 0.01, a, b, c));
     }
 
     #[test]
