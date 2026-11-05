@@ -222,7 +222,7 @@ pub fn run_3d_walkthrough(
     let mut shot_timer: f32 = 0.0;
     // Seconds into the player's shot or reload clip.
     let mut action_time: f32 = 0.0;
-    let mut reload_seen = false;
+    let mut reload_seen = 0;
     // Reach of the melee weapon swung last, and the clip times of its blows still to land.
     let mut melee: Option<f32> = None;
     let mut shot_seed: u32 = 0x2545_f491;
@@ -1020,12 +1020,11 @@ pub fn run_3d_walkthrough(
             rig.two_handed_bones = def.is_some_and(|def| def.two_handed_bones);
         }
 
-        let reloading = scene.inventory.reloading.is_some();
-        if reloading && !reload_seen {
+        if scene.inventory.reload_clips != reload_seen {
             let def = scene.inventory.current.as_ref();
             if let Some(def) = def.and_then(|name| scene.inventory.defs.get(name)) {
                 if let Some(rig) = player_rig.as_mut() {
-                    rig.action = def.reload_clip.clone();
+                    rig.action = def.reload_clip.clone().filter(|_| !motion.diving());
                     action_time = 0.0;
                 }
                 reload_cue = def
@@ -1034,7 +1033,7 @@ pub fn run_3d_walkthrough(
                     .map(|cue| (def.reload_sound_delay, cue));
             }
         }
-        reload_seen = reloading;
+        reload_seen = scene.inventory.reload_clips;
         if let Some((delay, cue)) = &mut reload_cue {
             *delay -= world_dt;
             if *delay <= 0.0 {

@@ -985,6 +985,8 @@ pub struct PlayerInventory {
     pub current: Option<String>,
     /// Seconds until the running reload's `C_Reload`.
     pub reloading: Option<f32>,
+    /// Reload clips started so far: a one-round reload plays one per round.
+    pub reload_clips: u32,
 }
 
 impl PlayerInventory {
@@ -1107,6 +1109,7 @@ impl PlayerInventory {
         }
         if stock.pocket > 0 {
             self.reloading = Some(reload_seconds);
+            self.reload_clips += 1;
         } else {
             self.take_best_loaded();
         }
@@ -1161,6 +1164,7 @@ impl PlayerInventory {
             stock.clip += rounds;
             if stock.clip < def.clip_size && stock.pocket > 0 {
                 self.reloading = Some(def.reload_seconds);
+                self.reload_clips += 1;
             }
         }
     }
@@ -1948,6 +1952,18 @@ mod tests {
         player.step(0.4);
         assert_eq!(player.stock("beretta"), stock(18, 2, false));
         assert!(player.fire());
+    }
+
+    #[test]
+    fn a_reload_of_one_round_plays_its_clip_for_every_round() {
+        let mut player = emptied_beretta(3);
+        player.defs.get_mut("beretta").expect("def").reload_amount = 1;
+        player.fire();
+        for _ in 0..3 {
+            player.step(1.4);
+        }
+        assert_eq!(player.stock("beretta"), stock(3, 0, false));
+        assert_eq!(player.reload_clips, 3);
     }
 
     #[test]
