@@ -503,6 +503,9 @@ pub fn run_3d_walkthrough(
         }
 
         // Interact (`E`): the action button trigger in reach
+        if scene.player_controls && window.is_key_pressed(Key::R, KeyRepeat::No) {
+            scene.inventory.start_reload();
+        }
         if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
             if let Some((name, gap)) = scene.nearest_action_trigger(&room_origins, feet) {
@@ -1021,6 +1024,12 @@ pub fn run_3d_walkthrough(
         }
 
         if scene.inventory.reload_clips != reload_seen {
+            let weapon = scene.inventory.current.as_deref().unwrap_or_default();
+            let index = format!("CHARANIM_RELOAD{}", weapon.to_ascii_uppercase());
+            let clip = player_clips.table.get(&index);
+            if clip.is_some_and(crate::player::stops_bullet_time) {
+                bullet_time = false;
+            }
             let def = scene.inventory.current.as_ref();
             if let Some(def) = def.and_then(|name| scene.inventory.defs.get(name)) {
                 if let Some(rig) = player_rig.as_mut() {
