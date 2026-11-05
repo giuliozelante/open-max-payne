@@ -990,7 +990,26 @@ pub fn run_3d_walkthrough(
         for en in &mut enemies {
             en.hit_flash = (en.hit_flash - base_dt).max(0.0);
             if let Some((clip, time, played)) = &mut en.death {
+                let before = *time;
                 *time += world_dt;
+                let blood = death_clips.get(*clip).map_or(&[][..], |d| &d.blood);
+                let due = blood.iter().filter(|(at, _)| (before..*time).contains(at));
+                for (_, splatter) in due {
+                    // HYPOTHESIS: the `torso` bone is taken as half the character's height.
+                    let torso = [0.0, ENEMY_HEIGHT / 2.0, 0.0];
+                    let pos = [0, 1, 2].map(|c| en.world_pos[c] + torso[c]);
+                    let gravity = particle_sprites.field.gravity;
+                    for _ in 0..splatter.count {
+                        let dir = spread_aim([0.0, 1.0, 0.0], splatter.accuracy, &mut shot_seed);
+                        droplets.push(crate::decals::Droplet {
+                            pos,
+                            vel: dir.map(|c| c * splatter.speed),
+                            gravity: gravity.map(|c| c * splatter.gravity),
+                            decal: splatter.decal.clone().unwrap_or_default(),
+                            age: 0.0,
+                        });
+                    }
+                }
                 let sounds = death_clips.get(*clip).map_or(&[][..], |d| &d.sounds);
                 while let Some((_, catalog, cue)) =
                     sounds.get(*played).filter(|sound| sound.0 <= *time)
