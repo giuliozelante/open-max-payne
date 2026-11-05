@@ -1194,7 +1194,7 @@ pub fn run_3d_walkthrough(
                     characters.push(crate::gpu::GpuCharacter {
                         mesh: &erig.mesh,
                         verts,
-                        dead: en.health <= 0 && dying.is_none(),
+                        two_sided: en.health <= 0 && dying.is_none(),
                         light,
                     });
                 }
@@ -1209,7 +1209,7 @@ pub fn run_3d_walkthrough(
                 characters.push(crate::gpu::GpuCharacter {
                     mesh,
                     verts,
-                    dead: false,
+                    two_sided: false,
                     light,
                 });
             }
@@ -1235,7 +1235,7 @@ pub fn run_3d_walkthrough(
                 characters.push(crate::gpu::GpuCharacter {
                     mesh: &prig.mesh,
                     verts,
-                    dead: false,
+                    two_sided: false,
                     light,
                 });
                 let mesh_yaw = player_mesh_yaw(yaw);
@@ -1259,7 +1259,8 @@ pub fn run_3d_walkthrough(
                     characters.push(crate::gpu::GpuCharacter {
                         mesh: weapon,
                         verts,
-                        dead: false,
+                        // The shotguns' faces are not wound consistently.
+                        two_sided: true,
                         light,
                     });
                 }
@@ -1384,12 +1385,14 @@ pub fn run_3d_walkthrough(
                     time,
                     player_moving,
                 );
-                for (mesh, verts) in std::iter::once((&prig.mesh, verts)).chain(guns) {
+                let body = std::iter::once((&prig.mesh, verts, false));
+                let guns = guns.into_iter().map(|(mesh, verts)| (mesh, verts, true));
+                for (mesh, verts, two_sided) in body.chain(guns) {
                     render_kfs_character(
                         mesh,
                         &verts,
                         player_feet,
-                        false,
+                        two_sided,
                         false,
                         &frame_lights,
                         scene.ambient,
@@ -3750,16 +3753,17 @@ pub(crate) fn character_world_verts(
 
 /// Unit front normal of a posed character triangle. KFS fronts are wound so that
 /// `(b - a) x (c - a)` points out of the mesh (188 of 193 head triangles of `Payne_Max_L0`).
-/// Zero for dead bodies, whose lie-flat placement mirrors the mesh: they are drawn two-sided.
+/// Zero for what is drawn two-sided: dead bodies, whose lie-flat placement mirrors the mesh, and
+/// held weapons.
 pub(crate) fn character_face_normal(
     world: &[[f32; 3]],
     [a, b, c]: [usize; 3],
-    dead: bool,
+    two_sided: bool,
 ) -> [f32; 3] {
     let (Some(&a), Some(&b), Some(&c)) = (world.get(a), world.get(b), world.get(c)) else {
         return [0.0; 3];
     };
-    if dead {
+    if two_sided {
         return [0.0; 3];
     }
     let (e1, e2) = (sub3(b, a), sub3(c, a));
@@ -3815,7 +3819,7 @@ fn render_kfs_character(
     mesh: &crate::kf2::KfsMesh,
     world: &[[f32; 3]],
     world_pos: [f32; 3],
-    dead: bool,
+    two_sided: bool,
     hit_flash: bool,
     lights: &[ScenePointLight],
     ambient: [f32; 3],
@@ -3856,7 +3860,7 @@ fn render_kfs_character(
         if c0[2] > FAR_Z && c1[2] > FAR_Z && c2[2] > FAR_Z {
             continue;
         }
-        let n = character_face_normal(world, face.indices, dead);
+        let n = character_face_normal(world, face.indices, two_sided);
         if !wireframe && dot3(sub3(world[i0], cam_pos), n) >= 0.05 {
             continue;
         }
