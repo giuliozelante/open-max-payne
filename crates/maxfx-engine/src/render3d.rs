@@ -224,6 +224,7 @@ pub fn run_3d_walkthrough(
     // Reach of the melee weapon swung last, and the clip times of its blows still to land.
     let mut melee: Option<f32> = None;
     let mut shot_seed: u32 = 0x2545_f491;
+    let mut droplets: Vec<crate::decals::Droplet> = Vec::new();
     // The rounds of the running shoot clip still to come, and the weapon firing them.
     let mut pending: Vec<crate::hud::ShotRound> = Vec::new();
     let mut firing = String::new();
@@ -359,7 +360,11 @@ pub fn run_3d_walkthrough(
             .defs
             .values()
             .flat_map(|def| def.projectiles.iter().chain(&def.quiet_projectiles))
-            .filter_map(|projectile| projectile.decal.as_deref()),
+            .flat_map(|projectile| {
+                let splatter = projectile.character_hit.as_ref();
+                let blood = splatter.and_then(|splatter| splatter.decal.as_deref());
+                projectile.decal.as_deref().into_iter().chain(blood)
+            }),
     );
     let mut slow_motion = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt")
         .and_then(|bytes| {
@@ -747,7 +752,29 @@ pub fn run_3d_walkthrough(
                             );
                         }
                     }
-                    (_, Some((idx, _))) => {
+                    (_, Some((idx, t))) => {
+                        // `decals.txt` leaves "Character" out of the holes, so only the block's
+                        // sound and effect run; `[CharacterHit]` throws the blood.
+                        let hit = at(t);
+                        if let Some(set) = decals.sets.get(block) {
+                            let back = aim_dir.map(|c| -c);
+                            let frame = crate::decals::surface_frame(back, aim_dir);
+                            let sprites = &mut particle_sprites;
+                            hit_effects.start(&mut scene, sprites, set, "character", hit, frame);
+                        }
+                        if let Some(splatter) = &projectile.character_hit {
+                            let gravity = particle_sprites.field.gravity;
+                            for _ in 0..splatter.count {
+                                let dir = spread_aim(aim_dir, splatter.accuracy, &mut shot_seed);
+                                droplets.push(crate::decals::Droplet {
+                                    pos: hit,
+                                    vel: dir.map(|c| c * splatter.speed),
+                                    gravity: gravity.map(|c| c * splatter.gravity),
+                                    decal: splatter.decal.clone().unwrap_or_default(),
+                                    age: 0.0,
+                                });
+                            }
+                        }
                         let en = &mut enemies[idx];
                         let alive = en.health > 0;
                         en.health -= projectile.damage;
@@ -788,6 +815,20 @@ pub fn run_3d_walkthrough(
                 }
             }
         }
+
+        droplets.retain_mut(|drop| {
+            let from = drop.pos;
+            let (length, dir) = drop.step(world_dt);
+            let delta = dir.map(|c| c * length);
+            let Some((t, normal, material)) = segment_surface(&scene, from, delta) else {
+                return drop.age < DROPLET_SECONDS;
+            };
+            let kind = scene.materials.get(&material);
+            let kind = kind.map_or("", |material| material.category.as_str());
+            let hit = [0, 1, 2].map(|c| from[c] + delta[c] * t);
+            decals.add(&drop.decal, kind, hit, normal, dir, None);
+            false
+        });
 
         let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
         level_items.step(&mut scene, feet, world_dt);
@@ -1886,6 +1927,8 @@ fn ray_hits_character(origin: [f32; 3], dir: [f32; 3], feet: [f32; 3]) -> Option
 
 /// `shooting.h` `CROSSHAIR_CASTLENGTH`.
 const SHOT_RANGE: f32 = 100.0;
+/// How long a blood droplet that lands nowhere stays in flight.
+const DROPLET_SECONDS: f32 = 3.0;
 
 /// Where a shot stops on the level: distance, polygon normal and material.
 fn aim_hit_level(

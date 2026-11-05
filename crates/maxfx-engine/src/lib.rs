@@ -2605,7 +2605,9 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
                         let path = format!(r"\data\database\projectiles\{projectile}.txt");
                         let file = source.read(&path)?;
                         let file = String::from_utf8_lossy(&file);
-                        hud::ProjectileDef::parse(&shooting, &file, count)
+                        let mut shot = hud::ProjectileDef::parse(&shooting, &file, count)?;
+                        shot.character_hit = load_splatter(&mut source, &file);
+                        Some(shot)
                     })
                     .collect()
             };
@@ -2663,7 +2665,11 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
                     .and_then(|file| {
                         let blow = hud::ProjectileDef::parse(&shooting, file, 1)?;
                         let damage = hud::parse_melee_damage(file).unwrap_or(blow.damage);
-                        Some(hud::ProjectileDef { damage, ..blow })
+                        Some(hud::ProjectileDef {
+                            damage,
+                            character_hit: load_splatter(&mut source, file),
+                            ..blow
+                        })
                     })
                     .into_iter()
                     .collect();
@@ -2776,6 +2782,13 @@ pub fn particle_effect_file(particles_txt: &str, effect: &str) -> Option<(String
         ),
         sound_cue_looping(particles_txt, effect),
     ))
+}
+
+/// The `[CharacterHit]` projectile a projectile file names.
+fn load_splatter(source: &mut GameSource, text: &str) -> Option<hud::SplatterDef> {
+    let (name, count) = hud::parse_character_hit(text)?;
+    let file = source.read(&format!(r"\data\database\projectiles\{name}.txt"))?;
+    hud::SplatterDef::parse(&String::from_utf8_lossy(&file), count)
 }
 
 /// `OneHandedUpperBodyBone` and `TwoHandedUpperBodyBone` of the default skeleton.
@@ -4384,6 +4397,12 @@ mod tests {
         assert!(!beretta.two_handed);
         let damage = |name: &str| defs[name].projectiles.first().map(|shot| shot.damage);
         assert_eq!(damage("beretta"), Some(5));
+        let blood = defs["beretta"].projectiles[0]
+            .character_hit
+            .as_ref()
+            .expect("blood");
+        assert_eq!(blood.decal.as_deref(), Some("blood_small"));
+        assert_eq!((blood.speed, blood.gravity), (8.0, 1.0));
         assert_eq!(damage("deserteagle"), Some(10));
         assert_eq!(damage("sniper"), Some(70));
         assert_eq!(damage("leadpipe"), Some(9));
