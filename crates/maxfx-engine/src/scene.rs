@@ -659,6 +659,8 @@ pub struct LdbScene {
     pub camera_shakes: Vec<String>,
     /// `(block, character)` of each `CAM_AnimateParented`, oldest first.
     pub death_cams: Vec<(String, String)>,
+    /// World rotation and position of the guns in the player's hands, `GUN_EMITTERS` order.
+    pub held_guns: [Option<([f32; 9], [f32; 3])>; 2],
     /// Particle effects `PS_StartEffect` started. Dispatch only enqueues them.
     pub effect_queue: Vec<QueuedEffect>,
     /// Emitters whose effects `PS_StopAllEmissions` stopped since the last frame.
@@ -776,6 +778,9 @@ pub struct QueuedSound {
     /// World position of a sound with no emitter object, as a bullet hit's.
     pub at: Option<[f32; 3]>,
 }
+
+/// Emitter names of the right and left gun in the player's hands.
+pub const GUN_EMITTERS: [&str; 2] = ["player::gun_right", "player::gun_left"];
 
 /// One `PS_StartEffect(effect, ...)` on a mesh, trigger or FSM this scene stores.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1369,6 +1374,9 @@ impl LdbScene {
     /// Rotation (columns) and position of an emitter: a mesh's pose, an FSM carried by its parent
     /// mesh (rotation included), or a trigger's or character's position with no rotation.
     pub fn emitter_world_pose(&self, emitter: &str) -> Option<([f32; 9], [f32; 3])> {
+        if let Some(hand) = GUN_EMITTERS.iter().position(|gun| *gun == emitter) {
+            return self.held_guns[hand];
+        }
         const IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
         let find_mesh = |name: &str| {
             self.dynamic_meshes
@@ -3080,6 +3088,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         camera_shakes: Vec::new(),
         death_cams: Vec::new(),
         effect_queue: Vec::new(),
+        held_guns: [None, None],
         effect_stops: Vec::new(),
         attached_camera: None,
         player_controls: true,
@@ -3196,6 +3205,7 @@ mod tests {
             camera_shakes: Vec::new(),
             death_cams: Vec::new(),
             effect_queue: Vec::new(),
+            held_guns: [None, None],
             effect_stops: Vec::new(),
             attached_camera: None,
             player_controls: true,
