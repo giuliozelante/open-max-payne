@@ -604,6 +604,8 @@ pub struct WeaponDef {
     pub model: Option<String>,
     /// `DefaultShootingFrequency`, shots per second.
     pub shots_per_second: f32,
+    /// `ShootingFrequencyMultiplier`: 0 slows firing with time, 1 keeps it constant.
+    pub slow_motion_rate: f32,
     /// `WEAPONANIM_SHOOT`'s `A_Play3DSound(weapons, ...)` cue.
     pub fire_sound: Option<String>,
     /// `WEAPONANIM_SHOOT`'s `PS_StartEffect` effect.
@@ -652,6 +654,9 @@ impl WeaponDef {
                 .and_then(|s| s.text("exportdata"))
                 .is_some_and(|file| file.to_ascii_lowercase().ends_with("dot.kf2")),
             shots_per_second: key("defaultshootingfrequency")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0.0),
+            slow_motion_rate: key("shootingfrequencymultiplier")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0.0),
             fire_sound: weapon_cue(weapon_txt, "WEAPONANIM_SHOOT", "A_Play3DSound", 1),
@@ -1495,11 +1500,12 @@ mod tests {
     #[test]
     fn a_weapon_file_gives_its_shot_and_reload_cues() {
         let def = WeaponDef::parse(
-            "#define BERETTA_SHOOTINGFREQUENCY 4\n",
-            "[Animationset]\n{\n\t[Animation] Index = WEAPONANIM_DEFAULT; Filename = d.kf2;\n\t[Animation] Index = WEAPONANIM_SHOOT; Filename = s.kf2;\n\t[Properties]\n\t{\n\t\t[Message] Frame = 0; String = \"this->A_Play3DSound ( weapons, shoot_beretta , \\\"\\\");\";\n\t\t[Message] Frame = 0; String = \"this->PS_StartEffect ( Muzzle_Beretta, \\\"\\\" );\";\n\t}\n\t[Animation] Index = WEAPONANIM_RELOAD; Filename = d.kf2;\n\t[Properties]\n\t{\n\t\t[Message] Frame = 0; String = \"this->A_Play3DSound ( weapons, reload_beretta, \\\"\\\");\";\n\t}\n}\n[Attributes]\nInventoryID = I;\nWeaponID = W;\nClipsize = 1;\nPocketsize = 2;\nReloadAmount = -1;\nDefaultShootingFrequency = BERETTA_SHOOTINGFREQUENCY;\n",
+            "#define BERETTA_SHOOTINGFREQUENCY 4\n#define BERETTA_SLOWMOTIONMULTIPLIER 0.25\n",
+            "[Animationset]\n{\n\t[Animation] Index = WEAPONANIM_DEFAULT; Filename = d.kf2;\n\t[Animation] Index = WEAPONANIM_SHOOT; Filename = s.kf2;\n\t[Properties]\n\t{\n\t\t[Message] Frame = 0; String = \"this->A_Play3DSound ( weapons, shoot_beretta , \\\"\\\");\";\n\t\t[Message] Frame = 0; String = \"this->PS_StartEffect ( Muzzle_Beretta, \\\"\\\" );\";\n\t}\n\t[Animation] Index = WEAPONANIM_RELOAD; Filename = d.kf2;\n\t[Properties]\n\t{\n\t\t[Message] Frame = 0; String = \"this->A_Play3DSound ( weapons, reload_beretta, \\\"\\\");\";\n\t}\n}\n[Attributes]\nInventoryID = I;\nWeaponID = W;\nClipsize = 1;\nPocketsize = 2;\nReloadAmount = -1;\nDefaultShootingFrequency = BERETTA_SHOOTINGFREQUENCY;\nShootingFrequencyMultiplier = BERETTA_SLOWMOTIONMULTIPLIER;\n",
         )
         .expect("weapon");
         assert_eq!(def.shots_per_second, 4.0);
+        assert_eq!(def.slow_motion_rate, 0.25);
         assert_eq!(def.fire_sound.as_deref(), Some("shoot_beretta"));
         assert_eq!(def.muzzle.as_deref(), Some("Muzzle_Beretta"));
         assert_eq!(def.reload_sound.as_deref(), Some("reload_beretta"));
