@@ -246,6 +246,13 @@ impl SlowMotion {
         Some(&self.heartbeat_message)
     }
 
+    /// Advances `seconds` with the switch at `wanted`, flipped by a `pressed` key. Returns where the
+    /// switch stands: slow motion that ran out leaves it off, so a later kill does not restart it.
+    pub fn switch(&mut self, wanted: bool, pressed: bool, seconds: f32) -> bool {
+        self.step(wanted != pressed, seconds);
+        self.active
+    }
+
     /// Advances `seconds` of real time while the player does or does not ask for slow motion.
     pub fn step(&mut self, wanted: bool, seconds: f32) {
         self.active = wanted && (self.active || self.level > self.threshold);
@@ -2030,6 +2037,27 @@ mod tests {
         slow.level = 0.95;
         slow.reward_kill();
         assert_eq!(slow.level, 1.0);
+    }
+
+    #[test]
+    fn one_press_starts_slow_motion_and_the_next_one_ends_it() {
+        let mut slow = gauge();
+        let on = slow.switch(false, true, 0.1);
+        assert!(on && slow.active);
+        let on = slow.switch(on, false, 0.1);
+        assert!(on && slow.active, "it stays on after the key is released");
+        let on = slow.switch(on, true, 0.1);
+        assert!(!on && !slow.active);
+    }
+
+    #[test]
+    fn slow_motion_that_ran_out_does_not_restart_on_a_kill() {
+        let mut slow = gauge();
+        let on = slow.switch(false, true, 1000.0);
+        assert!(!on && !slow.active);
+        slow.reward_kill();
+        let on = slow.switch(on, false, 0.1);
+        assert!(!on && !slow.active);
     }
 
     #[test]

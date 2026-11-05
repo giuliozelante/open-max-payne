@@ -218,7 +218,7 @@ pub fn run_3d_walkthrough(
     let mut walk_phase: f32 = 0.0;
     let mut third_person = true;
     let mut bullet_time = false;
-    let mut wanted_slow_motion = false;
+    let mut right_was_down = false;
     let mut shot_timer: f32 = 0.0;
     // Seconds into the player's shot or reload clip.
     let mut action_time: f32 = 0.0;
@@ -433,14 +433,13 @@ pub fn run_3d_walkthrough(
         if window.is_key_pressed(Key::V, KeyRepeat::No) {
             third_person = !third_person;
         }
-        if window.is_key_pressed(Key::B, KeyRepeat::No) {
-            bullet_time = !bullet_time;
-        }
-        let wants_slow_motion = bullet_time || window.get_mouse_down(MouseButton::Right);
+        let right_down = window.get_mouse_down(MouseButton::Right);
+        let pressed =
+            window.is_key_pressed(Key::B, KeyRepeat::No) || (right_down && !right_was_down);
+        right_was_down = right_down;
         let was_slow = slow_motion.active;
-        slow_motion.step(wants_slow_motion, base_dt);
-        let asked = wants_slow_motion && !wanted_slow_motion;
-        wanted_slow_motion = wants_slow_motion;
+        let asked = pressed && !bullet_time;
+        bullet_time = slow_motion.switch(bullet_time, pressed, base_dt);
         for message in slow_motion.transition(was_slow, asked) {
             scene.dispatch_message("", message);
         }
