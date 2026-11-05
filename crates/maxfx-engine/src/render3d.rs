@@ -43,7 +43,6 @@ pub(crate) const FAR_Z: f32 = 100_000.0;
 const EYE_HEIGHT: f32 = 1.65;
 /// One `DetailOffset` step from `materials.txt`, in metres toward the camera.
 pub(crate) const DETAIL_OFFSET_M: f32 = 0.02;
-/// `data/database/shooting.h` `#define BERETTA_BULLETDAMAGE 5`.
 
 #[derive(Clone, Copy)]
 struct ProjVert {
@@ -224,11 +223,10 @@ pub fn run_3d_walkthrough(
     let mut reload_seen = false;
     // Reach of the melee weapon swung last, and the clip times of its blows still to land.
     let mut melee: Option<f32> = None;
-    // What the last trigger pull creates.
-    let mut shot: Vec<crate::hud::ProjectileDef> = Vec::new();
     let mut shot_seed: u32 = 0x2545_f491;
-    let mut round: usize = 0;
-    let mut melee_blows: Vec<f32> = Vec::new();
+    // The rounds of the running shoot clip still to come, and the weapon firing them.
+    let mut pending: Vec<crate::hud::ShotRound> = Vec::new();
+    let mut firing = String::new();
     // Seconds until the reload's sound, and its cue.
     let mut reload_cue: Option<(f32, String)> = None;
     let mut fly_mode = false;
@@ -310,6 +308,7 @@ pub fn run_3d_walkthrough(
     let death_clips = crate::load_death_clips(&game_root);
     if let Some(rig) = player_rig.as_mut() {
         rig.upper_bones = crate::load_upper_bones(&game_root);
+        rig.gun_bones = crate::load_gun_bones(&game_root);
     }
     let (mut level_items, item_models) = crate::load_level_items(&game_root, &scene, &room_origins);
     let weapon_models: BTreeMap<String, crate::kf2::KfsMesh> = scene
@@ -362,7 +361,6 @@ pub fn run_3d_walkthrough(
             .flat_map(|def| def.projectiles.iter().chain(&def.quiet_projectiles))
             .filter_map(|projectile| projectile.decal.as_deref()),
     );
-    let mut mouse_fire_held = false;
     let mut slow_motion = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt")
         .and_then(|bytes| {
             let characters = crate::read_game_bytes(&game_root, r"\data\database\characters.h")
@@ -602,48 +600,90 @@ pub fn run_3d_walkthrough(
         scene.inventory.step(world_dt);
 
         // Shoot (left mouse, `F` or `LeftCtrl` / `RightCtrl`)
-        let mouse_fire = window.get_mouse_down(MouseButton::Left);
-        let fire_pressed = (mouse_fire && !mouse_fire_held)
-            || window.is_key_pressed(Key::F, KeyRepeat::No)
-            || window.is_key_pressed(Key::LeftCtrl, KeyRepeat::No)
-            || window.is_key_pressed(Key::RightCtrl, KeyRepeat::No);
-        mouse_fire_held = mouse_fire;
-        // The last round can switch the weapon, so this is read before firing.
-        let shooter = scene.inventory.current.clone();
-        let mut shooting = false;
-        if fire_pressed && scene.player_controls && shot_timer <= 0.0 && scene.inventory.fire() {
-            let def = shooter.and_then(|name| scene.inventory.defs.get(&name).cloned());
-            let def = def.unwrap_or_default();
-            shot_timer = 1.0 / def.shots_per_second.max(0.1);
-            let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
-            if let Some(cue) = &def.fire_sound {
-                queue_weapon_sound(&mut scene, cue, feet);
+        // No weapon file marks a gun automatic, so held fire repeats for all of them.
+        let fire_held = window.get_mouse_down(MouseButton::Left)
+            || window.is_key_down(Key::F)
+            || window.is_key_down(Key::LeftCtrl)
+            || window.is_key_down(Key::RightCtrl);
+        if fire_held && scene.player_controls && shot_timer <= 0.0 {
+            let def = scene.inventory.current.as_ref();
+            let def = def.and_then(|name| scene.inventory.defs.get(name)).cloned();
+            if let Some(def) = def.filter(|_| scene.inventory.can_fire()) {
+                // A new cycle restarts the clip, so rounds it did not reach are dropped.
+                shot_timer = 1.0 / def.shots_per_second.max(0.1);
+                let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+                if let Some(cue) = &def.fire_sound {
+                    queue_weapon_sound(&mut scene, cue, feet);
+                }
+                melee = def.melee_reach;
+                firing = scene.inventory.current.clone().unwrap_or_default();
+                pending = if melee.is_some() {
+                    let blow = |at: &f32| crate::hud::ShotRound {
+                        at: *at,
+                        ..Default::default()
+                    };
+                    def.melee_blows.iter().map(blow).collect()
+                } else if def.rounds.is_empty() {
+                    vec![crate::hud::ShotRound::default()]
+                } else {
+                    def.rounds.clone()
+                };
+                if let Some(rig) = player_rig.as_mut() {
+                    rig.action = def.fire_clip.clone();
+                    action_time = 0.0;
+                    rig.action_time = 0.0;
+                    let time = if player_moving { walk_phase } else { 0.0 };
+                    let right = rig.gun_bones[0].clone();
+                    let frame =
+                        character_locals(rig, player_moving, time).and_then(|(clip, locals)| {
+                            bone_frame(clip, &locals, &right, feet, player_mesh_yaw(yaw))
+                        });
+                    if let Some((frame, muzzle)) = frame.zip(def.muzzle.as_deref()) {
+                        hit_effects.start_muzzle(&mut particle_sprites, muzzle, frame);
+                    }
+                }
+            } else {
+                // Starts the reload, or takes the best loaded weapon.
+                scene.inventory.fire();
             }
-            melee = def.melee_reach;
-            shot = def.round_projectiles(round).to_vec();
-            round += 1;
-            melee_blows.clone_from(&def.melee_blows);
-            if let Some(rig) = player_rig.as_mut() {
-                rig.action = def.fire_clip.clone();
-                action_time = 0.0;
-                rig.action_time = 0.0;
-                let time = if player_moving { walk_phase } else { 0.0 };
+        }
+        let due = pending
+            .first()
+            .copied()
+            .filter(|round| action_time >= round.at);
+        let mut fired = None;
+        if let Some(round) = due {
+            pending.remove(0);
+            if scene.inventory.fire() {
+                fired = Some(round);
+            } else {
+                pending.clear();
+            }
+        }
+        if let Some(round) = fired {
+            let def = scene.inventory.defs.get(&firing);
+            let shot = def.map_or(Vec::new(), |def| {
+                def.round_projectiles(round.quiet).to_vec()
+            });
+            let muzzle = def
+                .and_then(|def| def.muzzle.clone())
+                .filter(|_| round.left);
+            if let (Some(rig), Some(muzzle)) = (player_rig.as_ref(), muzzle) {
+                let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+                let time = if player_moving {
+                    walk_phase
+                } else {
+                    action_time
+                };
                 let frame =
                     character_locals(rig, player_moving, time).and_then(|(clip, locals)| {
-                        bone_frame(clip, &locals, "Gun", feet, player_mesh_yaw(yaw))
+                        bone_frame(clip, &locals, &rig.gun_bones[1], feet, player_mesh_yaw(yaw))
                     });
-                if let Some((frame, muzzle)) = frame.zip(def.muzzle.as_deref()) {
-                    hit_effects.start_muzzle(&mut particle_sprites, muzzle, frame);
+                if let Some(frame) = frame {
+                    hit_effects.start_muzzle(&mut particle_sprites, &muzzle, frame);
                 }
             }
-            shooting = melee.is_none();
-        }
-        let blow_due = melee_blows.first().is_some_and(|at| action_time >= *at);
-        if blow_due {
-            melee_blows.remove(0);
-        }
-        if shooting || blow_due {
-            let reach = if blow_due { melee } else { None };
+            let reach = melee;
             let aim_dir = [sy * cp, sp, cy * cp];
             // The dot marks the view's centre, so a bullet leaves from the camera. A blow leaves
             // from Max.
@@ -768,6 +808,7 @@ pub fn run_3d_walkthrough(
             let weapon = scene.inventory.current.as_ref();
             let def = weapon.and_then(|name| scene.inventory.defs.get(name));
             rig.two_handed = def.is_some_and(|def| def.two_handed);
+            rig.two_handed_bones = def.is_some_and(|def| def.two_handed_bones);
         }
 
         let reloading = scene.inventory.reloading.is_some();
@@ -794,8 +835,8 @@ pub fn run_3d_walkthrough(
                 reload_cue = None;
             }
         }
+        action_time += world_dt;
         if let Some(rig) = player_rig.as_mut() {
-            action_time += world_dt;
             rig.action_time = action_time;
             if rig
                 .action
@@ -1020,19 +1061,15 @@ pub fn run_3d_walkthrough(
                     light,
                 });
                 let mesh_yaw = player_mesh_yaw(yaw);
-                if let Some((weapon, verts)) =
-                    held_weapon(&scene, &weapon_models).and_then(|weapon| {
-                        let verts = held_weapon_verts(
-                            prig,
-                            weapon,
-                            player_feet,
-                            mesh_yaw,
-                            time,
-                            player_moving,
-                        )?;
-                        Some((weapon, verts))
-                    })
-                {
+                for (weapon, verts) in held_guns(
+                    &scene,
+                    &weapon_models,
+                    prig,
+                    player_feet,
+                    mesh_yaw,
+                    time,
+                    player_moving,
+                ) {
                     let light = character_vertex_light(
                         weapon,
                         &verts,
@@ -1159,18 +1196,16 @@ pub fn run_3d_walkthrough(
                 let mesh_yaw = player_mesh_yaw(yaw);
                 let verts =
                     character_world_verts(prig, player_feet, mesh_yaw, time, player_moving, false);
-                let weapon = held_weapon(&scene, &weapon_models).and_then(|weapon| {
-                    let held = held_weapon_verts(
-                        prig,
-                        weapon,
-                        player_feet,
-                        mesh_yaw,
-                        time,
-                        player_moving,
-                    )?;
-                    Some((weapon, held))
-                });
-                for (mesh, verts) in std::iter::once((&prig.mesh, verts)).chain(weapon) {
+                let guns = held_guns(
+                    &scene,
+                    &weapon_models,
+                    prig,
+                    player_feet,
+                    mesh_yaw,
+                    time,
+                    player_moving,
+                );
+                for (mesh, verts) in std::iter::once((&prig.mesh, verts)).chain(guns) {
                     render_kfs_character(
                         mesh,
                         &verts,
@@ -3051,12 +3086,31 @@ fn placed_items<'a>(
         .collect()
 }
 
-/// The model of the weapon the player holds.
-fn held_weapon<'a>(
+/// Each gun in the player's hands, with its world vertices.
+fn held_guns<'a>(
     scene: &LdbScene,
     models: &'a BTreeMap<String, crate::kf2::KfsMesh>,
-) -> Option<&'a crate::kf2::KfsMesh> {
-    models.get(scene.inventory.current.as_ref()?)
+    rig: &CharacterRig,
+    world_pos: [f32; 3],
+    yaw: f32,
+    anim_time: f32,
+    moving: bool,
+) -> Vec<(&'a crate::kf2::KfsMesh, Vec<[f32; 3]>)> {
+    let Some(name) = scene.inventory.current.as_ref() else {
+        return Vec::new();
+    };
+    let Some(weapon) = models.get(name) else {
+        return Vec::new();
+    };
+    let dual = scene.inventory.defs.get(name).is_some_and(|def| def.dual);
+    let hands = if dual { 2 } else { 1 };
+    rig.gun_bones[..hands]
+        .iter()
+        .filter_map(|bone| {
+            let verts = held_weapon_verts(rig, weapon, bone, world_pos, yaw, anim_time, moving)?;
+            Some((weapon, verts))
+        })
+        .collect()
 }
 
 fn character_clip(rig: &CharacterRig, moving: bool) -> Option<&crate::kf2::Kf2Anim> {
@@ -3107,7 +3161,7 @@ fn character_locals(
     let clip = character_clip(rig, moving)?;
     let mut locals = crate::kf2::sample_locals(clip, time);
     if let Some(action) = rig.action.as_ref().filter(|_| moving) {
-        let upper = &rig.upper_bones[usize::from(rig.two_handed)];
+        let upper = &rig.upper_bones[usize::from(rig.two_handed_bones)];
         let mut action = crate::kf2::sample_locals(action, rig.action_time);
         for bone in upper {
             if let Some(local) = action.remove(bone) {
@@ -3175,13 +3229,14 @@ fn queue_sound(scene: &mut LdbScene, catalog: &str, cue: &str, at: [f32; 3]) {
 pub(crate) fn held_weapon_verts(
     rig: &CharacterRig,
     weapon: &crate::kf2::KfsMesh,
+    bone: &str,
     world_pos: [f32; 3],
     yaw: f32,
     anim_time: f32,
     moving: bool,
 ) -> Option<Vec<[f32; 3]>> {
     let (anim, locals) = character_locals(rig, moving, anim_time)?;
-    let held = crate::kf2::bone_verts(&weapon.vertices, anim, &locals, "Gun")?;
+    let held = crate::kf2::bone_verts(&weapon.vertices, anim, &locals, bone)?;
     let (sy, cy) = yaw.sin_cos();
     let place = |[x, y, z]: [f32; 3]| {
         [
@@ -4384,6 +4439,8 @@ mod tests {
             max_health: 0,
             action_time: 0.0,
             upper_bones: [Vec::new(), Vec::new()],
+            two_handed_bones: false,
+            gun_bones: [String::new(), String::new()],
         };
         let name = |moving| character_clip(&rig, moving).map(|c| c.bones[0].name.as_str());
         assert_eq!(name(false), Some("shoot"));
@@ -4429,12 +4486,14 @@ mod tests {
             max_health: 0,
             action_time: 0.0,
             upper_bones: [vec!["torso".to_string()], Vec::new()],
+            two_handed_bones: false,
+            gun_bones: [String::new(), String::new()],
         };
         let (_, locals) = character_locals(&rig, true, 0.0).expect("pose");
         assert_eq!(locals["pelvis"].1, [1.0; 3]);
         assert_eq!(locals["torso"].1, [9.0; 3]);
         // Two-handed weapons have their own set, empty here.
-        rig.two_handed = true;
+        rig.two_handed_bones = true;
         let (_, locals) = character_locals(&rig, true, 0.0).expect("pose");
         assert_eq!(locals["torso"].1, [2.0; 3]);
     }
@@ -4460,6 +4519,8 @@ mod tests {
             max_health: 0,
             action_time: 0.0,
             upper_bones: [Vec::new(), Vec::new()],
+            two_handed_bones: false,
+            gun_bones: [String::new(), String::new()],
         };
         let name = |rig: &CharacterRig, moving: bool| {
             let clip = character_clip(rig, moving).expect("clip");

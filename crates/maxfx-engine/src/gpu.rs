@@ -2145,6 +2145,8 @@ mod tests {
             max_health: 0,
             action_time: 0.0,
             upper_bones: [Vec::new(), Vec::new()],
+            two_handed_bones: false,
+            gun_bones: [String::new(), String::new()],
         }
     }
 
