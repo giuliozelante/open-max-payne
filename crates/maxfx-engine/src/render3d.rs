@@ -367,6 +367,12 @@ pub fn run_3d_walkthrough(
         }
         FrameCapture::new(dir, title)
     });
+    let mut video = capture.as_ref().and_then(|capture| {
+        let path = capture.dir.join(format!("{}.mp4", capture.level));
+        VideoCapture::start(&path)
+            .inspect_err(|error| eprintln!("  3D Engine: video capture: {error}"))
+            .ok()
+    });
     let mut decals = crate::decals::DecalField::load(
         &game_root,
         scene
@@ -1467,7 +1473,9 @@ pub fn run_3d_walkthrough(
                     .or_else(|| decals.texture(key))
             });
         }
-        if let Some(path) = capture.as_mut().and_then(|c| c.due(base_dt)) {
+        let still = capture.as_mut().and_then(|c| c.due(base_dt));
+        let moving = video.as_mut().is_some_and(|v| v.pace.due(base_dt));
+        if still.is_some() || moving {
             let mut frame = vec![0u32; W * H];
             match (gpu.as_mut(), scene_view) {
                 (Some((renderer, _)), Some(view)) => {
@@ -1478,8 +1486,13 @@ pub fn run_3d_walkthrough(
                 }
                 _ => frame.copy_from_slice(&fb),
             }
-            if let Err(error) = write_ppm(&path, W, H, &frame) {
-                eprintln!("  3D Engine: capture failed: {error}");
+            if let Some(video) = video.as_ref().filter(|_| moving) {
+                video.push(&frame);
+            }
+            if let Some(path) = still {
+                if let Err(error) = write_ppm(&path, W, H, &frame) {
+                    eprintln!("  3D Engine: capture failed: {error}");
+                }
             }
         }
         match gpu.as_mut() {
@@ -1539,6 +1552,118 @@ impl FrameCapture {
         let name = format!("{}_{:04}.ppm", self.level, self.count);
         Some(self.dir.join(name))
     }
+}
+
+/// Seconds between video frames: 30 a second plays back smoothly.
+const VIDEO_INTERVAL: f32 = 1.0 / 30.0;
+
+/// Says when the next video frame is due.
+#[derive(Debug, Default)]
+struct VideoPace {
+    wait: f32,
+}
+
+impl VideoPace {
+    fn due(&mut self, seconds: f32) -> bool {
+        self.wait -= seconds;
+        if self.wait > 0.0 {
+            return false;
+        }
+        self.wait = VIDEO_INTERVAL;
+        true
+    }
+}
+
+/// Frames piped to `ffmpeg`. A thread does the writing and a full queue drops frames, so a slow
+/// encoder cannot change the timing being recorded.
+struct VideoCapture {
+    pace: VideoPace,
+    frames: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    writer: Option<std::thread::JoinHandle<()>>,
+    encoder: Child,
+}
+
+impl VideoCapture {
+    fn start(path: &Path) -> std::io::Result<Self> {
+        let mut encoder = std::process::Command::new("ffmpeg")
+            .args(video_arguments(path, W, H))
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        let mut stdin = encoder.stdin.take().ok_or(std::io::ErrorKind::BrokenPipe)?;
+        let (frames, queue) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            while let Ok(frame) = queue.recv() {
+                if stdin.write_all(&frame).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Self {
+            pace: VideoPace::default(),
+            frames: Some(frames),
+            writer: Some(writer),
+            encoder,
+        })
+    }
+
+    fn push(&self, frame: &[u32]) {
+        if let Some(frames) = &self.frames {
+            let _ = frames.try_send(video_bytes(frame));
+        }
+    }
+}
+
+impl Drop for VideoCapture {
+    /// Closing the pipe tells `ffmpeg` to finish the file.
+    fn drop(&mut self) {
+        self.frames = None;
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+        let _ = self.encoder.wait();
+    }
+}
+
+/// `ffmpeg` arguments reading raw frames from stdin. Frames are stamped by wall clock, so playback
+/// keeps real speed whatever rate the engine reaches, and a fragmented file survives a kill.
+fn video_arguments(path: &Path, width: usize, height: usize) -> Vec<String> {
+    let size = format!("{width}x{height}");
+    let args = [
+        "-y",
+        "-loglevel",
+        "error",
+        "-use_wallclock_as_timestamps",
+        "1",
+        "-f",
+        "rawvideo",
+        "-pixel_format",
+        "bgr0",
+        "-video_size",
+        &size,
+        "-i",
+        "pipe:0",
+        "-fps_mode",
+        "vfr",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+frag_keyframe+empty_moov",
+    ];
+    let mut args: Vec<String> = args.map(String::from).to_vec();
+    args.push(path.display().to_string());
+    args
+}
+
+/// `frame` as the `bgr0` bytes `ffmpeg` reads.
+fn video_bytes(frame: &[u32]) -> Vec<u8> {
+    frame.iter().flat_map(|pixel| pixel.to_le_bytes()).collect()
 }
 
 /// `hud` over `frame`: the top byte of a HUD pixel is its transparency.
@@ -5780,6 +5905,35 @@ mod tests {
         assert_eq!(capture.due(1.0), None);
         let second = capture.due(1.2).expect("second frame");
         assert_eq!(second, PathBuf::from("out/OpenMaxPaynetutorial_0002.ppm"));
+    }
+
+    #[test]
+    fn a_video_frame_is_due_at_once_then_thirty_times_a_second() {
+        let mut pace = VideoPace::default();
+        assert!(pace.due(0.01));
+        assert!(!pace.due(0.01));
+        assert!(pace.due(0.03));
+    }
+
+    #[test]
+    fn a_slow_engine_does_not_owe_the_video_its_missed_frames() {
+        let mut pace = VideoPace::default();
+        assert!(pace.due(0.5));
+        assert!(!pace.due(0.01));
+    }
+
+    #[test]
+    fn video_frames_are_stamped_by_the_clock_and_sized_to_the_frame() {
+        let args = video_arguments(Path::new("out/level.mp4"), 960, 600).join(" ");
+        assert!(args.contains("-use_wallclock_as_timestamps 1"), "{args}");
+        assert!(args.contains("-video_size 960x600"), "{args}");
+        assert!(args.contains("-pixel_format bgr0"), "{args}");
+        assert!(args.ends_with("out/level.mp4"), "{args}");
+    }
+
+    #[test]
+    fn a_pixel_reaches_the_video_blue_first() {
+        assert_eq!(video_bytes(&[0x0011_2233]), [0x33, 0x22, 0x11, 0]);
     }
 
     #[test]
