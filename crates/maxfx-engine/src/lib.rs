@@ -1,5 +1,6 @@
 //! Native Max Payne 1 engine — level decoder, 3D walkthrough renderer, and KF2/SKD inspector.
 
+pub mod clips;
 pub mod decals;
 pub mod frontend;
 pub mod gpu;
@@ -2835,6 +2836,29 @@ pub fn load_upper_bones(game_dir: &Path) -> [Vec<String>; 2] {
         .unwrap_or_default();
     ["OneHandedUpperBodyBone", "TwoHandedUpperBodyBone"]
         .map(|tag| kf2::parse_body_bones(&skeleton, tag))
+}
+
+/// The clip table of `skin` over the default skeleton, and the clips it names.
+pub fn load_character_clips(game_dir: &Path, skin: &str) -> clips::CharacterClips {
+    const SKELETON: &str = r"\data\database\skeletons\default_skeleton";
+    let mut source = GameSource::open(game_dir);
+    let mut text = |path: &str| {
+        let bytes = source.read(path).unwrap_or_default();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let skeleton = text(&format!("{SKELETON}.txt"));
+    let skin = text(&format!(r"\data\database\skins\{skin}.txt"));
+    let table = clips::ClipTable::parse(&skeleton, &skin);
+    let files: std::collections::BTreeSet<&str> = table.files().collect();
+    let anims = files
+        .into_iter()
+        .filter_map(|file| {
+            let bytes = source.read(&format!(r"{SKELETON}\{file}"))?;
+            let clip = kf2::parse_kf2_anim(&bytes)?;
+            Some((file.to_string(), std::sync::Arc::new(clip)))
+        })
+        .collect();
+    clips::CharacterClips { table, anims }
 }
 
 /// `RightHandGunBone` and `LeftHandGunBone` of the default skeleton.

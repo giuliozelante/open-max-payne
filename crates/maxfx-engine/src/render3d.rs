@@ -312,6 +312,7 @@ pub fn run_3d_walkthrough(
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
     let death_clips = crate::load_death_clips(&game_root);
+    let player_clips = crate::load_character_clips(&game_root, player_skin.unwrap_or("max_payne"));
     if let Some(rig) = player_rig.as_mut() {
         rig.upper_bones = crate::load_upper_bones(&game_root);
         rig.gun_bones = crate::load_gun_bones(&game_root);
@@ -524,7 +525,8 @@ pub fn run_3d_walkthrough(
         }
 
         // Movement controls (WASD)
-        let speed = if window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift) {
+        let fly_speed = if window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift)
+        {
             11.0
         } else {
             5.8
@@ -559,6 +561,21 @@ pub fn run_3d_walkthrough(
         if !scene.player_controls {
             mv = [0.0; 3];
         }
+        let key = |key| i32::from(window.is_key_down(key) && scene.player_controls);
+        let running = crate::clips::run_index(
+            key(Key::W) - key(Key::S),
+            key(Key::D) - key(Key::A),
+            player_rig.as_ref().is_some_and(|rig| rig.two_handed),
+        )
+        .filter(|_| !fly_mode)
+        .and_then(|index| player_clips.get(&index));
+        if let Some(rig) = player_rig.as_mut() {
+            rig.motion = running.map(|(_, clip)| clip.clone());
+        }
+        let run_velocity = running.map_or([0.0; 3], |(def, clip)| {
+            let [x, _, z] = def.velocity(clip_seconds(clip));
+            [0, 1, 2].map(|c| right[c] * x + fwd[c] * z)
+        });
         let mv_len = (mv[0] * mv[0] + mv[2] * mv[2]).sqrt();
         let player_moving = mv_len > 0.01;
         if player_moving {
@@ -575,12 +592,12 @@ pub fn run_3d_walkthrough(
             if window.is_key_down(Key::C) {
                 mv[1] -= 1.0;
             }
-            player_pos[0] += mv[0] * speed * player_dt;
-            player_pos[1] += mv[1] * speed * player_dt;
-            player_pos[2] += mv[2] * speed * player_dt;
+            player_pos[0] += mv[0] * fly_speed * player_dt;
+            player_pos[1] += mv[1] * fly_speed * player_dt;
+            player_pos[2] += mv[2] * fly_speed * player_dt;
         } else {
-            let dx = mv[0] * speed * player_dt;
-            let dz = mv[2] * speed * player_dt;
+            let dx = run_velocity[0] * player_dt;
+            let dz = run_velocity[2] * player_dt;
             let nx = player_pos[0] + dx;
             let nz = player_pos[2] + dz;
             let contact = dynamic_wall_hit(&scene, &room_origins, nx, player_pos[1], nz);
@@ -3554,7 +3571,7 @@ fn character_clip(rig: &CharacterRig, moving: bool) -> Option<&crate::kf2::Kf2An
         (None, None)
     };
     let idle = idle.or(rig.idle.as_ref());
-    let walk = walk.or(rig.walk.as_ref());
+    let walk = rig.motion.as_deref().or(walk).or(rig.walk.as_ref());
     if moving {
         walk.or(idle)
     } else {
@@ -4874,6 +4891,7 @@ mod tests {
             walk: Some(clip("run", [0.0; 3])),
             bind: None,
             action: Some(clip("shoot", [0.0; 3])),
+            motion: None,
             two_handed_idle: None,
             two_handed_walk: None,
             two_handed: false,
@@ -4886,6 +4904,35 @@ mod tests {
         let name = |moving| character_clip(&rig, moving).map(|c| c.bones[0].name.as_str());
         assert_eq!(name(false), Some("shoot"));
         assert_eq!(name(true), Some("run"));
+    }
+
+    #[test]
+    fn a_chosen_motion_clip_replaces_the_run() {
+        let rig = CharacterRig {
+            mesh: crate::kf2::KfsMesh {
+                name: String::new(),
+                vertices: Vec::new(),
+                faces: Vec::new(),
+                material_textures: Vec::new(),
+            },
+            skin: None,
+            idle: Some(clip("idle", [0.0; 3])),
+            walk: Some(clip("run", [0.0; 3])),
+            bind: None,
+            action: None,
+            motion: Some(std::sync::Arc::new(clip("strafe", [0.0; 3]))),
+            two_handed_idle: None,
+            two_handed_walk: None,
+            two_handed: false,
+            max_health: 0,
+            action_time: 0.0,
+            upper_bones: [Vec::new(), Vec::new()],
+            two_handed_bones: false,
+            gun_bones: [String::new(), String::new()],
+        };
+        let name = |moving| character_clip(&rig, moving).map(|c| c.bones[0].name.as_str());
+        assert_eq!(name(true), Some("strafe"));
+        assert_eq!(name(false), Some("idle"));
     }
 
     #[test]
@@ -4946,6 +4993,7 @@ mod tests {
             walk: Some(two_bones([1.0; 3], [2.0; 3])),
             bind: None,
             action: Some(two_bones([8.0; 3], [9.0; 3])),
+            motion: None,
             two_handed_idle: None,
             two_handed_walk: None,
             two_handed: false,
@@ -4997,6 +5045,7 @@ mod tests {
             walk: Some(clip("run", [0.0; 3])),
             bind: None,
             action: None,
+            motion: None,
             two_handed_idle: Some(clip("2_idle", [0.0; 3])),
             two_handed_walk: Some(clip("2_run", [0.0; 3])),
             two_handed: true,
