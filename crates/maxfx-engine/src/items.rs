@@ -102,6 +102,8 @@ impl LevelItemDef {
 /// One item lying in the level.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveItem {
+    /// The scene item's name, which `LI_ActivateLevelItem` addresses.
+    pub name: String,
     pub kind: String,
     /// World position.
     pub pos: [f32; 3],
@@ -113,6 +115,8 @@ pub struct LiveItem {
 pub struct LevelItems {
     pub defs: BTreeMap<String, LevelItemDef>,
     pub items: Vec<LiveItem>,
+    /// `max_payne.txt` `CapsuleRadius`.
+    pub body_radius: f32,
     /// Types picked up once: the next ones run `[OnPickUp]`.
     picked: BTreeSet<String>,
     /// Seconds until each type may repeat its `[OnCantPickup]`.
@@ -129,8 +133,14 @@ impl LevelItems {
             let Some(def) = self.defs.get(&item.kind) else {
                 continue;
             };
+            if !scene.item_active(&item.name) {
+                continue;
+            }
             let [dx, dy, dz] = [0, 1, 2].map(|c| item.pos[c] - feet[c]);
-            if dx.hypot(dz) > def.radius || !(-def.radius..=PLAYER_HEIGHT).contains(&dy) {
+            // HYPOTHESIS: the trigger sphere touches the capsule. Measured to the player's centre,
+            // the van's items are 0.87 m from the closest spot outside, past their 0.75 m radius.
+            let reach = def.radius + self.body_radius;
+            if dx.hypot(dz) > reach || !(-def.radius..=PLAYER_HEIGHT).contains(&dy) {
                 continue;
             }
             let messages = if !def.can_pick_up(&scene.inventory) {
@@ -241,6 +251,7 @@ PickupIfAmmoNotFull = true;
         items.defs.insert("beretta".to_string(), def);
         for x in [0.0, 0.5, 9.0] {
             items.items.push(LiveItem {
+                name: format!("::Room::item{x}"),
                 kind: "beretta".to_string(),
                 pos: [x, 0.2, 0.0],
                 taken: false,
@@ -262,6 +273,38 @@ PickupIfAmmoNotFull = true;
         // `[OnFirstPickup]` gives 10 rounds, then `[OnPickUp]` 30.
         assert_eq!(scene.inventory.stock("beretta").map(|s| s.pocket), Some(40));
         assert_eq!(scene.hud_prints.len(), 1);
+    }
+
+    #[test]
+    fn an_item_is_reached_by_the_players_body_not_only_its_centre() {
+        let (mut items, mut scene) = level(0);
+        items.body_radius = 0.48;
+        items.step(&mut scene, [0.0, 0.0, 1.0], 0.1);
+        assert!(items.items[0].taken, "1 m away is inside 0.75 + 0.48");
+        items.step(&mut scene, [9.0, 0.0, 1.3], 0.1);
+        assert!(!items.items[2].taken, "1.3 m away is not");
+    }
+
+    #[test]
+    fn an_inactive_item_waits_for_the_message_that_activates_it() {
+        let (mut items, mut scene) = level(0);
+        scene.items.push(crate::scene::SceneItem {
+            name: "::Room::item0".to_string(),
+            item_type: "beretta".to_string(),
+            room_id: 0,
+            pos: [0.0; 3],
+            active: true,
+        });
+        scene.fsms.push(crate::scene::SceneFsm {
+            startup_actions: vec!["::Room::item0->LI_ActivateLevelItem(false);".to_string()],
+            ..Default::default()
+        });
+        scene.apply_startup_items();
+        items.step(&mut scene, [0.0, 0.0, 0.0], 0.1);
+        assert!(!items.items[0].taken);
+        assert!(scene.dispatch_message("", "::Room::item0->li_activatelevelitem(true);"));
+        items.step(&mut scene, [0.0, 0.0, 0.0], 0.1);
+        assert!(items.items[0].taken);
     }
 
     #[test]

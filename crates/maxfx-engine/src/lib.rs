@@ -2893,6 +2893,13 @@ pub fn load_weapon_model(game_dir: &Path, model: &str) -> Option<kf2::KfsMesh> {
     load_packed_model(game_dir, &format!(r"\data\database\weapons\{model}"))
 }
 
+/// `CapsuleRadius` of `skins/max_payne.txt`.
+pub fn load_body_radius(game_dir: &Path) -> Option<f32> {
+    let skin = read_game_bytes(game_dir, r"\data\database\skins\max_payne.txt")?;
+    let sections = hud::parse_sections(&String::from_utf8_lossy(&skin));
+    sections.iter().find_map(|s| s.number("capsuleradius"))
+}
+
 /// The item types `scene` places, with their rules and models.
 pub fn load_level_items(
     game_dir: &Path,
@@ -2901,6 +2908,7 @@ pub fn load_level_items(
 ) -> (items::LevelItems, BTreeMap<String, kf2::KfsMesh>) {
     const DIR: &str = r"\data\database\level_items\";
     let mut level = items::LevelItems::default();
+    level.body_radius = load_body_radius(game_dir).unwrap_or_default();
     let mut models = BTreeMap::new();
     let headers = read_game_bytes(game_dir, r"\data\database\level_items.h")
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -2922,6 +2930,7 @@ pub fn load_level_items(
         }
         let origin = rooms.get(&item.room_id).copied().unwrap_or([0.0; 3]);
         level.items.push(items::LiveItem {
+            name: item.name.clone(),
             kind,
             pos: [0, 1, 2].map(|c| item.pos[c] + origin[c]),
             taken: false,
@@ -4749,6 +4758,18 @@ mod tests {
             assert_eq!(blood.decal.as_deref(), Some("blood_large"));
             assert_eq!(blood.speed, 3.0);
         }
+    }
+
+    #[test]
+    fn retail_items_are_reached_by_max_paynes_capsule() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        if !game.is_dir() {
+            return;
+        }
+        assert_eq!(load_body_radius(&game), Some(0.48));
     }
 
     #[test]
