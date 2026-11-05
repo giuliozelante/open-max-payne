@@ -217,6 +217,7 @@ pub fn run_3d_walkthrough(
     let mut walk_phase: f32 = 0.0;
     let mut third_person = true;
     let mut bullet_time = false;
+    let mut wanted_slow_motion = false;
     let mut shot_timer: f32 = 0.0;
     // Seconds into the player's shot or reload clip.
     let mut action_time: f32 = 0.0;
@@ -383,6 +384,9 @@ pub fn run_3d_walkthrough(
             heartbeat_in: 0.0,
             regeneration_seconds: 1.0e8,
             kill_bonus: 0.12,
+            start_messages: Vec::new(),
+            end_messages: Vec::new(),
+            refused_messages: Vec::new(),
         });
 
     let mut fb = vec![0u32; W * H];
@@ -413,24 +417,20 @@ pub fn run_3d_walkthrough(
         if window.is_key_pressed(Key::B, KeyRepeat::No) {
             bullet_time = !bullet_time;
         }
-        slow_motion.step(
-            bullet_time || window.get_mouse_down(MouseButton::Right),
-            base_dt,
-        );
+        let wants_slow_motion = bullet_time || window.get_mouse_down(MouseButton::Right);
+        let was_slow = slow_motion.active;
+        slow_motion.step(wants_slow_motion, base_dt);
+        let asked = wants_slow_motion && !wanted_slow_motion;
+        wanted_slow_motion = wants_slow_motion;
+        for message in slow_motion.transition(was_slow, asked) {
+            scene.dispatch_message("", message);
+        }
         if let Some(message) = slow_motion.heartbeat(base_dt).map(str::to_string) {
             scene.dispatch_message("", &message);
         }
-        let bullet_time_active = slow_motion.active;
-        let world_dt = if bullet_time_active {
-            base_dt * 0.30
-        } else {
-            base_dt
-        };
-        let player_dt = if bullet_time_active {
-            base_dt * 0.65
-        } else {
-            base_dt
-        };
+        // `[StartMessages]` set one speed for everything, Max included.
+        let world_dt = base_dt * scene.game_speed.value;
+        let player_dt = world_dt;
         let weapon = scene.inventory.current.as_ref();
         let weapon = weapon.and_then(|name| scene.inventory.defs.get(name));
         let rate = weapon.map_or(1.0, |def| def.slow_motion_rate);
@@ -1294,6 +1294,7 @@ pub fn run_3d_walkthrough(
             fb.fill(crate::gpu::HUD_CLEAR);
         }
         draw_letterbox(&mut fb, scene.widescreen.value);
+        draw_screen_flash(&scene, &mut fb);
 
         if let Some(assets) = hud_assets.as_ref() {
             let layout = &assets.layout;
@@ -2722,6 +2723,18 @@ pub(crate) fn apply_fog(fb: &mut [u32], zb: &[f32], fog: Option<LevelFog>) {
 }
 
 /// Mix `rgba` over every `0x00RRGGBB` pixel by its alpha.
+/// The running `MPHM_FlashToColor` over the frame, or over the hardware renderer's overlay.
+fn draw_screen_flash(scene: &LdbScene, fb: &mut [u32]) {
+    let Some(flash) = scene.screen_flash else {
+        return;
+    };
+    let opacity = flash.opacity().unwrap_or(0.0);
+    let alpha = ((flash.color & 0xff) as f32 * opacity) as u32;
+    for px in fb {
+        *px = crate::hud::blend(*px, flash.color >> 8, alpha);
+    }
+}
+
 pub(crate) fn blend_screen(fb: &mut [u32], rgba: [u8; 4]) {
     let a = u32::from(rgba[3]);
     if a == 0 {
@@ -4489,6 +4502,23 @@ mod tests {
     }
 
     #[test]
+    fn a_flash_darkens_the_frame_by_its_alpha() {
+        let scene = LdbScene {
+            screen_flash: Some(crate::scene::ScreenFlash {
+                color: 0x0000_0080,
+                fade_in: 0.0,
+                hold: 1.0,
+                fade_out: 0.0,
+                age: 0.5,
+            }),
+            ..Default::default()
+        };
+        let mut fb = [0x00ff_ffffu32];
+        draw_screen_flash(&scene, &mut fb);
+        assert_eq!(fb[0], 0x007f_7f7f);
+    }
+
+    #[test]
     fn firing_slows_with_time_by_the_weapons_multiplier() {
         // A frame of 0.1 s in bullet time running at a tenth of the speed.
         assert_eq!(cycle_seconds(0.1, 0.01, 0.0), 0.01);
@@ -5669,6 +5699,8 @@ mod tests {
             fog_fade: None,
             widescreen: crate::scene::Ramp::at(0.0),
             fov_multiplier: crate::scene::Ramp::at(1.0),
+            game_speed: crate::scene::Ramp::at(1.0),
+            screen_flash: None,
             inventory: Default::default(),
             hud_prints: Vec::new(),
             gravity: None,

@@ -181,6 +181,10 @@ pub struct SlowMotion {
     pub regeneration_seconds: f32,
     /// `characters.h` `BONUS_SLOWMOTION`: the share of the gauge a kill gives.
     pub kill_bonus: f32,
+    /// `[StartMessages]`, `[EndMessages]` and `[CantSwitchOnMessages]`.
+    pub start_messages: Vec<String>,
+    pub end_messages: Vec<String>,
+    pub refused_messages: Vec<String>,
 }
 
 impl SlowMotion {
@@ -207,7 +211,20 @@ impl SlowMotion {
             heartbeat_in: 0.0,
             regeneration_seconds: general.number("regenerationtime")?,
             kill_bonus: bonus?,
+            start_messages: config_messages(globalconfig, "[StartMessages]"),
+            end_messages: config_messages(globalconfig, "[EndMessages]"),
+            refused_messages: config_messages(globalconfig, "[CantSwitchOnMessages]"),
         })
+    }
+
+    /// The messages for a step from `was_active` with the player `asking` for the first time.
+    pub fn transition(&self, was_active: bool, asking: bool) -> &[String] {
+        match (was_active, self.active) {
+            (false, true) => &self.start_messages,
+            (true, false) => &self.end_messages,
+            (false, false) if asking => &self.refused_messages,
+            _ => &[],
+        }
     }
 
     /// A kill fills the gauge by `kill_bonus`.
@@ -242,6 +259,21 @@ impl SlowMotion {
             self.level = (self.level + seconds / self.regeneration_seconds).min(1.0);
         }
     }
+}
+
+/// The `[Message] String`s of the brace block after `header`, comments left out.
+fn config_messages(text: &str, header: &str) -> Vec<String> {
+    text.lines()
+        .skip_while(|line| !line.trim().eq_ignore_ascii_case(header))
+        .skip(1)
+        .take_while(|line| !line.trim().starts_with('}'))
+        .filter(|line| !line.trim().starts_with("//"))
+        .filter_map(|line| {
+            let (_, value) = line.split_once("String")?.1.split_once('=')?;
+            let value = value.trim().trim_end_matches(';').trim();
+            Some(value.trim_matches('"').to_string())
+        })
+        .collect()
 }
 
 /// One `[Section]` of `hud.txt`: its lower-case path, such as `health/sprite`, and its keys.
@@ -1477,6 +1509,24 @@ mod tests {
     }
 
     #[test]
+    fn slow_motion_reads_its_message_lists() {
+        let config = "[slowmotion]\n{\n\t[general]\n\tSlowMotionTime = 15.0;\n\tRegenerationTime = 100.0;\n\tThreshold = 0.1%;\n\tHeartbeatSoundMessage = \"beat\";\n\tHeartbeatSoundInterval = 1.25;\n\n\t[StartMessages]\n\t{\n\t\t[Message] String = \"maxpayne_gamemode->gm_changecontrolledgamespeed( 0.2, 0.3 );\";\n\t\t[Message] String = \"maxpayne_gamemode->A_PlaySound ( characters, slow_motion );\";\n\t}\n\n\t[EndMessages]\n\t{\n\t\t[Message] String = \"end;\";\n//\t\t[Message] String = \"commented;\";\n\t}\n\n\t[CantSwitchOnMessages]\n\t{\n\t\t[Message] String = \"refused;\";\n\t}\n}\n";
+        let mut slow =
+            SlowMotion::parse(config, "#define BONUS_SLOWMOTION 0.12\n").expect("config");
+        assert_eq!(slow.start_messages.len(), 2);
+        assert!(slow.start_messages[0].contains("gm_changecontrolledgamespeed( 0.2, 0.3 )"));
+        assert_eq!(slow.end_messages, ["end;"]);
+        // Starting, ending, refused, and nothing to say.
+        slow.active = true;
+        assert_eq!(slow.transition(false, true).len(), 2);
+        assert!(slow.transition(true, true).is_empty());
+        slow.active = false;
+        assert_eq!(slow.transition(true, false), ["end;"]);
+        assert_eq!(slow.transition(false, true), ["refused;"]);
+        assert!(slow.transition(false, false).is_empty());
+    }
+
+    #[test]
     fn a_weapon_file_gives_its_id_and_sizes_through_shooting_h() {
         let def = WeaponDef::parse(
             "#define\tBERETTA_CLIPSIZE\t\t18\n#define BERETTA_POCKETSIZE 162\n",
@@ -1892,6 +1942,9 @@ mod tests {
             heartbeat_in: 0.0,
             regeneration_seconds: 100.0,
             kill_bonus: 0.12,
+            start_messages: Vec::new(),
+            end_messages: Vec::new(),
+            refused_messages: Vec::new(),
         }
     }
 
