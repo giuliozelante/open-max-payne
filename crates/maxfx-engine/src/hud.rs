@@ -634,6 +634,8 @@ pub struct WeaponDef {
     pub shows_dot: bool,
     /// First `[LOD]` `ExportData`, relative to `database\\weapons\\`.
     pub model: Option<String>,
+    /// What a shot throws instead of firing rays, with its `P_CreateProjectile` count.
+    pub flying: Vec<(crate::projectiles::FlyingDef, u32)>,
     /// `DefaultShootingFrequency`, shots per second.
     pub shots_per_second: f32,
     /// `ShootingFrequencyMultiplier`: 0 slows firing with time, 1 keeps it constant.
@@ -674,6 +676,7 @@ impl WeaponDef {
         let sections = parse_sections(&format!("{shooting_h}\n{weapon_txt}"));
         let key = |name: &str| sections.iter().find_map(|s| s.text(name));
         Some(Self {
+            flying: Vec::new(),
             id: key("weaponid")?.to_string(),
             inventory_id: key("inventoryid")?.to_string(),
             clip_size: key("clipsize")?.parse().ok()?,

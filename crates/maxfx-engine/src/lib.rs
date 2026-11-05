@@ -8,6 +8,7 @@ pub mod items;
 pub mod kf2;
 pub mod menu_ui;
 pub mod particles;
+pub mod projectiles;
 pub mod render3d;
 pub mod scene;
 
@@ -2613,6 +2614,14 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
             };
             def.projectiles = projectiles("WEAPONANIM_SHOOT");
             def.quiet_projectiles = projectiles("WEAPONANIM_SHOOT_NOEFFECTS");
+            def.flying = hud::parse_shot_projectiles(&text, "WEAPONANIM_SHOOT")
+                .into_iter()
+                .filter_map(|(name, count)| Some((load_flying(&mut source, &name)?, count)))
+                .filter(|(flying, _)| flying.damages_character)
+                .collect();
+            if !def.flying.is_empty() {
+                def.projectiles.clear();
+            }
             if let Some((file, frame)) = reloads.get(&name) {
                 let path = format!(r"\data\database\skeletons\default_skeleton\{file}");
                 let clip = source
@@ -2683,6 +2692,34 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
             Some((name, def))
         })
         .collect()
+}
+
+/// `database/projectiles/<name>.txt` if it falls, with what its explosion throws.
+fn load_flying(source: &mut GameSource, name: &str) -> Option<projectiles::FlyingDef> {
+    const DIR: &str = r"\data\database\projectiles\";
+    let defines = source
+        .read(r"\data\database\projectiles.h")
+        .unwrap_or_default();
+    let defines = String::from_utf8_lossy(&defines).into_owned();
+    let text = source.read(&format!("{DIR}{name}.txt"))?;
+    let mut def = projectiles::FlyingDef::parse(&defines, &String::from_utf8_lossy(&text))?;
+    let clip = def.explode_clip.as_ref().and_then(|file| {
+        let path = resolve_win_path(&format!(r"{DIR}{name}\{file}"));
+        kf2::parse_kf2_anim(&source.read(&path)?)
+    });
+    let fps = clip.and_then(|clip| Some(clip.bones.first()?.fps));
+    let fps = fps.filter(|fps| *fps > 0.0).unwrap_or(30.0);
+    def.model = def
+        .model
+        .map(|file| resolve_win_path(&format!(r"{DIR}{name}\{file}")));
+    for blast in &mut def.blasts {
+        blast.at = blast.frame as f32 / fps;
+    }
+    def.frags = std::mem::take(&mut def.frag_names)
+        .into_iter()
+        .filter_map(|(frag, count)| Some((load_flying(source, &frag)?, count)))
+        .collect();
+    Some(def)
 }
 
 /// `weaponpriority.txt` `[BestWeapons]`, strongest first.
@@ -2890,6 +2927,27 @@ fn resolve_win_path(path: &str) -> String {
         }
     }
     format!(r"\{}", parts.join(r"\"))
+}
+
+/// The model of a flying projectile, packed or a bare `.kfs`.
+pub fn load_flying_model(game_dir: &Path, win_path: &str) -> Option<kf2::KfsMesh> {
+    if !win_path.to_ascii_lowercase().ends_with(".kfs") {
+        return load_packed_model(game_dir, win_path);
+    }
+    let mut source = GameSource::open(game_dir);
+    let (folder, _) = win_path.rsplit_once('\\')?;
+    let data = source.read(win_path)?;
+    kf2::parse_kfs_mesh(&data, |file| {
+        let bytes = source.read(&format!(r"{folder}\textures\{file}"))?;
+        let (width, height, pixels) = scene::decode_texture_blob(&bytes)?;
+        Some(scene::DecodedTexture {
+            path: file.to_string(),
+            flag: 4,
+            width,
+            height,
+            pixels,
+        })
+    })
 }
 
 /// A packed `.kf2` model. Its materials search `textures;..\\sharedtextures`.
@@ -4624,6 +4682,40 @@ mod tests {
         assert_eq!(entries[0].ambient, Some([140.0, 135.0, 110.0]));
         assert_eq!(entries[1].ambient, Some([32.0, 33.0, 34.0]));
         assert_eq!(entries[2].ambient, None);
+    }
+
+    #[test]
+    fn retail_thrown_weapons_fly_and_bullets_stay_rays() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        if !game.is_dir() {
+            return;
+        }
+        let defs = load_weapon_defs(&game);
+        for name in ["grenade", "molotov", "m79"] {
+            let shot = defs[name].flying.first();
+            let shot = shot.unwrap_or_else(|| panic!("{name} throws nothing"));
+            assert!(
+                !shot.0.blasts.is_empty() || !shot.0.frags.is_empty(),
+                "{name}"
+            );
+            assert!(
+                defs[name].projectiles.is_empty(),
+                "{name} still fires a ray"
+            );
+        }
+        assert!(defs["beretta"].flying.is_empty());
+        let molotov = &defs["molotov"].flying[0].0;
+        assert_eq!(molotov.frags[0].1, 5);
+        assert!(molotov.frags[0].0.explodes_on_contact);
+        let last = molotov.blasts.last().expect("molotov blasts");
+        assert!(last.at > 0.0, "blast frames need the clip's rate");
+        for name in ["grenade", "molotov", "m79"] {
+            let model = defs[name].flying[0].0.model.as_deref().expect("model");
+            assert!(load_flying_model(&game, model).is_some(), "{name}: {model}");
+        }
     }
 
     #[test]
