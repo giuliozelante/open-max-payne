@@ -9,6 +9,7 @@ pub mod items;
 pub mod kf2;
 pub mod menu_ui;
 pub mod particles;
+pub mod player;
 pub mod projectiles;
 pub mod render3d;
 pub mod scene;
@@ -2849,6 +2850,10 @@ pub fn load_character_clips(game_dir: &Path, skin: &str) -> clips::CharacterClip
     let skeleton = text(&format!("{SKELETON}.txt"));
     let skin = text(&format!(r"\data\database\skins\{skin}.txt"));
     let table = clips::ClipTable::parse(&skeleton, &skin);
+    let airborne_speed = hud::parse_sections(&skin)
+        .iter()
+        .find_map(|section| section.number("airbornespeed"))
+        .unwrap_or_default();
     let files: std::collections::BTreeSet<&str> = table.files().collect();
     let anims = files
         .into_iter()
@@ -2858,7 +2863,22 @@ pub fn load_character_clips(game_dir: &Path, skin: &str) -> clips::CharacterClip
             Some((file.to_string(), std::sync::Arc::new(clip)))
         })
         .collect();
-    clips::CharacterClips { table, anims }
+    clips::CharacterClips {
+        table,
+        anims,
+        airborne_speed,
+    }
+}
+
+/// The sound of a dummy projectile: the cue of the decal it leaves where it lands, as a footstep
+/// says `d_createdecal( footstep_right )` and that block plays the step.
+pub fn load_dummy_sound(game_dir: &Path, projectile: &str) -> Option<String> {
+    let path = format!(r"\data\database\projectiles\{projectile}.txt");
+    let text = read_game_bytes(game_dir, &path)?;
+    let text = String::from_utf8_lossy(&text).to_ascii_lowercase();
+    let decal = hud::weapon_cue_line(&text, "d_createdecal", 0)?;
+    let decals = read_game_bytes(game_dir, r"\data\database\decals\decals.txt")?;
+    decals::DecalSet::parse(&String::from_utf8_lossy(&decals), &decal)?.sound
 }
 
 /// `RightHandGunBone` and `LeftHandGunBone` of the default skeleton.

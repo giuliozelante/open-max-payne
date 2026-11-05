@@ -109,6 +109,8 @@ pub struct CharacterClips {
     pub table: ClipTable,
     /// The clips by `Filename`.
     pub anims: BTreeMap<String, Arc<Kf2Anim>>,
+    /// The skin's `AirborneSpeed`, in metres per second.
+    pub airborne_speed: f32,
 }
 
 impl CharacterClips {

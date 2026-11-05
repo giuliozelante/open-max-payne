@@ -313,6 +313,9 @@ pub fn run_3d_walkthrough(
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
     let death_clips = crate::load_death_clips(&game_root);
     let player_clips = crate::load_character_clips(&game_root, player_skin.unwrap_or("max_payne"));
+    let mut motion = crate::player::PlayerMotion::default();
+    let mut grounded = true;
+    let mut dummy_sounds: BTreeMap<String, Option<String>> = BTreeMap::new();
     if let Some(rig) = player_rig.as_mut() {
         rig.upper_bones = crate::load_upper_bones(&game_root);
         rig.gun_bones = crate::load_gun_bones(&game_root);
@@ -356,10 +359,11 @@ pub fn run_3d_walkthrough(
         crate::read_game_bytes(&game_root, path)
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
     };
-    let chase_rig = text(r"\data\globalconfig.txt")
+    let mut chase_rig = text(r"\data\globalconfig.txt")
         .zip(text(r"\data\database\skeletons\default_skeleton.txt"))
         .and_then(|(config, skeleton)| ChaseRig::parse(&config, &skeleton))
         .unwrap_or(RETAIL_RIG);
+    let stand_point = chase_rig.point;
     // The mesh the player last ran into: `DO_CharacterCollides` fires once per contact.
     let mut last_contact = None;
     let mut capture = std::env::var_os("OPENMAXFX_CAPTURE_DIR").map(|dir| {
@@ -400,6 +404,8 @@ pub fn run_3d_walkthrough(
             active: false,
             seconds: 15.0,
             threshold: 0.001,
+            dive_threshold: 0.01,
+            dive_penalty: 0.1,
             heartbeat_message: String::new(),
             heartbeat_interval: 1.25,
             heartbeat_in: 0.0,
@@ -436,9 +442,26 @@ pub fn run_3d_walkthrough(
             third_person = !third_person;
         }
         let right_down = window.get_mouse_down(MouseButton::Right);
-        let pressed =
-            window.is_key_pressed(Key::B, KeyRepeat::No) || (right_down && !right_was_down);
+        let right_pressed = right_down && !right_was_down;
         right_was_down = right_down;
+        let key = |key| i32::from(window.is_key_down(key) && scene.player_controls);
+        let (forward_keys, right_keys) = (key(Key::W) - key(Key::S), key(Key::D) - key(Key::A));
+        let held = forward_keys != 0 || right_keys != 0;
+        // A direction turns the button into a dodge; a dive takes a weapon and gauge that allow it.
+        let dodge = (right_pressed && held && !fly_mode && motion.can_dodge(grounded)).then(|| {
+            let weapon = scene.inventory.current.as_ref();
+            let allowed = weapon
+                .and_then(|name| scene.inventory.defs.get(name))
+                .is_some_and(|def| def.dive_allowed);
+            if allowed && slow_motion.pay_for_dive() {
+                crate::player::DodgeKind::Dive
+            } else {
+                crate::player::DodgeKind::Roll
+            }
+        });
+        let pressed = (window.is_key_pressed(Key::B, KeyRepeat::No) || right_pressed)
+            && dodge.is_none()
+            && !motion.dodging();
         let was_slow = slow_motion.active;
         let asked = pressed && !bullet_time;
         bullet_time = slow_motion.switch(bullet_time, pressed, base_dt);
@@ -449,7 +472,7 @@ pub fn run_3d_walkthrough(
             scene.dispatch_message("", &message);
         }
         // `[StartMessages]` set one speed for everything, Max included.
-        let world_dt = base_dt * scene.game_speed.value;
+        let world_dt = base_dt * scene.game_speed.value * scene.dodge_speed.value;
         let player_dt = world_dt;
         let weapon = scene.inventory.current.as_ref();
         let weapon = weapon.and_then(|name| scene.inventory.defs.get(name));
@@ -561,28 +584,32 @@ pub fn run_3d_walkthrough(
         if !scene.player_controls {
             mv = [0.0; 3];
         }
-        let key = |key| i32::from(window.is_key_down(key) && scene.player_controls);
-        let running = crate::clips::run_index(
-            key(Key::W) - key(Key::S),
-            key(Key::D) - key(Key::A),
-            player_rig.as_ref().is_some_and(|rig| rig.two_handed),
-        )
-        .filter(|_| !fly_mode)
-        .and_then(|index| player_clips.get(&index));
-        if let Some(rig) = player_rig.as_mut() {
-            rig.motion = running.map(|(_, clip)| clip.clone());
-        }
-        let run_velocity = running.map_or([0.0; 3], |(def, clip)| {
-            let [x, _, z] = def.velocity(clip_seconds(clip));
-            [0, 1, 2].map(|c| right[c] * x + fwd[c] * z)
-        });
-        let mv_len = (mv[0] * mv[0] + mv[2] * mv[2]).sqrt();
-        let player_moving = mv_len > 0.01;
-        if player_moving {
-            walk_phase = move_clip_time(walk_phase, player_dt);
+        let controls = crate::player::Controls {
+            forward: forward_keys,
+            right: right_keys,
+            jump: window.is_key_pressed(Key::Space, KeyRepeat::No) && scene.player_controls,
+            crouch: window.is_key_down(Key::C) && scene.player_controls,
+            dodge,
+            two_handed: player_rig.as_ref().is_some_and(|rig| rig.two_handed),
+            grounded,
+            yaw,
+            airborne_speed: player_clips.airborne_speed,
+        };
+        let stepped = if fly_mode {
+            crate::player::MotionStep::default()
         } else {
-            walk_phase = 0.0;
+            motion.step(&player_clips, &controls, player_dt)
+        };
+        if let Some(rig) = player_rig.as_mut() {
+            rig.motion = stepped.clip.clone();
         }
+        let mv_len = (mv[0] * mv[0] + mv[2] * mv[2]).sqrt();
+        let player_moving = stepped.clip.is_some() || (fly_mode && mv_len > 0.01);
+        walk_phase = match (fly_mode, player_moving) {
+            (false, _) => motion.time(),
+            (true, true) => move_clip_time(walk_phase, player_dt),
+            (true, false) => 0.0,
+        };
         anim_clock += player_dt;
 
         if fly_mode {
@@ -596,8 +623,8 @@ pub fn run_3d_walkthrough(
             player_pos[1] += mv[1] * fly_speed * player_dt;
             player_pos[2] += mv[2] * fly_speed * player_dt;
         } else {
-            let dx = run_velocity[0] * player_dt;
-            let dz = run_velocity[2] * player_dt;
+            let dx = stepped.velocity[0] * player_dt;
+            let dz = stepped.velocity[1] * player_dt;
             let nx = player_pos[0] + dx;
             let nz = player_pos[2] + dz;
             let contact = dynamic_wall_hit(&scene, &room_origins, nx, player_pos[1], nz);
@@ -617,13 +644,31 @@ pub fn run_3d_walkthrough(
                 player_pos[2] = nz;
             }
 
-            if scene.player_controls
-                && window.is_key_pressed(Key::Space, KeyRepeat::No)
-                && vel_y.abs() < 0.05
-            {
-                vel_y = 5.2;
+            let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+            for text in &stepped.messages {
+                use crate::player::ClipEffect;
+                match crate::player::clip_effect(text) {
+                    Some(ClipEffect::Jump(speed)) => vel_y = speed,
+                    Some(ClipEffect::Sound { catalog, cue }) => {
+                        queue_sound(&mut scene, &catalog, &cue, feet);
+                    }
+                    Some(ClipEffect::Projectile(name)) => {
+                        let cue = dummy_sounds
+                            .entry(name)
+                            .or_insert_with_key(|name| crate::load_dummy_sound(&game_root, name));
+                        if let Some(cue) = cue.clone() {
+                            queue_sound(&mut scene, "characters", &cue, feet);
+                        }
+                    }
+                    Some(ClipEffect::Reload) => scene.inventory.reload_now(),
+                    Some(ClipEffect::BulletTimeOff) => bullet_time = false,
+                    Some(ClipEffect::Script) => {
+                        scene.dispatch_message("", text);
+                    }
+                    None => {}
+                }
             }
-            vel_y -= 15.0 * player_dt;
+            vel_y += particle_sprites.field.gravity[1] * player_dt;
             player_pos[1] += vel_y * player_dt;
             if let Some(floor_y) = find_floor_y(&scene, player_pos[0], player_pos[1], player_pos[2])
             {
@@ -631,9 +676,11 @@ pub fn run_3d_walkthrough(
                     player_pos[1] = floor_y + EYE_HEIGHT;
                     vel_y = 0.0;
                 }
+                grounded = vel_y <= 0.0 && player_pos[1] - EYE_HEIGHT - floor_y < STEP_UP;
             } else {
                 // Clamp vertical fall if jumping over a gap
                 vel_y = 0.0;
+                grounded = true;
             }
         }
 
@@ -673,7 +720,8 @@ pub fn run_3d_walkthrough(
                     def.rounds.clone()
                 };
                 if let Some(rig) = player_rig.as_mut() {
-                    rig.action = def.fire_clip.clone();
+                    // A dive's clips aim the arms themselves.
+                    rig.action = def.fire_clip.clone().filter(|_| !motion.diving());
                     action_time = 0.0;
                     rig.action_time = 0.0;
                 }
@@ -1134,6 +1182,18 @@ pub fn run_3d_walkthrough(
         }
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
+        let camera_point = if motion.diving() {
+            chase_rig.dive_point
+        } else if motion.crouching() {
+            chase_rig.crouch_point
+        } else {
+            stand_point
+        };
+        chase_rig.point = approach(
+            chase_rig.point,
+            camera_point,
+            chase_rig.point_speed * base_dt,
+        );
 
         // Compute camera position (3rd-person over-the-shoulder vs 1st-person)
         let mut cam_right = [cy, 0.0, -sy];
@@ -1968,6 +2028,12 @@ fn move_clip_time(time: f32, dt: f32) -> f32 {
 pub(crate) struct ChaseRig {
     /// `DefaultCameraPointOffset` (skeleton), from the feet: where the camera is cast from.
     point: [f32; 3],
+    /// `CrouchingCameraPointOffset`.
+    crouch_point: [f32; 3],
+    /// `ShootDodgingCameraPointOffset`.
+    dive_point: [f32; 3],
+    /// `InitialBackwardsSpeed`: metres per second the camera moves between those points.
+    point_speed: f32,
     /// `globalconfig.txt` `[camera]` `UpFollowDistance`: the camera above the player.
     up: [f32; 3],
     /// `MiddleFollowDistance`: the camera behind the player.
@@ -1980,11 +2046,38 @@ impl ChaseRig {
     fn parse(globalconfig: &str, skeleton: &str) -> Option<Self> {
         Some(Self {
             point: config_vector(skeleton, "DefaultCameraPointOffset")?,
+            crouch_point: config_vector(skeleton, "CrouchingCameraPointOffset")?,
+            dive_point: config_vector(skeleton, "ShootDodgingCameraPointOffset")?,
+            point_speed: config_number(globalconfig, "InitialBackwardsSpeed")?,
             up: config_vector(globalconfig, "UpFollowDistance")?,
             middle: config_vector(globalconfig, "MiddleFollowDistance")?,
             down: config_vector(globalconfig, "DownFollowDistance")?,
         })
     }
+}
+
+/// `key = n;` in a retail text file.
+fn config_number(text: &str, key: &str) -> Option<f32> {
+    let line = text
+        .lines()
+        .find(|line| line.trim_start().starts_with(key))?;
+    line.split_once('=')?
+        .1
+        .split(';')
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// `from` moved up to `step` metres toward `to`.
+fn approach(from: [f32; 3], to: [f32; 3], step: f32) -> [f32; 3] {
+    let gap: [f32; 3] = std::array::from_fn(|c| to[c] - from[c]);
+    let length = dot3(gap, gap).sqrt();
+    if length <= step {
+        return to;
+    }
+    std::array::from_fn(|c| from[c] + gap[c] * step / length)
 }
 
 /// `key = ( x, y, z );` in a retail text file.
@@ -2000,6 +2093,9 @@ fn config_vector(text: &str, key: &str) -> Option<[f32; 3]> {
 /// The retail values, for data that does not load.
 const RETAIL_RIG: ChaseRig = ChaseRig {
     point: [0.12, 1.75, -0.12],
+    crouch_point: [0.12, 1.15, -0.12],
+    dive_point: [0.12, 0.90, -0.12],
+    point_speed: 5.0,
     up: [0.06, 0.40, -0.40],
     middle: [0.06, 0.5, -4.00],
     down: [0.06, 0.80, -1.00],
@@ -3579,7 +3675,7 @@ fn character_clip(rig: &CharacterRig, moving: bool) -> Option<&crate::kf2::Kf2An
     }
 }
 
-fn clip_seconds(clip: &crate::kf2::Kf2Anim) -> f32 {
+pub(crate) fn clip_seconds(clip: &crate::kf2::Kf2Anim) -> f32 {
     clip.bones
         .first()
         .filter(|bone| bone.fps > 0.0)
@@ -4907,6 +5003,14 @@ mod tests {
     }
 
     #[test]
+    fn the_camera_point_moves_toward_its_target_and_stops_on_it() {
+        let from = [0.0, 1.75, 0.0];
+        let to = [0.0, 0.75, 0.0];
+        assert_eq!(approach(from, to, 0.25), [0.0, 1.5, 0.0]);
+        assert_eq!(approach(from, to, 2.0), to);
+    }
+
+    #[test]
     fn a_chosen_motion_clip_replaces_the_run() {
         let rig = CharacterRig {
             mesh: crate::kf2::KfsMesh {
@@ -5749,8 +5853,8 @@ mod tests {
 
     #[test]
     fn the_rig_reads_its_offsets_from_the_retail_text() {
-        let config = "[camera]\n{\n\t[general]\n\tUpFollowDistance\t= ( 0.06, 0.40, -0.40 );\n\tMiddleFollowDistance\t= ( 0.06, 0.5, -4.00 ); //was 0,0.75,-3\n\tDownFollowDistance\t= ( 0.06, 0.80, -1.00 );\n}\n";
-        let skeleton = "[Sk]\nDefaultCameraPointOffset\t\t= ( 0.12, 1.75, -0.12 );\n";
+        let config = "[camera]\n{\n\t[general]\n\tUpFollowDistance\t= ( 0.06, 0.40, -0.40 );\n\tMiddleFollowDistance\t= ( 0.06, 0.5, -4.00 ); //was 0,0.75,-3\n\tDownFollowDistance\t= ( 0.06, 0.80, -1.00 );\n\tInitialBackwardsSpeed\t= 5.0; \t// m/s\t- was 5\n}\n";
+        let skeleton = "[Sk]\nDefaultCameraPointOffset\t\t= ( 0.12, 1.75, -0.12 );\nCrouchingCameraPointOffset\t\t= ( 0.12, 1.15, -0.12 );\nShootDodgingCameraPointOffset\t= ( 0.12, 0.90, -0.12 );\n";
         assert_eq!(ChaseRig::parse(config, skeleton), Some(RETAIL_RIG));
     }
 
@@ -6165,6 +6269,7 @@ mod tests {
             widescreen: crate::scene::Ramp::at(0.0),
             fov_multiplier: crate::scene::Ramp::at(1.0),
             game_speed: crate::scene::Ramp::at(1.0),
+            dodge_speed: crate::scene::Ramp::at(1.0),
             screen_flash: None,
             inventory: Default::default(),
             hud_prints: Vec::new(),

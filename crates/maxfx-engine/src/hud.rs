@@ -172,6 +172,10 @@ pub struct SlowMotion {
     pub seconds: f32,
     /// `Threshold`: the level it takes to start.
     pub threshold: f32,
+    /// `ShootDodgeThreshold`: the level a dive takes.
+    pub dive_threshold: f32,
+    /// `ShootDodgePenalty`: the share of the gauge a dive costs.
+    pub dive_penalty: f32,
     /// `HeartbeatSoundMessage`, sent every `HeartbeatSoundInterval` seconds while active.
     pub heartbeat_message: String,
     pub heartbeat_interval: f32,
@@ -200,12 +204,17 @@ impl SlowMotion {
             })
             .and_then(|value| value.trim().parse().ok());
         let general = sections.iter().find(|s| s.path == "slowmotion/general")?;
-        let threshold = general.text("threshold")?.strip_suffix('%')?;
+        let share = |key: &str| {
+            let text = general.text(key)?.strip_suffix('%')?;
+            Some(text.trim().parse::<f32>().ok()? / 100.0)
+        };
         Some(Self {
             level: 1.0,
             active: false,
             seconds: general.number("slowmotiontime")?,
-            threshold: threshold.trim().parse::<f32>().ok()? / 100.0,
+            threshold: share("threshold")?,
+            dive_threshold: share("shootdodgethreshold")?,
+            dive_penalty: share("shootdodgepenalty")?,
             heartbeat_message: general.file("heartbeatsoundmessage")?,
             heartbeat_interval: general.number("heartbeatsoundinterval")?,
             heartbeat_in: 0.0,
@@ -225,6 +234,15 @@ impl SlowMotion {
             (false, false) if asking => &self.refused_messages,
             _ => &[],
         }
+    }
+
+    /// Pays for a dive. `false` when the gauge cannot, and only a roll is left.
+    pub fn pay_for_dive(&mut self) -> bool {
+        let paid = self.level >= self.dive_threshold;
+        if paid {
+            self.level = (self.level - self.dive_penalty).max(0.0);
+        }
+        paid
     }
 
     /// A kill fills the gauge by `kill_bonus`.
@@ -661,6 +679,8 @@ pub struct WeaponDef {
     pub reload_clip: Option<crate::kf2::Kf2Anim>,
     /// `TwoHandedAnimation`: Max carries it with the `CHARANIM_2_*` clips.
     pub two_handed: bool,
+    /// `ShootDodgeAllowed`.
+    pub dive_allowed: bool,
     /// What one shot or melee blow creates.
     pub projectiles: Vec<ProjectileDef>,
     /// What a `WEAPONANIM_SHOOT_NOEFFECTS` round creates.
@@ -707,6 +727,8 @@ impl WeaponDef {
             reload_sound_delay: 0.0,
             fire_clip: None,
             reload_clip: None,
+            dive_allowed: key("shootdodgeallowed")
+                .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
             two_handed: key("twohandedanimation")
                 .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
             projectiles: Vec::new(),
@@ -1107,6 +1129,12 @@ impl PlayerInventory {
         if let Some(name) = best {
             self.current = Some(name.clone());
         }
+    }
+
+    /// A `C_Reload` outside a reload clip, as a dive's first frame sends.
+    pub fn reload_now(&mut self) {
+        self.reloading = Some(0.0);
+        self.step(0.0);
     }
 
     /// Advances a running reload, which refills the clip at its `C_Reload` frame.
@@ -1551,7 +1579,7 @@ mod tests {
 
     #[test]
     fn slow_motion_reads_its_message_lists() {
-        let config = "[slowmotion]\n{\n\t[general]\n\tSlowMotionTime = 15.0;\n\tRegenerationTime = 100.0;\n\tThreshold = 0.1%;\n\tHeartbeatSoundMessage = \"beat\";\n\tHeartbeatSoundInterval = 1.25;\n\n\t[StartMessages]\n\t{\n\t\t[Message] String = \"maxpayne_gamemode->gm_changecontrolledgamespeed( 0.2, 0.3 );\";\n\t\t[Message] String = \"maxpayne_gamemode->A_PlaySound ( characters, slow_motion );\";\n\t}\n\n\t[EndMessages]\n\t{\n\t\t[Message] String = \"end;\";\n//\t\t[Message] String = \"commented;\";\n\t}\n\n\t[CantSwitchOnMessages]\n\t{\n\t\t[Message] String = \"refused;\";\n\t}\n}\n";
+        let config = "[slowmotion]\n{\n\t[general]\n\tSlowMotionTime = 15.0;\n\tRegenerationTime = 100.0;\n\tThreshold = 0.1%;\n\tShootDodgePenalty = 10%;\n\tShootDodgeThreshold = 1%;\n\tHeartbeatSoundMessage = \"beat\";\n\tHeartbeatSoundInterval = 1.25;\n\n\t[StartMessages]\n\t{\n\t\t[Message] String = \"maxpayne_gamemode->gm_changecontrolledgamespeed( 0.2, 0.3 );\";\n\t\t[Message] String = \"maxpayne_gamemode->A_PlaySound ( characters, slow_motion );\";\n\t}\n\n\t[EndMessages]\n\t{\n\t\t[Message] String = \"end;\";\n//\t\t[Message] String = \"commented;\";\n\t}\n\n\t[CantSwitchOnMessages]\n\t{\n\t\t[Message] String = \"refused;\";\n\t}\n}\n";
         let mut slow =
             SlowMotion::parse(config, "#define BONUS_SLOWMOTION 0.12\n").expect("config");
         assert_eq!(slow.start_messages.len(), 2);
@@ -1972,12 +2000,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_dive_costs_its_penalty_and_a_nearly_empty_gauge_refuses_it() {
+        let mut gauge = gauge();
+        assert!(gauge.pay_for_dive());
+        assert!((gauge.level - 0.9).abs() < 1e-6);
+        gauge.level = 0.005;
+        assert!(!gauge.pay_for_dive());
+        assert_eq!(gauge.level, 0.005);
+    }
+
     fn gauge() -> SlowMotion {
         SlowMotion {
             level: 1.0,
             active: false,
             seconds: 15.0,
             threshold: 0.001,
+            dive_threshold: 0.01,
+            dive_penalty: 0.1,
             heartbeat_message: "beat".into(),
             heartbeat_interval: 1.25,
             heartbeat_in: 0.0,
@@ -1991,7 +2031,7 @@ mod tests {
 
     #[test]
     fn globalconfig_gives_the_gauges_length_and_threshold() {
-        let text = "[slowmotion]\n{\n\t[general]\n\tSlowMotionTime\t\t\t= 15.0;\t\t\t// length\n\tThreshold\t\t\t\t= 0.1%;\t\t\t// must be exceeded\n\tHeartbeatSoundMessage\t= \"beat\";\n\tHeartbeatSoundInterval\t= 1.25;\t\t\t// interval\n\tRegenerationTime\t= 100.0;\t// takes this many seconds\n}\n";
+        let text = "[slowmotion]\n{\n\t[general]\n\tSlowMotionTime\t\t\t= 15.0;\t\t\t// length\n\tThreshold\t\t\t\t= 0.1%;\t\t\t// must be exceeded\n\tShootDodgePenalty\t\t= 10%;\n\tShootDodgeThreshold\t\t= 1%;\n\tHeartbeatSoundMessage\t= \"beat\";\n\tHeartbeatSoundInterval\t= 1.25;\t\t\t// interval\n\tRegenerationTime\t= 100.0;\t// takes this many seconds\n}\n";
         let characters = "#define\tBONUS_SLOWMOTION\t\t\t\t0.12\n";
         assert_eq!(SlowMotion::parse(text, characters), Some(gauge()));
     }
