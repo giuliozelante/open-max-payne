@@ -675,6 +675,8 @@ pub struct WeaponDef {
     pub reload_sound_delay: f32,
     /// `CHARANIM_SHOOT<WEAPON>`.
     pub fire_clip: Option<crate::kf2::Kf2Anim>,
+    /// `CHARANIM_SHOOTLOW<WEAPON>` and `CHARANIM_SHOOTHIGH<WEAPON>`.
+    pub aim_clips: Option<std::sync::Arc<crate::clips::AimClips>>,
     /// `CHARANIM_RELOAD<WEAPON>`.
     pub reload_clip: Option<crate::kf2::Kf2Anim>,
     /// `TwoHandedAnimation`: Max carries it with the `CHARANIM_2_*` clips.
@@ -726,6 +728,7 @@ impl WeaponDef {
             reload_sound: weapon_cue(weapon_txt, "WEAPONANIM_RELOAD", "A_Play3DSound", 1),
             reload_sound_delay: 0.0,
             fire_clip: None,
+            aim_clips: None,
             reload_clip: None,
             dive_allowed: key("shootdodgeallowed")
                 .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),

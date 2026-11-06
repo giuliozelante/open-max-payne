@@ -2595,6 +2595,8 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
     let reloads = hud::parse_reload_animations(&skeleton);
     let reload_sounds = hud::parse_reload_sound_frames(&skeleton);
     let shots = hud::parse_shoot_animations(&skeleton);
+    let table = clips::ClipTable::parse(&skeleton, "");
+    let gun = kf2::parse_body_bones(&skeleton, "RightHandGunBone");
     names
         .into_iter()
         .filter_map(|name| {
@@ -2655,6 +2657,17 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
                     .read(&path)
                     .and_then(|bytes| kf2::parse_kf2_anim(&bytes));
             }
+            let mut aim_clip = |way: &str| {
+                let index = format!("CHARANIM_SHOOT{way}{}", name.to_ascii_uppercase());
+                let file = &table.get(&index)?.file;
+                let path = format!(r"\data\database\skeletons\default_skeleton\{file}");
+                kf2::parse_kf2_anim(&source.read(&path)?)
+            };
+            def.aim_clips = aim_clip("LOW")
+                .zip(aim_clip("HIGH"))
+                .zip(gun.first())
+                .and_then(|((low, high), gun)| clips::AimClips::new(low, high, gun))
+                .map(std::sync::Arc::new);
             let fps = def
                 .fire_clip
                 .as_ref()
@@ -4567,6 +4580,7 @@ mod tests {
         );
         assert!(defs["pumpshotgun"].two_handed);
         assert!(beretta.fire_clip.is_some() && beretta.reload_clip.is_some());
+        assert!(beretta.aim_clips.is_some() && defs["pumpshotgun"].aim_clips.is_some());
         assert!(beretta.reload_sound_delay > 0.0);
         // These script the shot on the body clip, not in the weapon file.
         assert_eq!(defs["ingram"].fire_sound.as_deref(), Some("shoot_ingram"));

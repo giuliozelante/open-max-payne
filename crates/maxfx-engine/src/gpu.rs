@@ -2141,6 +2141,8 @@ mod tests {
             action: None,
             motion: None,
             fade: Default::default(),
+            aim: None,
+            aim_pitch: 0.0,
             two_handed_idle: None,
             two_handed_walk: None,
             two_handed: false,
