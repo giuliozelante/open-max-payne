@@ -38,6 +38,95 @@ impl Difficulty {
     }
 }
 
+/// `globalconfig.txt` `[character]` falling damage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Falling {
+    /// `DamageFallingThreshold`, in metres per second.
+    threshold: f32,
+    /// `RelativeFallingDamage`, as a fraction.
+    relative: f32,
+    /// `DamageFallingSpeedDeduct`.
+    deduct: f32,
+    /// `FallingDamageExponent`.
+    exponent: f32,
+}
+
+impl Falling {
+    pub fn parse(globalconfig: &str) -> Option<Self> {
+        let sections = parse_sections(globalconfig);
+        let block = sections
+            .iter()
+            .find(|section| section.path == "character")?;
+        let relative = block.text("relativefallingdamage")?.strip_suffix('%')?;
+        Some(Self {
+            threshold: block.number("damagefallingthreshold")?,
+            relative: relative.trim().parse::<f32>().ok()? / 100.0,
+            deduct: block.number("damagefallingspeeddeduct")?,
+            exponent: block.number("fallingdamageexponent")?,
+        })
+    }
+
+    /// Points lost landing at `speed`, for a character of `max` health.
+    pub fn damage(&self, speed: f32, max: f32) -> f32 {
+        if speed < self.threshold {
+            return 0.0;
+        }
+        (speed - self.deduct).powf(self.exponent) * max * self.relative
+    }
+}
+
+/// `DamageFlash*` of `globalconfig.txt`, the red flash of a hurt player.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DamageFlash {
+    points: [f32; 2],
+    color: [u32; 2],
+    fade_out: [f32; 2],
+    stay: [f32; 2],
+}
+
+impl DamageFlash {
+    pub fn parse(globalconfig: &str) -> Option<Self> {
+        let sections = parse_sections(globalconfig);
+        let block = sections
+            .iter()
+            .find(|section| section.path == "character")?;
+        let pair = |key: &str| {
+            let at = |end: &str| block.number(&format!("damageflash{end}{key}"));
+            Some([at("minimum")?, at("maximum")?])
+        };
+        let color = |end: &str| {
+            let text = block.text(&format!("damageflash{end}color"))?;
+            u32::from_str_radix(text.trim(), 16).ok()
+        };
+        Some(Self {
+            points: pair("hitpoints")?,
+            color: [color("minimum")?, color("maximum")?],
+            fade_out: pair("fadeouttime")?,
+            stay: pair("stayintime")?,
+        })
+    }
+
+    /// The flash for losing `points` at once. HYPOTHESIS: linear between the two ends.
+    pub fn of(&self, points: f32) -> Option<crate::scene::ScreenFlash> {
+        if points < self.points[0] {
+            return None;
+        }
+        let t = ((points - self.points[0]) / (self.points[1] - self.points[0])).clamp(0.0, 1.0);
+        let mix = |[a, b]: [f32; 2]| a + (b - a) * t;
+        let channel = |shift: u32| {
+            let [a, b] = self.color.map(|color| ((color >> shift) & 0xff) as f32);
+            (mix([a, b]).round() as u32) << shift
+        };
+        Some(crate::scene::ScreenFlash {
+            color: channel(24) | channel(16) | channel(8) | channel(0),
+            fade_in: 0.0,
+            hold: mix(self.stay),
+            fade_out: mix(self.fade_out),
+            age: 0.0,
+        })
+    }
+}
+
 /// Max's health, in points. `docs/rea/2026-11-06-character-health.md` has the addresses.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerHealth {
@@ -138,6 +227,36 @@ mod tests {
         \t\tHealthRegenerateMultiplier = 4%;\n\t\tHealthGainedImmediately = 5%;\n\
         \t}\n\t[nightmare]\n\t{\n\t\t[default]\n\t\tEnemyHealthMultiplier = 1.2;\n\
         \t\tPlayerHealthMultiplier = 0.4;\n\t}\n}\n";
+
+    const CONFIG: &str = "[character]\nDamageFallingThreshold = 15.0; // velocity\n\
+        RelativeFallingDamage = 1%;\nDamageFallingSpeedDeduct = 10.0;\nFallingDamageExponent = 2.1;\n\
+        DamageFlashMinimumHitPoints = 1;\nDamageFlashMinimumColor = A5000010;\n\
+        DamageFlashMinimumFadeOutTime = 0.05;\nDamageFlashMinimumStayInTime = 0.1;\n\
+        DamageFlashMaximumHitPoints = 50;\nDamageFlashMaximumColor = A50000D0;\n\
+        DamageFlashMaximumFadeOutTime = 1.0;\nDamageFlashMaximumStayInTime = 0.1;\n";
+
+    #[test]
+    fn five_metres_are_safe_and_ten_kill_as_the_config_says() {
+        let falling = Falling::parse(CONFIG).expect("falling");
+        // Gravity -20: 5 m lands at 14.1 m/s, 10 m at 20 m/s.
+        assert_eq!(falling.damage(14.1, 60.0), 0.0);
+        assert!(falling.damage(20.0, 60.0) >= 60.0);
+        let at_threshold = falling.damage(15.0, 60.0);
+        assert!((at_threshold - 5f32.powf(2.1) * 0.6).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_flash_grows_with_the_points_lost_and_stops_at_its_ends() {
+        let flash = DamageFlash::parse(CONFIG).expect("flash");
+        assert_eq!(flash.of(0.5), None);
+        let small = flash.of(1.0).expect("small");
+        assert_eq!(small.color, 0xA500_0010);
+        assert_eq!(small.fade_out, 0.05);
+        let big = flash.of(80.0).expect("big");
+        assert_eq!(big.color, 0xA500_00D0);
+        assert_eq!(big.fade_out, 1.0);
+        assert_eq!(big.hold, 0.1);
+    }
 
     #[test]
     fn the_normal_default_multipliers_are_read() {

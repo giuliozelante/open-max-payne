@@ -37,3 +37,12 @@ result under `0.1` to `0.1` when `[esi+0x454]` or `[esi+0x455]` is set. `0x69a80
 and has not been read. The floor applies only to the living: `0x6d6eb0` guards it and is taken to be a dead flag.
 
 **UNKNOWN:** the flash, sound and death side effects in `0x695b10` and `0x695fb0`.
+
+## Falling
+
+**VERIFIED (`0x68dd1d`-`0x68dd52`):** damage is `pow(speed - DamageFallingSpeedDeduct, FallingDamageExponent)` times
+maximum health (`0x691bd0`) times `RelativeFallingDamage`, sent to `0x695b10` with kind 3. With gravity -20 and 60
+points that makes 5 m safe and 10 m lethal, as the comment in `globalconfig.txt` says.
+
+**HYPOTHESIS:** `DamageFallingThreshold` gates it, and the speed is the fall alone. The test before `0x68dc98` is
+unread. The red flash is linear between the `DamageFlash*` ends; its code is unread.

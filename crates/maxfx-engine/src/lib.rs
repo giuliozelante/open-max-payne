@@ -4846,6 +4846,10 @@ mod tests {
         let weapons = load_weapon_defs(&game);
         assert_eq!(weapons["beretta"].slot, Some(1));
         assert_eq!(weapons["pumpshotgun"].slot, Some(2));
+        let config = read_game_bytes(&game, r"\data\globalconfig.txt").expect("globalconfig.txt");
+        let config = String::from_utf8_lossy(&config);
+        assert!(health::Falling::parse(&config).is_some());
+        assert!(health::DamageFlash::parse(&config).is_some());
         assert_eq!(difficulty.player_health, 1.0);
         assert_eq!(difficulty.regenerate, 0.04);
         assert_eq!(difficulty.gained_immediately, 0.05);
