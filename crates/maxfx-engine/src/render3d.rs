@@ -837,6 +837,7 @@ pub fn run_3d_walkthrough(
                 &mut zb,
                 (cam_pos, cam_right, cam_up, cam_fwd),
                 fov_scale,
+                scene.fog,
                 &sprites,
                 |key| particle_sprites.texture(key),
             );
@@ -2150,6 +2151,7 @@ pub(crate) fn draw_sprites<'a>(
     zb: &mut [f32],
     (cam, right, up, fwd): View,
     fov_scale: f32,
+    fog: Option<LevelFog>,
     sprites: &[crate::particles::Sprite],
     texture: impl Fn(&crate::particles::SpriteTexture) -> Option<&'a DecodedTexture>,
 ) {
@@ -2168,6 +2170,9 @@ pub(crate) fn draw_sprites<'a>(
         if half < 0.25 {
             continue;
         }
+        let fogged = fog.filter(|_| !sprite.additive);
+        let haze = fogged.map_or(0.0, |fog| fog_amount(&fog, cz));
+        let fog_colour = fogged.map_or([0.0; 3], |fog| fog.color);
         let x0 = (sx - half).floor().max(0.0) as usize;
         let x1 = ((sx + half).ceil().max(0.0) as usize).min(W);
         let y0 = (sy - half).floor().max(0.0) as usize;
@@ -2188,6 +2193,7 @@ pub(crate) fn draw_sprites<'a>(
                 let dst = fb[idx];
                 let channel = |shift: u32, k: usize| {
                     let src = ((texel >> shift) & 0xff) as f32 * sprite.rgba[k];
+                    let src = src + (fog_colour[k] - src) * haze;
                     let back = ((dst >> shift) & 0xff) as f32;
                     let out = if sprite.additive {
                         back + src * a
@@ -3926,6 +3932,51 @@ mod tests {
     }
 
     #[test]
+    fn a_blended_sprite_takes_the_fog_at_its_own_depth_and_an_additive_one_does_not() {
+        use crate::particles::{Sprite, SpriteTexture};
+        let white = crate::scene::DecodedTexture {
+            path: String::new(),
+            flag: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![0xffff_ffff],
+        };
+        let fog = crate::scene::LevelFog {
+            color: [0.0, 0.0, 0.0],
+            start: 0.0,
+            end: 10.0,
+        };
+        let centre_after = |additive: bool| {
+            let sprite = Sprite {
+                pos: [0.0, 0.0, 5.0],
+                size: 2.0,
+                rgba: [1.0; 4],
+                additive,
+                texture: SpriteTexture {
+                    effect: "k".into(),
+                    emitter: 0,
+                    sequence: 0,
+                    frame: 0,
+                },
+            };
+            let (mut fb, mut zb) = (vec![0u32; W * H], vec![f32::INFINITY; W * H]);
+            let view = test_view([0.0; 3], [0.0, 0.0, 1.0]);
+            draw_sprites(
+                &mut fb,
+                &mut zb,
+                view,
+                fov_scale(1.0),
+                Some(fog),
+                &[sprite],
+                |_| Some(&white),
+            );
+            fb[(H / 2) * W + W / 2]
+        };
+        assert_eq!(centre_after(false), 0x0080_8080);
+        assert_eq!(centre_after(true), 0x00ff_ffff);
+    }
+
+    #[test]
     fn sprites_blend_over_the_frame_and_hide_behind_closer_surfaces() {
         use crate::particles::{Sprite, SpriteTexture};
         let white = crate::scene::DecodedTexture {
@@ -3951,7 +4002,9 @@ mod tests {
         let view = test_view([0.0; 3], [0.0, 0.0, 1.0]);
         let centre = (H / 2) * W + W / 2;
         let draw = |fb: &mut Vec<u32>, zb: &mut Vec<f32>, sprite: Sprite| {
-            draw_sprites(fb, zb, view, fov_scale(1.0), &[sprite], |_| Some(&white));
+            draw_sprites(fb, zb, view, fov_scale(1.0), None, &[sprite], |_| {
+                Some(&white)
+            });
         };
         // Alpha blend: half of white over black.
         let (mut fb, mut zb) = (vec![0u32; W * H], vec![f32::INFINITY; W * H]);

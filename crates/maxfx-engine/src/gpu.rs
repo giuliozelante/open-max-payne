@@ -302,12 +302,26 @@ fn vs_sprite(v: SpriteIn) -> SpriteOut {
     return o;
 }
 struct SpriteFrag { @location(0) color: vec4f, @builtin(frag_depth) depth: f32 };
-@fragment
-fn fs_sprite(i: SpriteOut) -> SpriteFrag {
+fn sprite_texel(i: SpriteOut) -> SpriteFrag {
     let t = textureSample(img, img_sampler, i.uv);
     var f: SpriteFrag;
     f.color = vec4f(t.rgb * i.color.rgb, t.a * i.color.a);
     f.depth = clamp(i.vz / cam.params.w, 0.0, 1.0);
+    return f;
+}
+@fragment
+fn fs_sprite(i: SpriteOut) -> SpriteFrag {
+    return sprite_texel(i);
+}
+// Alpha-blended sprites take the fog at their own depth (`render3d::draw_sprites`).
+@fragment
+fn fs_sprite_fogged(i: SpriteOut) -> SpriteFrag {
+    var f = sprite_texel(i);
+    if cam.fog.w > 0.5 {
+        let span = cam.fog_range.y - cam.fog_range.x;
+        let k = select(step(cam.fog_range.y, i.vz), clamp((i.vz - cam.fog_range.x) / span, 0.0, 1.0), span > 0.0);
+        f.color = vec4f(mix(f.color.rgb, cam.fog.rgb, k), f.color.a);
+    }
     return f;
 }
 "#;
@@ -1107,7 +1121,7 @@ impl GpuRenderer {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &sprite_attributes,
         })];
-        let sprite_pipeline = |blend: wgpu::BlendState| {
+        let sprite_pipeline = |blend: wgpu::BlendState, fragment: &str| {
             let targets = [Some(wgpu::ColorTargetState {
                 format: COLOR_FORMAT,
                 blend: Some(blend),
@@ -1133,7 +1147,7 @@ impl GpuRenderer {
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &sprite_shader,
-                    entry_point: Some("fs_sprite"),
+                    entry_point: Some(fragment),
                     compilation_options: Default::default(),
                     targets: &targets,
                 }),
@@ -1141,20 +1155,23 @@ impl GpuRenderer {
                 cache: None,
             })
         };
-        let sprite_alpha = sprite_pipeline(wgpu::BlendState::ALPHA_BLENDING);
-        let sprite_add = sprite_pipeline(wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::SrcAlpha,
-                dst_factor: wgpu::BlendFactor::One,
-                operation: wgpu::BlendOperation::Add,
+        let sprite_alpha = sprite_pipeline(wgpu::BlendState::ALPHA_BLENDING, "fs_sprite_fogged");
+        let sprite_add = sprite_pipeline(
+            wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::SrcAlpha,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                // Accumulated so `render` sees where additive sprites drew.
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
             },
-            // Accumulated so `render` sees where additive sprites drew.
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::One,
-                operation: wgpu::BlendOperation::Add,
-            },
-        });
+            "fs_sprite",
+        );
         Self {
             device,
             queue,
@@ -2558,6 +2575,7 @@ mod tests {
                 &mut sw_zb,
                 view,
                 crate::render3d::fov_scale(1.0),
+                None,
                 std::slice::from_ref(&sprite),
                 |_| Some(&white),
             );
@@ -2577,6 +2595,62 @@ mod tests {
                 sw[centre]
             );
         }
+    }
+
+    #[test]
+    fn gpu_sprite_fog_matches_the_software_fog() {
+        let mut scene = scene_with(Vec::new(), [0.0; 3]);
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: gpu_sprite_fog_matches_the_software_fog skipped");
+            return;
+        };
+        scene.fog = Some(crate::scene::LevelFog {
+            color: [200.0, 40.0, 40.0],
+            start: 0.0,
+            end: 10.0,
+        });
+        let white = crate::scene::DecodedTexture {
+            path: String::new(),
+            flag: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![0xffff_ffff],
+        };
+        let sprite = Sprite {
+            pos: [0.0, 0.0, 5.0],
+            size: 2.0,
+            rgba: [1.0, 1.0, 1.0, 0.5],
+            additive: false,
+            texture: SpriteTexture {
+                effect: "k".into(),
+                emitter: 0,
+                sequence: 0,
+                frame: 0,
+            },
+        };
+        let view = crate::render3d::test_view([0.0; 3], [0.0, 0.0, 1.0]);
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let centre = (h / 2) * w + w / 2;
+        let mut sw = vec![0u32; w * h];
+        let mut sw_zb = vec![f32::INFINITY; w * h];
+        crate::render3d::draw_sprites(
+            &mut sw,
+            &mut sw_zb,
+            view,
+            crate::render3d::fov_scale(1.0),
+            scene.fog,
+            std::slice::from_ref(&sprite),
+            |_| Some(&white),
+        );
+        gpu.set_sprites(std::slice::from_ref(&sprite), view, |_| Some(&white));
+        let mut fb = vec![0u32; w * h];
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
+        let gap = (0..3)
+            .map(|k| ((fb[centre] >> (8 * k)) & 0xff).abs_diff((sw[centre] >> (8 * k)) & 0xff))
+            .max()
+            .unwrap_or(0);
+        assert!(gap <= 2, "{:06x} vs {:06x}", fb[centre], sw[centre]);
     }
 
     #[test]
