@@ -294,6 +294,13 @@ pub fn run_3d_walkthrough(
         .unwrap_or(RETAIL_RIG);
     // The mesh the player last ran into: `DO_CharacterCollides` fires once per contact.
     let mut last_contact = None;
+    let mut capture = std::env::var_os("OPENMAXFX_CAPTURE_DIR").map(|dir| {
+        let dir = PathBuf::from(dir);
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            eprintln!("  3D Engine: capture folder: {error}");
+        }
+        FrameCapture::new(dir, title)
+    });
     let mut decals = crate::decals::DecalField::load(&game_root);
     let mut mouse_fire_held = false;
     let mut slow_motion = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt")
@@ -968,6 +975,21 @@ pub fn run_3d_walkthrough(
                     .or_else(|| decals.texture(key))
             });
         }
+        if let Some(path) = capture.as_mut().and_then(|c| c.due(base_dt)) {
+            let mut frame = vec![0u32; W * H];
+            match (gpu.as_mut(), scene_view) {
+                (Some((renderer, _)), Some(view)) => {
+                    let mut depth = vec![f32::INFINITY; W * H];
+                    let lit = use_lightmaps;
+                    renderer.render(&scene, view, lit, &characters, &mut frame, &mut depth);
+                    composite_hud(&mut frame, &fb);
+                }
+                _ => frame.copy_from_slice(&fb),
+            }
+            if let Err(error) = write_ppm(&path, W, H, &frame) {
+                eprintln!("  3D Engine: capture failed: {error}");
+            }
+        }
         match gpu.as_mut() {
             Some((renderer, surface)) => renderer.present(
                 surface,
@@ -990,6 +1012,48 @@ pub fn run_3d_walkthrough(
     screen.set_mouse_captured(false);
     screen.put_gpu(gpu);
     Ok(())
+}
+
+/// Saves a frame every few seconds into `OPENMAXFX_CAPTURE_DIR`, for comparing with retail. It is
+/// the engine's own image, so nothing else on the desktop can end up in it.
+struct FrameCapture {
+    dir: PathBuf,
+    level: String,
+    every: f32,
+    wait: f32,
+    count: u32,
+}
+
+impl FrameCapture {
+    fn new(dir: PathBuf, level: &str) -> Self {
+        let level = level.chars().filter(char::is_ascii_alphanumeric).collect();
+        Self {
+            dir,
+            level,
+            every: 2.0,
+            wait: 0.0,
+            count: 0,
+        }
+    }
+
+    /// The next file to write, when one is due.
+    fn due(&mut self, seconds: f32) -> Option<PathBuf> {
+        self.wait -= seconds;
+        if self.wait > 0.0 {
+            return None;
+        }
+        self.wait = self.every;
+        self.count += 1;
+        let name = format!("{}_{:04}.ppm", self.level, self.count);
+        Some(self.dir.join(name))
+    }
+}
+
+/// `hud` over `frame`: the top byte of a HUD pixel is its transparency.
+fn composite_hud(frame: &mut [u32], hud: &[u32]) {
+    for (pixel, over) in frame.iter_mut().zip(hud) {
+        *pixel = crate::hud::blend(*pixel, *over & 0x00ff_ffff, 255 - (*over >> 24));
+    }
 }
 
 /// Rows of each widescreen bar: an eighth of the frame height when fully in (retail 1920x1080
@@ -4553,6 +4617,25 @@ mod tests {
         // A camera-facing square would cover these pixels.
         let fb = drawn_quad([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0]]);
         assert_eq!(fb[(H / 2) * W + W / 2 + 40], 0);
+    }
+
+    #[test]
+    fn a_frame_is_due_at_once_then_every_interval_with_new_names() {
+        let mut capture = FrameCapture::new(PathBuf::from("out"), "Open Max Payne - tutorial");
+        let first = capture.due(0.1).expect("first frame");
+        assert_eq!(first, PathBuf::from("out/OpenMaxPaynetutorial_0001.ppm"));
+        assert_eq!(capture.due(1.0), None);
+        let second = capture.due(1.2).expect("second frame");
+        assert_eq!(second, PathBuf::from("out/OpenMaxPaynetutorial_0002.ppm"));
+    }
+
+    #[test]
+    fn the_hud_layer_composites_over_the_saved_frame() {
+        let clear = crate::gpu::HUD_CLEAR;
+        let half = crate::hud::blend(clear, 0x00ff_ffff, 128);
+        let mut frame = vec![0x0040_4040, 0x0000_0000, 0x0040_4040];
+        composite_hud(&mut frame, &[clear, half, 0x0011_2233]);
+        assert_eq!(frame, vec![0x0040_4040, 0x0080_8080, 0x0011_2233]);
     }
 
     #[test]
