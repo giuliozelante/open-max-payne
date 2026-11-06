@@ -291,6 +291,8 @@ pub fn run_3d_walkthrough(
         .zip(text(r"\data\database\skeletons\default_skeleton.txt"))
         .and_then(|(config, skeleton)| ChaseRig::parse(&config, &skeleton))
         .unwrap_or(RETAIL_RIG);
+    // The mesh the player last ran into: `DO_CharacterCollides` fires once per contact.
+    let mut last_contact = None;
     let mut slow_motion = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt")
         .and_then(|bytes| crate::hud::SlowMotion::parse(&String::from_utf8_lossy(&bytes)))
         .unwrap_or(crate::hud::SlowMotion {
@@ -467,6 +469,13 @@ pub fn run_3d_walkthrough(
             let dz = mv[2] * speed * player_dt;
             let nx = player_pos[0] + dx;
             let nz = player_pos[2] + dz;
+            let contact = dynamic_wall_hit(&scene, &room_origins, nx, player_pos[1], nz);
+            if contact != last_contact {
+                if let Some(index) = contact {
+                    scene.character_collides(index);
+                }
+                last_contact = contact;
+            }
             // Strict boundary & wall check: never allow stepping off walkable floor into void!
             if can_stand_at(&scene, &room_origins, nx, player_pos[1], nz) {
                 player_pos[0] = nx;
@@ -1010,6 +1019,10 @@ fn can_stand_at(
     !hits_wall(scene, rooms, wx, wy, wz) && find_floor_y(scene, wx, wy, wz).is_some()
 }
 
+/// Highest ledge the feet ride onto. Retail moves a capsule with a round bottom and has no step
+/// value; HYPOTHESIS: its radius, `max_payne.txt` `CapsuleRadius`.
+const STEP_UP: f32 = 0.48;
+
 fn find_floor_y(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> Option<f32> {
     let mut best: Option<f32> = None;
     let feet_y = wy - EYE_HEIGHT;
@@ -1045,7 +1058,7 @@ fn find_floor_y(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> Option<f32> {
                     let y = v0[1]
                         - (poly.normal[0] * (wx - v0[0]) + poly.normal[2] * (wz - v0[2]))
                             / poly.normal[1];
-                    if y <= feet_y + 1.15 && y >= feet_y - 6.0 && best.is_none_or(|b| y > b) {
+                    if y <= feet_y + STEP_UP && y >= feet_y - 6.0 && best.is_none_or(|b| y > b) {
                         best = Some(y);
                     }
                 }
@@ -1108,6 +1121,20 @@ fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32
             }
         }
     }
+    dynamic_wall_hit(scene, rooms, wx, wy, wz).is_some()
+}
+
+/// The dynamic mesh a body at this spot runs into.
+fn dynamic_wall_hit(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    wx: f32,
+    wy: f32,
+    wz: f32,
+) -> Option<usize> {
+    let body_min_y = wy - EYE_HEIGHT + 0.35;
+    let body_max_y = wy - 0.10;
+    let radius = 0.38f32;
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
         if dm.hidden
             || !dm.collisions
@@ -1154,11 +1181,11 @@ fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32
             }
             let plane_dist = (wx - world[0][0]) * n[0] + (wz - world[0][2]) * n[2];
             if plane_dist.abs() < radius {
-                return true;
+                return Some(idx);
             }
         }
     }
-    false
+    None
 }
 
 pub(crate) fn poly_policy(scene: &LdbScene, material_id: i32) -> MaterialPolicy {
@@ -2425,13 +2452,15 @@ fn decal_depth(z: f32, depth_bias: f32) -> f32 {
 }
 
 fn point_in_xz_tri(px: f32, pz: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> bool {
-    let eps = -0.02f32;
-    let d1 = (px - b[0]) * (a[2] - b[2]) - (a[0] - b[0]) * (pz - b[2]);
-    let d2 = (px - c[0]) * (b[2] - c[2]) - (b[0] - c[0]) * (pz - c[2]);
-    let d3 = (px - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (pz - a[2]);
-    let has_neg = (d1 < -eps) || (d2 < -eps) || (d3 < -eps);
-    let has_pos = (d1 > eps) || (d2 > eps) || (d3 > eps);
-    !(has_neg && has_pos)
+    // Signed distance from each edge, so the slack is in metres whatever the triangle's size.
+    const SLACK: f32 = 0.005;
+    let side = |p: [f32; 3], q: [f32; 3]| {
+        let (ex, ez) = (q[0] - p[0], q[2] - p[2]);
+        let length = (ex * ex + ez * ez).sqrt().max(1e-6);
+        ((px - p[0]) * ez - ex * (pz - p[2])) / length
+    };
+    let sides = [side(b, a), side(c, b), side(a, c)];
+    !(sides.iter().any(|d| *d < -SLACK) && sides.iter().any(|d| *d > SLACK))
 }
 
 /// Character vertices posed (or laid flat when dead) and placed in the world.
@@ -4152,6 +4181,77 @@ mod tests {
         let config = "[camera]\n{\n\t[general]\n\tUpFollowDistance\t= ( 0.06, 0.40, -0.40 );\n\tMiddleFollowDistance\t= ( 0.06, 0.5, -4.00 ); //was 0,0.75,-3\n\tDownFollowDistance\t= ( 0.06, 0.80, -1.00 );\n}\n";
         let skeleton = "[Sk]\nDefaultCameraPointOffset\t\t= ( 0.12, 1.75, -0.12 );\n";
         assert_eq!(ChaseRig::parse(config, skeleton), Some(RETAIL_RIG));
+    }
+
+    #[test]
+    fn a_point_on_or_beside_a_triangle_edge_counts_as_inside() {
+        // The floor strip at the foot of the house stairs is two slim triangles: edge points were
+        // rejected from both, so Max could not step across it.
+        let (a, b, c) = ([8.12, 0.0, -4.06], [9.88, 0.0, -4.06], [9.88, 0.0, -3.94]);
+        assert!(point_in_xz_tri(9.0, -4.0, a, b, c), "on the diagonal");
+        assert!(point_in_xz_tri(9.0, -4.06, a, b, c), "on the long edge");
+        assert!(point_in_xz_tri(9.5, -4.03, a, b, c), "inside");
+    }
+
+    #[test]
+    fn a_point_far_from_a_tiny_triangle_is_outside() {
+        // Unscaled cross products of a small triangle stay inside any fixed tolerance, so its
+        // slope reached across the house as an invisible ramp in a doorway.
+        let (a, b, c) = ([0.0, 0.0, 0.0], [0.05, 0.0, 0.0], [0.05, 0.0, 0.05]);
+        assert!(!point_in_xz_tri(0.5, 0.5, a, b, c));
+        assert!(!point_in_xz_tri(-0.2, 0.02, a, b, c));
+        assert!(point_in_xz_tri(0.04, 0.01, a, b, c));
+    }
+
+    #[test]
+    fn a_point_clearly_outside_a_triangle_is_outside() {
+        let (a, b, c) = ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0]);
+        assert!(!point_in_xz_tri(0.0, 1.0, a, b, c));
+        assert!(!point_in_xz_tri(2.0, 0.5, a, b, c));
+        assert!(!point_in_xz_tri(0.5, -0.5, a, b, c));
+    }
+
+    fn floors_at(heights: &[f32]) -> LdbScene {
+        let mut scene = empty_scene();
+        let v = |x: f32, y: f32, z: f32| SceneVertex {
+            pos: [x, y, z],
+            uv: [0.0; 2],
+            luv: [0.0; 2],
+        };
+        let polys = heights
+            .iter()
+            .map(|y| ScenePoly {
+                vertices: vec![
+                    v(-5.0, *y, -5.0),
+                    v(5.0, *y, -5.0),
+                    v(5.0, *y, 5.0),
+                    v(-5.0, *y, 5.0),
+                ],
+                normal: [0.0, 1.0, 0.0],
+                material_id: 0,
+                lightmap_id: -1,
+            })
+            .collect();
+        scene.static_meshes.push(crate::scene::SceneStaticMesh {
+            mesh_id: 0,
+            room_id: None,
+            world_origin: [0.0; 3],
+            polys,
+        });
+        scene
+    }
+
+    #[test]
+    fn a_stair_riser_is_stepped_onto() {
+        let scene = floors_at(&[0.0, 0.3]);
+        assert_eq!(find_floor_y(&scene, 0.0, EYE_HEIGHT, 0.0), Some(0.3));
+    }
+
+    #[test]
+    fn a_surface_above_the_capsule_radius_is_not_stepped_onto() {
+        // A railing 1 m up lifted Max onto it at the foot of the house stairs.
+        let scene = floors_at(&[0.0, 1.0]);
+        assert_eq!(find_floor_y(&scene, 0.0, EYE_HEIGHT, 0.0), Some(0.0));
     }
 
     #[test]
