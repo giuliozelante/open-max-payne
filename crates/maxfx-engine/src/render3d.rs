@@ -431,7 +431,10 @@ pub fn run_3d_walkthrough(
         } else {
             base_dt
         };
-        shot_timer = (shot_timer - base_dt).max(0.0);
+        let weapon = scene.inventory.current.as_ref();
+        let weapon = weapon.and_then(|name| scene.inventory.defs.get(name));
+        let rate = weapon.map_or(1.0, |def| def.slow_motion_rate);
+        shot_timer = (shot_timer - cycle_seconds(base_dt, world_dt, rate)).max(0.0);
 
         if window.is_key_pressed(Key::Tab, KeyRepeat::No) && !scene.jumppoints.is_empty() {
             jp_idx = (jp_idx + 1) % scene.jumppoints.len();
@@ -3204,6 +3207,12 @@ fn character_locals(
     Some((clip, locals))
 }
 
+/// How much of a shooting cycle a frame uses. The weapon files say of the multiplier: near 0
+/// "shooting will slow down when time slows", near 1 it "will happen with constant speed".
+fn cycle_seconds(real: f32, world: f32, multiplier: f32) -> f32 {
+    world + (real - world) * multiplier
+}
+
 /// Where the player's current clip is.
 fn player_clip_time(
     rig: &CharacterRig,
@@ -4477,6 +4486,14 @@ mod tests {
         let name = |moving| character_clip(&rig, moving).map(|c| c.bones[0].name.as_str());
         assert_eq!(name(false), Some("shoot"));
         assert_eq!(name(true), Some("run"));
+    }
+
+    #[test]
+    fn firing_slows_with_time_by_the_weapons_multiplier() {
+        // A frame of 0.1 s in bullet time running at a tenth of the speed.
+        assert_eq!(cycle_seconds(0.1, 0.01, 0.0), 0.01);
+        assert_eq!(cycle_seconds(0.1, 0.01, 1.0), 0.1);
+        assert!((cycle_seconds(0.1, 0.01, 0.25) - 0.0325).abs() < 1e-6);
     }
 
     #[test]
