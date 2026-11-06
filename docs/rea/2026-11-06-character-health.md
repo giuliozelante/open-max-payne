@@ -19,6 +19,21 @@ whether the character is AI-driven. Its target has not been read.
 **STRONGLY SUPPORTED:** `0x695fb0` scales the wounded limit the same way, as `0x5310b0 / 0x5310a0 * 0x691bd0`.
 That reads as `WoundedHealth / MaximumHealth` of the scaled maximum; `0x5310b0` has not been matched to the key.
 
-**UNKNOWN:** the rest of `0x695fb0`, and `0x695b10`, which `C_CauseDamage`'s neighbour at `0x699d40` calls with a
-flag of 0. `C_AddHealth` and `C_CauseDamage` reject negative values (`X_CharacterException_NegativeHealthValue`,
-checks at `0x699b00` and `0x699c30`), but the units they apply are not read yet.
+**VERIFIED: `C_CauseDamage` subtracts points.** The handler at `0x699d40` calls `0x695b10`, which ends by passing
+current health minus the argument to `0x695fb0`. That setter clamps to `0..maximum`.
+
+**VERIFIED: `C_AddHealth` heals in two parts.** `0x699c10` calls `0x695a80`. It takes `min(points, 0x6763e0 x
+maximum)` at once, if the character is alive, and adds the remainder to a pool at `[esi+0x72c]`. `0x68f510` drains
+the pool each update by `0x6763c0 x seconds x maximum`, capped at what is left, while the character is alive.
+`0x6763e0` reads slot `+0x18` of the difficulty table, `HealthGainedImmediately`. `0x6763c0` is taken to be slot
+`+0x14`, `HealthRegenerateMultiplier`, from the table order at `0x677150`; its body was not read.
+
+**STRONGLY SUPPORTED: the three protection flags.** `0x695fb0` returns early when `[esi+0x456]` is set, and raises a
+result under `0.1` to `0.1` when `[esi+0x454]` or `[esi+0x455]` is set. `0x69a800` writes `0x454`, `0x697340` writes
+`0x455` and the handler beside the first writes `0x456`. Their message order gives `C_SetImmortal`,
+`C_SetDodgeImmortal` and `C_SetInvulnerable`; the dispatch tables were not read.
+
+**HYPOTHESIS:** the engine feeds regeneration world time, so bullet time slows it. `0x5e53d0` supplies the seconds
+and has not been read. The floor applies only to the living: `0x6d6eb0` guards it and is taken to be a dead flag.
+
+**UNKNOWN:** the flash, sound and death side effects in `0x695b10` and `0x695fb0`.

@@ -281,6 +281,7 @@ pub fn run_3d_walkthrough(
     let mut particle_lights = ParticleLights::default();
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
+    let mut player_health = crate::load_player_health(&game_root);
     let death_clips = crate::load_death_clips(&game_root);
     let player_clips = crate::load_character_clips(&game_root, player_skin.unwrap_or("max_payne"));
     let mut motion = crate::player::PlayerMotion::default();
@@ -1072,12 +1073,20 @@ pub fn run_3d_walkthrough(
             slow_motion.level = level.clamp(0.0, 1.0);
         }
         for (name, order) in std::mem::take(&mut scene.character_orders) {
-            if let Some(en) = enemies
+            if name.eq_ignore_ascii_case("player") {
+                if let Some(max) = player_health.as_mut() {
+                    max.obey(&order);
+                }
+            } else if let Some(en) = enemies
                 .iter_mut()
                 .find(|en| en.name.eq_ignore_ascii_case(&name))
             {
                 obey(en, &order, &scene, &room_origins);
             }
+        }
+
+        if let Some(max) = player_health.as_mut() {
+            max.step(world_dt);
         }
 
         // Update Enemy AI (turn toward Max Payne and advance along floor when within 24m)
@@ -1561,7 +1570,9 @@ pub fn run_3d_walkthrough(
                 height: H,
             };
             let state = crate::hud::HudState {
-                health: 1.0,
+                health: player_health
+                    .as_ref()
+                    .map_or(1.0, crate::health::PlayerHealth::fraction),
                 slow_motion: &slow_motion,
                 inventory: &scene.inventory,
             };
@@ -3827,6 +3838,12 @@ fn obey(
 ) {
     match order {
         crate::scene::CharacterOrder::SetHealth(health) => en.health = health * en.max_health,
+        // Enemies take these once they fight: nothing sends them to one in the Tutorial.
+        crate::scene::CharacterOrder::AddHealth(_)
+        | crate::scene::CharacterOrder::CauseDamage(_)
+        | crate::scene::CharacterOrder::SetImmortal(_)
+        | crate::scene::CharacterOrder::SetDodgeImmortal(_)
+        | crate::scene::CharacterOrder::SetInvulnerable(_) => {}
         crate::scene::CharacterOrder::Teleport(place) => {
             let found = scene
                 .jumppoints
