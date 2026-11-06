@@ -41,9 +41,14 @@ struct Particle {
     sequence: usize,
 }
 
+/// World position and rotation (columns).
+pub type Frame = ([f32; 3], [f32; 9]);
+
 #[derive(Debug, Clone)]
 struct Running {
     emitter: String,
+    /// Where an effect with no emitter object stays.
+    anchor: Option<Frame>,
     key: String,
     effect: Arc<RpsEffect>,
     looping: bool,
@@ -80,6 +85,7 @@ impl ParticleField {
         let n = effect.emitters.len();
         self.running.push(Running {
             emitter,
+            anchor: None,
             key,
             effect,
             looping,
@@ -88,6 +94,14 @@ impl ParticleField {
             owed: vec![0.0; n],
             particles: vec![Vec::new(); n],
         });
+    }
+
+    /// An effect with no emitter object, fixed at `frame`, as a bullet hit's.
+    pub fn start_at(&mut self, frame: Frame, key: String, effect: Arc<RpsEffect>) {
+        self.start(String::new(), key, effect, false);
+        if let Some(run) = self.running.last_mut() {
+            run.anchor = Some(frame);
+        }
     }
 
     /// `PS_StopAllEmissions`: no new particles; the live ones finish their lives.
@@ -109,7 +123,7 @@ impl ParticleField {
         let mut seed = self.seed;
         for run in &mut self.running {
             run.time += dt;
-            let frame = frame_of(&run.emitter);
+            let frame = run.anchor.or_else(|| frame_of(&run.emitter));
             let mut live: usize = run.particles.iter().map(Vec::len).sum();
             for (k, emitter) in run.effect.emitters.iter().enumerate() {
                 let gravity = self.gravity.map(|g| g * emitter.particle.gravity);
@@ -510,6 +524,26 @@ mod tests {
             .collect();
         assert!(offsets.iter().all(|d| *d <= 0.1 + 1e-4), "{offsets:?}");
         assert!(offsets.iter().any(|d| *d > 1e-3), "{offsets:?}");
+    }
+
+    #[test]
+    fn an_effect_started_at_a_frame_emits_along_its_rotated_y() {
+        // A hit on a wall facing +x: the frame's y column is the wall's normal.
+        let frame = (
+            [5.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        );
+        let mut def = effect(10.0, 5.0, 0.0);
+        def.emitters[0].emission.direction = flat(3, &[0.0, 1.0, 0.0]);
+        let mut field = ParticleField::default();
+        field.start_at(frame, "k".into(), std::sync::Arc::new(def));
+        field.step(0.1, |_| None);
+        let first = field.sprites()[0].pos;
+        field.step(0.1, |_| None);
+        let later = field.sprites()[0].pos;
+        assert_eq!(first, [5.0, 1.0, 0.0]);
+        assert!(later[0] > 5.0, "{later:?}");
+        assert_eq!(later[1], 1.0);
     }
 
     #[test]
