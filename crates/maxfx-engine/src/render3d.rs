@@ -175,40 +175,6 @@ pub fn run_3d_walkthrough(
             death: None,
         });
     }
-    // Tutorial-only stand-in. The house has no room named Alley, so this stays out of New Game.
-    let alley_id = scene
-        .rooms
-        .iter()
-        .find(|r| r.name.to_ascii_lowercase().contains("alley"))
-        .map(|r| r.id);
-    if let Some(alley_id) = alley_id {
-        if let Some(&alley_ro) = room_origins.get(&alley_id) {
-            if !enemies.iter().any(|e| e.room_id == alley_id) {
-                let gx = alley_ro[0] - 8.0;
-                let gz = alley_ro[2] + 1.0;
-                let gy =
-                    find_floor_y(&scene, gx, alley_ro[1] - 5.0, gz).unwrap_or(alley_ro[1] - 10.0);
-                // This rig has no skin file, so the guard matches the level's own enemies.
-                let guard_health = enemies.iter().map(|en| en.health).max().unwrap_or(1);
-                if let Some(rig_index) = johnny_index {
-                    enemies.push(EnemyState {
-                        name: "::Alley2::Guard_01".into(),
-                        room_id: alley_id,
-                        world_pos: [gx, gy, gz],
-                        yaw: 0.0,
-                        walk_phase: 0.0,
-                        health: guard_health,
-                        hit_flash: 0.0,
-                        rig_index,
-                        pursues: true,
-                        invulnerable: false,
-                        death: None,
-                    });
-                }
-            }
-        }
-    }
-
     let mut jp_idx = scene.spawn_jumppoint_index(player_start);
 
     let mut player_pos = spawn_pos(&scene, &room_origins, jp_idx);
