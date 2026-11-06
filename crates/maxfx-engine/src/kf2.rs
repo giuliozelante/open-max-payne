@@ -132,6 +132,8 @@ pub struct CharacterRig {
     pub action: Option<Kf2Anim>,
     /// The clip a moving character plays, when something chose one for it.
     pub motion: Option<std::sync::Arc<Kf2Anim>>,
+    /// The blend from the last clip to this one.
+    pub fade: crate::clips::ClipFade,
     /// `CHARANIM_2_STAND` and `CHARANIM_2_RUN`, for a `TwoHandedAnimation` weapon.
     pub two_handed_idle: Option<Kf2Anim>,
     pub two_handed_walk: Option<Kf2Anim>,
@@ -617,7 +619,7 @@ fn identity_mat() -> [f32; 9] {
     [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 }
 
-fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+pub(crate) fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     [
         a[0] + (b[0] - a[0]) * t,
         a[1] + (b[1] - a[1]) * t,
@@ -1016,6 +1018,7 @@ fn rig_from_mesh(mesh: KfsMesh, skin: Option<SkdSkin>, path: &Path) -> Character
         bind: load_anim_named(path, &["widepose.kf2", "pose.kf2"]),
         action: None,
         motion: None,
+        fade: Default::default(),
         two_handed_idle: load_anim_named(path, &["2_stand.kf2"]),
         two_handed_walk: load_anim_named(path, &["2_run.kf2"]),
         two_handed: false,

@@ -79,6 +79,11 @@ pub struct PlayerMotion {
 
 impl PlayerMotion {
     /// Seconds into the clip playing.
+    /// The index of the clip Max plays, if not the stand.
+    pub fn index(&self) -> Option<&str> {
+        self.index.as_deref()
+    }
+
     pub fn time(&self) -> f32 {
         self.time.max(0.0)
     }

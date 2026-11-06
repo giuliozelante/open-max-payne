@@ -222,6 +222,8 @@ pub fn run_3d_walkthrough(
     let mut shot_timer: f32 = 0.0;
     // Seconds into the player's shot or reload clip.
     let mut action_time: f32 = 0.0;
+    // The `CHARANIM_` index of `CharacterRig::action`.
+    let mut action_index = String::new();
     let mut reload_seen = 0;
     // Reach of the melee weapon swung last, and the clip times of its blows still to land.
     let mut melee: Option<f32> = None;
@@ -727,6 +729,7 @@ pub fn run_3d_walkthrough(
                     rig.action = def.fire_clip.clone().filter(|_| !motion.diving());
                     action_time = 0.0;
                     rig.action_time = 0.0;
+                    action_index = "CHARANIM_SHOOT".to_string();
                 }
                 if let Some(muzzle) = &def.muzzle {
                     scene.effect_queue.push(crate::scene::QueuedEffect {
@@ -1035,6 +1038,7 @@ pub fn run_3d_walkthrough(
                 if let Some(rig) = player_rig.as_mut() {
                     rig.action = def.reload_clip.clone().filter(|_| !motion.diving());
                     action_time = 0.0;
+                    action_index = "CHARANIM_RELOAD".to_string();
                 }
                 reload_cue = def
                     .reload_sound
@@ -1061,6 +1065,22 @@ pub fn run_3d_walkthrough(
                 .is_some_and(|clip| action_time >= clip_seconds(clip))
             {
                 rig.action = None;
+            }
+            let stand = if rig.two_handed {
+                "CHARANIM_2_STAND"
+            } else {
+                "CHARANIM_STAND"
+            };
+            let action = if rig.action.is_some() {
+                action_index.as_str()
+            } else {
+                ""
+            };
+            rig.fade
+                .advance(motion.index().unwrap_or(stand), action, player_dt);
+            let time = player_clip_time(rig, player_moving, walk_phase, anim_clock, action_time);
+            if let Some((_, pose)) = character_locals(rig, player_moving, time) {
+                rig.fade.remember(pose);
             }
         }
 
@@ -3799,6 +3819,7 @@ fn character_locals(
             }
         }
     }
+    rig.fade.mix(&mut locals);
     Some((clip, locals))
 }
 
@@ -5071,6 +5092,7 @@ mod tests {
             bind: None,
             action: Some(clip("shoot", [0.0; 3])),
             motion: None,
+            fade: Default::default(),
             two_handed_idle: None,
             two_handed_walk: None,
             two_handed: false,
@@ -5108,6 +5130,7 @@ mod tests {
             bind: None,
             action: None,
             motion: Some(std::sync::Arc::new(clip("strafe", [0.0; 3]))),
+            fade: Default::default(),
             two_handed_idle: None,
             two_handed_walk: None,
             two_handed: false,
@@ -5181,6 +5204,7 @@ mod tests {
             bind: None,
             action: Some(two_bones([8.0; 3], [9.0; 3])),
             motion: None,
+            fade: Default::default(),
             two_handed_idle: None,
             two_handed_walk: None,
             two_handed: false,
@@ -5233,6 +5257,7 @@ mod tests {
             bind: None,
             action: None,
             motion: None,
+            fade: Default::default(),
             two_handed_idle: Some(clip("2_idle", [0.0; 3])),
             two_handed_walk: Some(clip("2_run", [0.0; 3])),
             two_handed: true,
@@ -5253,6 +5278,40 @@ mod tests {
         rig.two_handed = false;
         rig.action = None;
         assert_eq!(name(&rig, false), "idle");
+    }
+
+    #[test]
+    fn a_character_starts_a_new_clip_from_its_last_pose() {
+        let mesh = crate::kf2::KfsMesh {
+            name: String::new(),
+            vertices: Vec::new(),
+            faces: Vec::new(),
+            material_textures: Vec::new(),
+        };
+        let mut rig = CharacterRig {
+            mesh,
+            skin: None,
+            idle: Some(clip("arm", [0.0; 3])),
+            walk: None,
+            bind: None,
+            action: None,
+            motion: None,
+            fade: Default::default(),
+            two_handed_idle: None,
+            two_handed_walk: None,
+            two_handed: false,
+            max_health: 0,
+            action_time: 0.0,
+            upper_bones: [Vec::new(), Vec::new()],
+            two_handed_bones: false,
+            gun_bones: [String::new(), String::new()],
+        };
+        let last = crate::kf2::sample_locals(&clip("arm", [2.0, 0.0, 0.0]), 0.0);
+        rig.fade.advance("CHARANIM_RUN", "", 0.0);
+        rig.fade.remember(last);
+        rig.fade.advance("CHARANIM_STAND", "", 0.0);
+        let (_, locals) = character_locals(&rig, false, 0.0).expect("pose");
+        assert_eq!(locals["arm"].1, [2.0, 0.0, 0.0]);
     }
 
     #[test]

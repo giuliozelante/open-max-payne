@@ -2,7 +2,7 @@
 //! skin over it. Each clip names its file, how far it carries the character and what it says on
 //! which frame, so everything a character does on the move is data.
 
-use crate::kf2::Kf2Anim;
+use crate::kf2::{lerp3, mat_to_quat, quat_slerp, quat_to_mat, BoneLocals, Kf2Anim};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -178,9 +178,164 @@ pub fn run_index(forward: i32, right: i32, two_handed: bool) -> Option<String> {
     Some(format!("CHARANIM_{hands}{name}"))
 }
 
+/// Seconds a character takes to blend into the clip of `index`. No file carries these: retail
+/// builds them into its animation table at `0x6dd880`, once for the plain, `W_`, `2_` and `W_2_`
+/// indices, and `0x7435b0` hands the new clip's value to the blend.
+pub fn blend_seconds(index: &str) -> f32 {
+    let name = index.strip_prefix("CHARANIM_").unwrap_or(index);
+    let name = name.strip_prefix("W_").unwrap_or(name);
+    let name = name.strip_prefix("2_").unwrap_or(name);
+    match name {
+        "POSE" => 0.01,
+        "GETDAMAGE" | "GETDAMAGECROUCHED" => 0.02,
+        "JUMP" | "JUMPFORWARD" | "JUMPFORWARDLEFT" | "JUMPFORWARDRIGHT" => 0.02,
+        "DODGEFORWARD" => 0.05,
+        "LAND" | "USE" => 0.1,
+        "GETWEAPON" | "HOLSTERWEAPON" => 0.2,
+        "WALK" | "RUN" | "WALKBACKWARD" | "STRAFELEFT" | "STRAFERIGHT" => 0.3,
+        "FORWARDLEFT" | "FORWARDRIGHT" | "BACKWARDLEFT" | "BACKWARDRIGHT" => 0.3,
+        dive if dive.starts_with("SHOOTDODGE") && dive.ends_with("_GETUP") => 0.3,
+        dive if dive.starts_with("SHOOTDODGE") => 0.1,
+        low if low.starts_with("SHOOTLOW") || low.starts_with("SHOOTHIGH") => 0.25,
+        shot if shot.starts_with("SHOOT") => 0.08,
+        _ => 0.25,
+    }
+}
+
+/// What carries a character from one pose to the next when its clips change.
+#[derive(Debug, Clone, Default)]
+pub struct ClipFade {
+    body: String,
+    action: String,
+    /// The pose of the last frame, which the next fade starts from.
+    pose: BoneLocals,
+    from: BoneLocals,
+    left: f32,
+    seconds: f32,
+}
+
+impl ClipFade {
+    /// A frame of `seconds` showing `body`, with `action` over it (empty for none).
+    pub fn advance(&mut self, body: &str, action: &str, seconds: f32) {
+        self.left = (self.left - seconds).max(0.0);
+        if body == self.body && action == self.action {
+            return;
+        }
+        if !self.body.is_empty() {
+            let index = if action.is_empty() || body != self.body {
+                body
+            } else {
+                action
+            };
+            self.seconds = blend_seconds(index);
+            self.left = self.seconds;
+            self.from = std::mem::take(&mut self.pose);
+        }
+        self.body = body.to_string();
+        self.action = action.to_string();
+    }
+
+    /// The pose this frame ended on.
+    pub fn remember(&mut self, pose: BoneLocals) {
+        self.pose = pose;
+    }
+
+    /// `locals` with what is left of the last pose laid over them.
+    pub fn mix(&self, locals: &mut BoneLocals) {
+        if self.left <= 0.0 {
+            return;
+        }
+        let progress = 1.0 - self.left / self.seconds;
+        for (bone, (mat, pos)) in locals {
+            if let Some((from_mat, from_pos)) = self.from.get(bone) {
+                let turn = quat_slerp(mat_to_quat(*from_mat), mat_to_quat(*mat), progress);
+                *mat = quat_to_mat(turn);
+                *pos = lerp3(*from_pos, *pos, progress);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn turned(degrees: f32) -> BoneLocals {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let mat = [cos, sin, 0.0, -sin, cos, 0.0, 0.0, 0.0, 1.0];
+        BoneLocals::from([("arm".to_string(), (mat, [degrees, 0.0, 0.0]))])
+    }
+
+    #[test]
+    fn each_clip_has_the_blend_retail_builds_for_it() {
+        assert_eq!(blend_seconds("CHARANIM_RUN"), 0.3);
+        assert_eq!(blend_seconds("CHARANIM_2_BACKWARDLEFT"), 0.3);
+        assert_eq!(blend_seconds("CHARANIM_W_2_RUN"), 0.3);
+        assert_eq!(blend_seconds("CHARANIM_JUMPFORWARD"), 0.02);
+        assert_eq!(blend_seconds("CHARANIM_LAND"), 0.1);
+        assert_eq!(blend_seconds("CHARANIM_SHOOTDODGELEFT"), 0.1);
+        assert_eq!(blend_seconds("CHARANIM_2_SHOOTDODGEFORWARD_GETUP"), 0.3);
+        assert_eq!(blend_seconds("CHARANIM_SHOOTBERETTA"), 0.08);
+        assert_eq!(blend_seconds("CHARANIM_SHOOTLOWBERETTA"), 0.25);
+        assert_eq!(blend_seconds("CHARANIM_STAND"), 0.25);
+        assert_eq!(blend_seconds("CHARANIM_CROUCH"), 0.25);
+        assert_eq!(blend_seconds("CHARANIM_RELOADPUMPSHOTGUN"), 0.25);
+    }
+
+    #[test]
+    fn a_new_clip_starts_from_the_last_pose_and_reaches_its_own_in_its_blend() {
+        let mut fade = ClipFade::default();
+        fade.advance("CHARANIM_STAND", "", 0.016);
+        fade.remember(turned(0.0));
+
+        fade.advance("CHARANIM_RUN", "", 0.016);
+        let mut pose = turned(90.0);
+        fade.mix(&mut pose);
+        assert_eq!(pose, turned(0.0));
+
+        fade.advance("CHARANIM_RUN", "", 0.15);
+        let mut pose = turned(90.0);
+        fade.mix(&mut pose);
+        let (mat, at) = pose["arm"];
+        assert!((mat[0] - 45_f32.to_radians().cos()).abs() < 1e-5, "{mat:?}");
+        assert!((at[0] - 45.0).abs() < 1e-4, "{at:?}");
+
+        fade.advance("CHARANIM_RUN", "", 0.15);
+        let mut pose = turned(90.0);
+        fade.mix(&mut pose);
+        assert_eq!(pose, turned(90.0));
+    }
+
+    #[test]
+    fn the_same_clip_does_not_fade_and_the_first_has_nothing_to_fade_from() {
+        let mut fade = ClipFade::default();
+        fade.advance("CHARANIM_RUN", "", 0.016);
+        let mut pose = turned(90.0);
+        fade.mix(&mut pose);
+        assert_eq!(pose, turned(90.0));
+
+        fade.remember(turned(0.0));
+        fade.advance("CHARANIM_RUN", "", 0.016);
+        let mut pose = turned(90.0);
+        fade.mix(&mut pose);
+        assert_eq!(pose, turned(90.0));
+    }
+
+    #[test]
+    fn an_action_blends_at_its_own_rate_and_a_new_body_clip_at_the_body_rate() {
+        let halfway = |body: &str, action: &str, seconds: f32| {
+            let mut fade = ClipFade::default();
+            fade.advance("CHARANIM_STAND", "", 0.016);
+            fade.remember(turned(0.0));
+            fade.advance(body, action, 0.016);
+            fade.advance(body, action, seconds);
+            let mut pose = turned(90.0);
+            fade.mix(&mut pose);
+            pose["arm"].1[0]
+        };
+        assert!((halfway("CHARANIM_STAND", "CHARANIM_SHOOTBERETTA", 0.04) - 45.0).abs() < 1e-3);
+        assert!((halfway("CHARANIM_RUN", "CHARANIM_SHOOTBERETTA", 0.15) - 45.0).abs() < 1e-3);
+    }
 
     const SKELETON: &str = "#define ENEMY_RUN 3.0\n\
         [Skeleton]\n{\n\
