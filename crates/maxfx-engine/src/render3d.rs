@@ -9,6 +9,7 @@
 //! - Shooting (`F` / `Ctrl` / Right-Ctrl), Bullet-Time slow-motion (`B` / Right-Click), and `E` door/barrel interaction
 
 use crate::kf2::{load_character_rigs, load_skin_body, pose_mesh, CharacterRig, KfsFace};
+use crate::projectiles::{Explosion, Flight, Flyer, FlyingDef};
 use crate::scene::{
     decode_texture_blob, material_policy, DecodedLightmap, DecodedTexture, LdbScene, LevelFog,
     MaterialPolicy, ScenePointLight, ScenePoly, SceneVertex,
@@ -226,6 +227,8 @@ pub fn run_3d_walkthrough(
     let mut melee: Option<f32> = None;
     let mut shot_seed: u32 = 0x2545_f491;
     let mut droplets: Vec<crate::decals::Droplet> = Vec::new();
+    let mut flyers: Vec<(Flyer, FlyingDef)> = Vec::new();
+    let mut explosions: Vec<Explosion> = Vec::new();
     // The rounds of the running shoot clip still to come, and the weapon firing them.
     let mut pending: Vec<crate::hud::ShotRound> = Vec::new();
     let mut firing = String::new();
@@ -313,6 +316,16 @@ pub fn run_3d_walkthrough(
         rig.gun_bones = crate::load_gun_bones(&game_root);
     }
     let (mut level_items, item_models) = crate::load_level_items(&game_root, &scene, &room_origins);
+    let flyer_models: BTreeMap<String, crate::kf2::KfsMesh> = scene
+        .inventory
+        .defs
+        .values()
+        .flat_map(|def| &def.flying)
+        .filter_map(|(flying, _)| {
+            let path = flying.model.as_ref()?;
+            Some((path.clone(), crate::load_flying_model(&game_root, path)?))
+        })
+        .collect();
     let weapon_models: BTreeMap<String, crate::kf2::KfsMesh> = scene
         .inventory
         .defs
@@ -670,6 +683,7 @@ pub fn run_3d_walkthrough(
             let shot = def.map_or(Vec::new(), |def| {
                 def.round_projectiles(round.quiet).to_vec()
             });
+            let thrown = def.map_or(Vec::new(), |def| def.flying.clone());
             let muzzle = def
                 .and_then(|def| def.muzzle.clone())
                 .filter(|_| round.left);
@@ -681,6 +695,16 @@ pub fn run_3d_walkthrough(
             }
             let reach = melee;
             let aim_dir = [sy * cp, sp, cy * cp];
+            for (flying, count) in &thrown {
+                launch(
+                    &mut flyers,
+                    flying,
+                    *count,
+                    player_pos,
+                    aim_dir,
+                    &mut shot_seed,
+                );
+            }
             // The dot marks the view's centre, so a bullet leaves from the camera. A blow leaves
             // from Max.
             let aim_from = if third_person && !fly_mode && reach.is_none() {
@@ -779,23 +803,9 @@ pub fn run_3d_walkthrough(
                             }
                         }
                         let en = &mut enemies[idx];
-                        let alive = en.health > 0;
-                        en.health -= projectile.damage;
-                        en.hit_flash = 0.25;
-                        if alive && en.health <= 0 {
-                            scene.kill_character(&en.name);
+                        if hurt_enemy(en, projectile.damage, &mut scene, death_clips.len()) {
                             slow_motion.reward_kill();
-                            // `DeathCause = PROJECTILEDEATH_RANDOM`.
-                            let pick = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map_or(0, |time| time.subsec_nanos() as usize);
-                            en.death = Some((pick % death_clips.len().max(1), 0.0, 0));
                         }
-                        println!(
-                            "  3D Engine: Hit {}! (health={})",
-                            en.name,
-                            en.health.max(0)
-                        );
                     }
                     _ => {
                         if let Some((t, normal, material)) = level_hit {
@@ -832,6 +842,102 @@ pub fn run_3d_walkthrough(
             decals.add(&drop.decal, kind, hit, normal, dir, None);
             false
         });
+
+        let gravity = particle_sprites.field.gravity;
+        let mut landed = Vec::new();
+        flyers.retain_mut(|(flyer, def)| {
+            let flight = flyer.step(def, gravity, world_dt, |from, delta| {
+                flight_contact(&scene, &enemies, from, delta)
+            });
+            match flight {
+                Flight::Exploded(at) => {
+                    landed.push((at, flyer.normal, def.clone()));
+                    false
+                }
+                Flight::Bounced => {
+                    if let Some(cue) = &def.bounce_sound {
+                        queue_sound(&mut scene, "projectiles", cue, flyer.pos);
+                    }
+                    true
+                }
+                Flight::Flying => true,
+            }
+        });
+        for (at, normal, def) in landed {
+            let up = if normal == [0.0; 3] {
+                [0.0, 1.0, 0.0]
+            } else {
+                normal
+            };
+            let kind = segment_surface(
+                &scene,
+                [0, 1, 2].map(|c| at[c] + up[c] * 0.05),
+                up.map(|c| c * -0.1),
+            )
+            .and_then(|hit| scene.materials.get(&hit.2))
+            .map_or(String::new(), |material| material.category.clone());
+            let frame = crate::decals::surface_frame(up, up.map(|c| -c));
+            let block = def.decal.as_deref().unwrap_or_default();
+            if normal != [0.0; 3] {
+                decals.add(block, &kind, at, normal, up.map(|c| -c), None);
+            }
+            if let Some(set) = decals.sets.get(block) {
+                hit_effects.start(&mut scene, &mut particle_sprites, set, &kind, at, frame);
+            }
+            hit_effects.explode(&mut scene, &mut particle_sprites, &def, at, frame);
+            if let Some(shake) = &def.shake {
+                scene.dispatch_message("::x", &format!("player->cam_animateinplace({shake});"));
+            }
+            for (frag, count) in &def.frags {
+                let from = [0, 1, 2].map(|c| at[c] + up[c] * 0.05);
+                launch(&mut flyers, frag, *count, from, up, &mut shot_seed);
+            }
+            explosions.push(Explosion {
+                pos: at,
+                blasts: def.blasts.clone(),
+                age: 0.0,
+            });
+        }
+        let mut blasts = Vec::new();
+        explosions.retain_mut(|explosion| {
+            let pos = explosion.pos;
+            blasts.extend(
+                explosion
+                    .step(world_dt)
+                    .into_iter()
+                    .map(|blast| (pos, blast)),
+            );
+            !explosion.blasts.is_empty()
+        });
+        for (pos, blast) in blasts {
+            for en in enemies
+                .iter_mut()
+                .filter(|en| en.health > 0 && !en.invulnerable)
+            {
+                let far =
+                    crate::projectiles::distance_to_character(pos, en.world_pos, ENEMY_HEIGHT);
+                let damage = blast.damage_at(far).round() as i32;
+                if damage > 0 && hurt_enemy(en, damage, &mut scene, death_clips.len()) {
+                    slow_motion.reward_kill();
+                }
+            }
+            // The docs: "The radius must hit the DO's pivot to cause damage to it."
+            for idx in 0..scene.dynamic_meshes.len() {
+                let (_, pivot) = dynamic_world(&scene, idx, &room_origins);
+                let gap = sub3(pivot, pos);
+                let damage = blast.damage_at(dot3(gap, gap).sqrt()).round() as i32;
+                if damage > 0 && scene.damage_mesh(idx, damage) {
+                    println!("  3D Engine: {} broke", scene.dynamic_meshes[idx].name);
+                }
+            }
+        }
+        play_queued_sounds(
+            &mut scene,
+            &catalog_root(level_path),
+            &mut sounds,
+            &room_origins,
+            listener,
+        );
 
         let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
         level_items.step(&mut scene, feet, world_dt);
@@ -1068,7 +1174,11 @@ pub fn run_3d_walkthrough(
                     });
                 }
             }
-            for (mesh, verts, at) in placed_items(&level_items, &item_models) {
+            let items = placed_items(&level_items, &item_models);
+            for (mesh, verts, at) in items
+                .into_iter()
+                .chain(placed_flyers(&flyers, &flyer_models))
+            {
                 let light =
                     character_vertex_light(mesh, &verts, at, false, &frame_lights, scene.ambient);
                 characters.push(crate::gpu::GpuCharacter {
@@ -1210,6 +1320,7 @@ pub fn run_3d_walkthrough(
 
         for (mesh, verts, at) in placed_items(&level_items, &item_models)
             .into_iter()
+            .chain(placed_flyers(&flyers, &flyer_models))
             .filter(|_| cpu_characters)
         {
             render_kfs_character(
@@ -2320,6 +2431,23 @@ struct HitEffects<'a> {
 }
 
 impl HitEffects<'_> {
+    /// The effect and sound a projectile's own explosion clip names.
+    fn explode(
+        &self,
+        scene: &mut LdbScene,
+        sprites: &mut ParticleSprites,
+        def: &FlyingDef,
+        point: [f32; 3],
+        frame: [f32; 9],
+    ) {
+        let set = crate::decals::DecalSet {
+            effect: def.effect.clone(),
+            sound: def.sound.clone(),
+            ..Default::default()
+        };
+        self.start(scene, sprites, &set, "", point, frame);
+    }
+
     fn start(
         &self,
         scene: &mut LdbScene,
@@ -3132,6 +3260,93 @@ fn placed_items<'a>(
             Some((mesh, mesh.vertices.iter().map(place).collect(), item.pos))
         })
         .collect()
+}
+
+/// The projectiles in the air, with their world vertices.
+fn placed_flyers<'a>(
+    flyers: &[(Flyer, FlyingDef)],
+    models: &'a BTreeMap<String, crate::kf2::KfsMesh>,
+) -> Vec<PlacedMesh<'a>> {
+    flyers
+        .iter()
+        .filter_map(|(flyer, def)| {
+            let mesh = models.get(def.model.as_ref()?)?;
+            let place = |v: &[f32; 3]| [0, 1, 2].map(|c| v[c] + flyer.pos[c]);
+            Some((mesh, mesh.vertices.iter().map(place).collect(), flyer.pos))
+        })
+        .collect()
+}
+
+/// Send `count` of `def` off from `from`, along `aim`.
+fn launch(
+    flyers: &mut Vec<(Flyer, FlyingDef)>,
+    def: &FlyingDef,
+    count: u32,
+    from: [f32; 3],
+    aim: [f32; 3],
+    seed: &mut u32,
+) {
+    for _ in 0..count {
+        let dir = crate::projectiles::launch_direction(def.direction, aim);
+        let dir = spread_aim(dir, def.accuracy, seed);
+        let flyer = Flyer {
+            pos: from,
+            vel: dir.map(|c| c * def.speed),
+            age: 0.0,
+            resting: false,
+            normal: [0.0; 3],
+        };
+        flyers.push((flyer, def.clone()));
+    }
+}
+
+/// What a move of a flying projectile runs into first: the level or a living character.
+fn flight_contact(
+    scene: &LdbScene,
+    enemies: &[EnemyState],
+    from: [f32; 3],
+    delta: [f32; 3],
+) -> Option<(f32, [f32; 3])> {
+    let level = segment_surface(scene, from, delta).map(|hit| (hit.0, hit.1));
+    let length = dot3(delta, delta).sqrt();
+    if length < 1e-6 {
+        return level;
+    }
+    let dir = delta.map(|c| c / length);
+    let enemy = enemies
+        .iter()
+        .filter(|en| en.health > 0)
+        .filter_map(|en| ray_hits_character(from, dir, en.world_pos))
+        .map(|t| t / length)
+        .filter(|t| *t <= 1.0)
+        .min_by(f32::total_cmp);
+    match (level, enemy) {
+        (Some(hit), Some(t)) if hit.0 <= t => Some(hit),
+        (_, Some(t)) => Some((t, dir.map(|c| -c))),
+        (hit, None) => hit,
+    }
+}
+
+/// Take `damage` off `en`. True if that killed it.
+fn hurt_enemy(en: &mut EnemyState, damage: i32, scene: &mut LdbScene, clips: usize) -> bool {
+    let alive = en.health > 0;
+    en.health -= damage;
+    en.hit_flash = 0.25;
+    println!(
+        "  3D Engine: Hit {}! (health={})",
+        en.name,
+        en.health.max(0)
+    );
+    if !alive || en.health > 0 {
+        return false;
+    }
+    scene.kill_character(&en.name);
+    // `DeathCause = PROJECTILEDEATH_RANDOM`.
+    let pick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.subsec_nanos() as usize);
+    en.death = Some((pick % clips.max(1), 0.0, 0));
+    true
 }
 
 /// Each gun in the player's hands, with its world vertices.
