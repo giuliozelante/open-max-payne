@@ -2166,7 +2166,7 @@ pub fn startup_video_name(text: &str) -> Option<String> {
     None
 }
 
-/// Loose `data/` (or parked `data.disabled-hires/`), then `x_data.ras`, then other `*.ras`.
+/// Loose `data/`, then `x_data.ras`, then other `*.ras`.
 pub fn resolve_startup(game_dir: &Path) -> Result<StartupPlan, EngineError> {
     let mut src = GameSource::open(game_dir);
     let config = src.read(r"\data\globalconfig.txt").unwrap_or_default();
@@ -3497,16 +3497,7 @@ impl GameSource {
 fn loose_bytes(game_dir: &Path, win_path: &str) -> Option<Vec<u8>> {
     let rel = win_to_rel(win_path);
     let loose = game_dir.join(&rel);
-    if loose.is_file() {
-        return fs::read(loose).ok();
-    }
-    if let Ok(rest) = rel.strip_prefix("data") {
-        let parked = game_dir.join("data.disabled-hires").join(rest);
-        if parked.is_file() {
-            return fs::read(parked).ok();
-        }
-    }
-    None
+    loose.is_file().then(|| fs::read(loose).ok())?
 }
 
 fn win_to_rel(win_path: &str) -> PathBuf {
@@ -4833,6 +4824,18 @@ mod tests {
     }
 
     #[test]
+    fn parked_data_is_not_game_data() {
+        // Localized games park the FixPack's `data/`, and retail then plays from the archives.
+        let game = std::env::temp_dir().join(format!("omp-parked-{}", std::process::id()));
+        let parked = game.join("data.disabled-hires");
+        fs::create_dir_all(&parked).unwrap();
+        fs::write(parked.join("globalconfig.txt"), "hi-res").unwrap();
+        let found = loose_bytes(&game, r"\data\globalconfig.txt");
+        fs::remove_dir_all(&game).unwrap();
+        assert_eq!(found, None);
+    }
+
+    #[test]
     fn retail_difficulty_scales_enemies_and_leaves_max_alone() {
         let Some(home) = std::env::var_os("HOME") else {
             return;
@@ -4847,6 +4850,9 @@ mod tests {
         assert_eq!(weapons["beretta"].slot, Some(1));
         assert_eq!(weapons["pumpshotgun"].slot, Some(2));
         assert!(weapons["painkiller"].fire_clip.is_some());
+        assert_eq!(difficulty.auto_aim, [4.0, 2.0]);
+        assert!(weapons["pumpshotgun"].auto_aim);
+        assert!(!weapons["sniper"].auto_aim);
         assert_eq!(difficulty.player_health, 1.0);
         assert_eq!(difficulty.regenerate, 0.04);
         assert_eq!(difficulty.gained_immediately, 0.05);
