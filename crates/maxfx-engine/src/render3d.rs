@@ -86,6 +86,8 @@ struct EnemyState {
     invulnerable: bool,
     /// Waits out of the world in a sealed room until a script teleports it.
     held: bool,
+    /// `AutoAimTarget`.
+    auto_aim_target: bool,
     /// Index of the death clip, seconds into it, and how many of its sounds have played.
     death: Option<(usize, f32, usize)>,
 }
@@ -131,28 +133,30 @@ pub fn run_3d_walkthrough(
         bodies.push(johnny);
     }
     let johnny_index = if bodies.is_empty() { None } else { Some(0) };
-    let mut skin_cache: BTreeMap<String, (usize, bool)> = BTreeMap::new();
+    let mut skin_cache: BTreeMap<String, (usize, bool, bool)> = BTreeMap::new();
 
-    let enemy_health = crate::load_difficulty(&catalog_root(level_path))
-        .map_or(1.0, |difficulty| difficulty.enemy_health);
-    // Build active enemies from `scene.characters`, which wait until a script teleports them.
+    let difficulty = crate::load_difficulty(&catalog_root(level_path));
+    let enemy_health = difficulty.map_or(1.0, |difficulty| difficulty.enemy_health);
+    let auto_aim_scale = difficulty.map_or([1.0; 2], |difficulty| difficulty.auto_aim);
+    // Build active enemies from `scene.characters` (already C_Teleport-resolved)
     let mut enemies: Vec<EnemyState> = Vec::new();
     for ch in &scene.characters {
         let key = ch.skin.to_ascii_lowercase();
-        let (rig_index, invulnerable) = if let Some(hit) = skin_cache.get(&key).copied() {
-            hit
-        } else if let Some(body) = load_skin_body(level_path, &ch.skin) {
-            let idx = bodies.len();
-            let inv = body.invulnerable;
-            bodies.push(body.rig);
-            skin_cache.insert(key, (idx, inv));
-            (idx, inv)
-        } else if let Some(idx) = johnny_index {
-            skin_cache.insert(key, (idx, false));
-            (idx, false)
-        } else {
-            continue;
-        };
+        let (rig_index, invulnerable, auto_aim_target) =
+            if let Some(hit) = skin_cache.get(&key).copied() {
+                hit
+            } else if let Some(body) = load_skin_body(level_path, &ch.skin) {
+                let idx = bodies.len();
+                let found = (idx, body.invulnerable, body.auto_aim_target);
+                bodies.push(body.rig);
+                skin_cache.insert(key, found);
+                found
+            } else if let Some(idx) = johnny_index {
+                skin_cache.insert(key, (idx, false, false));
+                (idx, false, false)
+            } else {
+                continue;
+            };
         let ro = room_origins.get(&ch.room_id).copied().unwrap_or([0.0; 3]);
         let mut wy = ro[1] + ch.pos[1];
         if let Some(fy) = find_floor_y(
@@ -177,6 +181,7 @@ pub fn run_3d_walkthrough(
             pursues: ch.pursues(),
             invulnerable,
             held: false,
+            auto_aim_target,
             death: None,
         });
     }
@@ -796,6 +801,14 @@ pub fn run_3d_walkthrough(
                 (player_pos, aim_dir)
             };
             let within = |t: f32| reach.is_none_or(|reach| t <= reach);
+            // The options' `AutoAim Toggle` (0x89aecd) has no engine setting yet: it stays on.
+            let aim = def
+                .filter(|def| def.auto_aim && reach.is_none())
+                .and_then(|_| {
+                    let wall = aim_hit_level(&scene, aim_from, aim).map_or(SHOT_RANGE, |hit| hit.0);
+                    auto_aim_at(&enemies, aim_from, aim, auto_aim_scale, wall)
+                })
+                .unwrap_or(aim);
             let rays = shot
                 .iter()
                 .flat_map(|projectile| std::iter::repeat_n(projectile, projectile.count as usize));
@@ -2473,6 +2486,44 @@ const ENEMY_HEIGHT: f32 = 1.95;
 
 /// Distance along the ray to a standing character whose feet are at `feet`.
 fn ray_hits_character(origin: [f32; 3], dir: [f32; 3], feet: [f32; 3]) -> Option<f32> {
+    ray_hits_capsule(origin, dir, feet, ENEMY_RADIUS, ENEMY_HEIGHT)
+}
+
+/// Where a shot from `origin` along `aim` turns to, when it passes through a target's capsule
+/// grown by `scale` (radius, height) nearer than `reach`.
+fn auto_aim_at(
+    enemies: &[EnemyState],
+    origin: [f32; 3],
+    aim: [f32; 3],
+    scale: [f32; 2],
+    reach: f32,
+) -> Option<[f32; 3]> {
+    let [radius, height] = [ENEMY_RADIUS * scale[0], ENEMY_HEIGHT * scale[1]];
+    let target = enemies
+        .iter()
+        .filter(|en| en.health > 0.0 && en.auto_aim_target && !en.held)
+        .filter_map(|en| {
+            Some((
+                ray_hits_capsule(origin, aim, en.world_pos, radius, height)?,
+                en,
+            ))
+        })
+        .filter(|(t, _)| *t <= reach)
+        .min_by(|a, b| a.0.total_cmp(&b.0))?
+        .1;
+    // HYPOTHESIS: `AutoAimTargetBoneName` (`JBack`) sits half way up, as the torso does for blood.
+    let [x, y, z] = target.world_pos;
+    let to = sub3([x, y + ENEMY_HEIGHT / 2.0, z], origin);
+    Some(to.map(|c| c / dot3(to, to).sqrt()))
+}
+
+fn ray_hits_capsule(
+    origin: [f32; 3],
+    dir: [f32; 3],
+    feet: [f32; 3],
+    radius: f32,
+    height: f32,
+) -> Option<f32> {
     let to = sub3(feet, origin);
     let flat = dir[0] * dir[0] + dir[2] * dir[2];
     if flat < 1e-8 {
@@ -2483,9 +2534,9 @@ fn ray_hits_character(origin: [f32; 3], dir: [f32; 3], feet: [f32; 3]) -> Option
         origin[0] + dir[0] * t - feet[0],
         origin[2] + dir[2] * t - feet[2],
     );
-    let height = origin[1] + dir[1] * t - feet[1];
-    let inside = dx * dx + dz * dz <= ENEMY_RADIUS * ENEMY_RADIUS;
-    (t > 0.0 && inside && (0.0..=ENEMY_HEIGHT).contains(&height)).then_some(t)
+    let inside = dx * dx + dz * dz <= radius * radius;
+    let across = origin[1] + dir[1] * t - feet[1];
+    (t > 0.0 && inside && (0.0..=height).contains(&across)).then_some(t)
 }
 
 /// `shooting.h` `CROSSHAIR_CASTLENGTH`.
@@ -5449,6 +5500,7 @@ mod tests {
             pursues: false,
             invulnerable: false,
             held: false,
+            auto_aim_target: true,
             death: None,
         };
         let place = "::street::tele_02".to_string();
@@ -5469,6 +5521,56 @@ mod tests {
         let health = crate::scene::CharacterOrder::SetHealth(0.5);
         obey(&mut en, &health, &scene, &rooms);
         assert_eq!(en.health, 40.0);
+    }
+
+    fn target_at(z: f32) -> EnemyState {
+        EnemyState {
+            name: String::new(),
+            room_id: 0,
+            world_pos: [0.0, 0.0, z],
+            yaw: 0.0,
+            walk_phase: 0.0,
+            health: 10.0,
+            max_health: 10.0,
+            hit_flash: 0.0,
+            rig_index: 0,
+            pursues: false,
+            invulnerable: false,
+            held: false,
+            auto_aim_target: true,
+            death: None,
+        }
+    }
+
+    #[test]
+    fn a_near_miss_inside_the_grown_capsule_turns_to_the_torso() {
+        let enemies = [target_at(10.0)];
+        let origin = [1.0, 1.0, 0.0];
+        let aim = [0.0, 0.0, 1.0];
+        assert_eq!(ray_hits_character(origin, aim, enemies[0].world_pos), None);
+        let turned = auto_aim_at(&enemies, origin, aim, [4.0, 2.0], 100.0).expect("target");
+        let torso = [0.0, ENEMY_HEIGHT / 2.0, 10.0];
+        let to = sub3(torso, origin);
+        let length = dot3(to, to).sqrt();
+        for c in 0..3 {
+            assert!((turned[c] - to[c] / length).abs() < 1e-5, "{turned:?}");
+        }
+    }
+
+    #[test]
+    fn auto_aim_needs_the_capsule_reach_and_a_living_target() {
+        let origin = [2.0, 1.0, 0.0];
+        let aim = [0.0, 0.0, 1.0];
+        let enemies = [target_at(10.0)];
+        assert_eq!(auto_aim_at(&enemies, origin, aim, [4.0, 2.0], 100.0), None);
+        let origin = [1.0, 1.0, 0.0];
+        assert_eq!(auto_aim_at(&enemies, origin, aim, [4.0, 2.0], 5.0), None);
+        let mut dead = target_at(10.0);
+        dead.health = 0.0;
+        assert_eq!(auto_aim_at(&[dead], origin, aim, [4.0, 2.0], 100.0), None);
+        let mut plain = target_at(10.0);
+        plain.auto_aim_target = false;
+        assert_eq!(auto_aim_at(&[plain], origin, aim, [4.0, 2.0], 100.0), None);
     }
 
     #[test]

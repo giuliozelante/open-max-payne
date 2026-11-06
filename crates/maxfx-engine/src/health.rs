@@ -17,6 +17,8 @@ pub struct Difficulty {
     pub regenerate: f32,
     /// `HealthGainedImmediately`: fraction of maximum health a heal can give at once.
     pub gained_immediately: f32,
+    /// `AutoAimCapsuleRadiusMultiplier` and `AutoAimCapsuleHeightMultiplier`, at least 1 (0x6771af).
+    pub auto_aim: [f32; 2],
 }
 
 impl Difficulty {
@@ -34,6 +36,11 @@ impl Difficulty {
             player_health: block.number("playerhealthmultiplier")?,
             regenerate: percent("healthregeneratemultiplier")?,
             gained_immediately: percent("healthgainedimmediately")?,
+            auto_aim: [
+                "autoaimcapsuleradiusmultiplier",
+                "autoaimcapsuleheightmultiplier",
+            ]
+            .map(|key| block.number(key).unwrap_or(1.0).max(1.0)),
         })
     }
 }
@@ -152,6 +159,7 @@ mod tests {
             player_health: 1.0,
             regenerate: 0.04,
             gained_immediately: 0.05,
+            auto_aim: [1.0, 1.0],
         };
         PlayerHealth::new(60.0, &difficulty)
     }
