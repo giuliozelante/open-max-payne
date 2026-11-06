@@ -208,6 +208,10 @@ pub fn run_3d_walkthrough(
     // Seconds into the player's shot or reload clip.
     let mut level_end = LevelEnd::Closed;
     let mut action_time: f32 = 0.0;
+    // `(seconds into the clip, message)` of a pill or use clip, still to come.
+    let mut action_messages: Vec<(f32, String)> = Vec::new();
+    let mut strip_weapon = scene.inventory.current.clone();
+    let mut strip_age = f32::MAX;
     // `(seconds into the clip, message)` of the painkiller still to come.
     let mut pill_messages: Vec<(f32, String)> = Vec::new();
     // The `CHARANIM_` index of `CharacterRig::action`.
@@ -509,27 +513,16 @@ pub fn run_3d_walkthrough(
         if pill_key
             && hurt
             && scene.player_controls
-            && pill_messages.is_empty()
+            && action_messages.is_empty()
             && scene.inventory.take_painkiller()
         {
             let index = "CHARANIM_SHOOTPAINKILLER";
             let clip = scene.inventory.defs.get("painkiller");
-            let clip = clip.and_then(|def| def.fire_clip.clone());
-            let rate = clip
-                .as_ref()
-                .and_then(|clip| clip.bones.first())
-                .map(|b| b.fps);
-            pill_messages = player_clips
-                .table
-                .get(index)
-                .map_or(Vec::new(), |def| def.messages.clone())
-                .into_iter()
-                .map(|(frame, text)| (frame as f32 / rate.unwrap_or(1.0).max(1.0), text))
-                .collect();
+            action_messages = player_clips.timed_messages(index);
             action_time = 0.0;
             action_index = "CHARANIM_SHOOT".to_string();
             if let Some(rig) = player_rig.as_mut() {
-                rig.action = clip;
+                rig.action = clip.and_then(|def| def.fire_clip.clone());
                 rig.action_time = 0.0;
                 rig.aim = None;
             }
@@ -567,6 +560,17 @@ pub fn run_3d_walkthrough(
         }
         if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+            // `CHARANIM_USE` sends `C_Use` on frame 0, so the trigger below needs no wait.
+            // HYPOTHESIS: Max reaches out whether or not anything is in range.
+            if let Some(rig) = player_rig.as_mut().filter(|_| !motion.dodging()) {
+                let index = "CHARANIM_USE";
+                rig.action = player_clips.get(index).map(|(_, clip)| (**clip).clone());
+                rig.action_time = 0.0;
+                rig.aim = None;
+                action_time = 0.0;
+                action_index = index.to_string();
+                action_messages = player_clips.timed_messages(index);
+            }
             if let Some((name, gap)) = scene.nearest_action_trigger(&room_origins, feet) {
                 println!("  3D Engine: use: {name} is {gap:.2} m out of reach");
             }
@@ -1125,6 +1129,12 @@ pub fn run_3d_walkthrough(
                     .reload_sound
                     .clone()
                     .map(|cue| (def.reload_sound_delay, cue));
+                // The pump shotgun's sound is in Max's clip, not in the weapon file.
+                let rate = def.reload_clip.as_ref().and_then(|clip| clip.bones.first());
+                let rate = rate.map_or(1.0, |bone| bone.fps);
+                action_messages = player_clips.table.get(&index).map_or(Vec::new(), |clip| {
+                    crate::player::reload_clip_sounds(clip, rate)
+                });
             }
         }
         reload_seen = scene.inventory.reload_clips;
@@ -1138,10 +1148,10 @@ pub fn run_3d_walkthrough(
             }
         }
         action_time += world_dt;
-        let (due, later) = std::mem::take(&mut pill_messages)
+        let (due, later) = std::mem::take(&mut action_messages)
             .into_iter()
             .partition::<Vec<_>, _>(|(at, _)| *at <= action_time);
-        pill_messages = later;
+        action_messages = later;
         for (_, text) in due {
             use crate::player::ClipEffect;
             match crate::player::clip_effect(&text) {
@@ -1701,12 +1711,19 @@ pub fn run_3d_walkthrough(
                 width: W,
                 height: H,
             };
+            if scene.inventory.current != strip_weapon {
+                strip_weapon = scene.inventory.current.clone();
+                strip_age = 0.0;
+            }
+            strip_age += base_dt;
+            let strip_visible = assets.layout.weapon_strip.visibility(strip_age);
             let state = crate::hud::HudState {
                 health: player_health
                     .as_ref()
                     .map_or(1.0, crate::health::PlayerHealth::fraction),
                 slow_motion: &slow_motion,
                 inventory: &scene.inventory,
+                weapon_strip: strip_visible,
             };
             target.draw_hud(assets, &state);
             target.draw_crosshair(&scene.inventory);

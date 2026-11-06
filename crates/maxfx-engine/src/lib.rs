@@ -4855,6 +4855,10 @@ mod tests {
         assert!(health::DamageFlash::parse(&config).is_some());
         assert!(weapons["painkiller"].fire_clip.is_some());
         assert_eq!(difficulty.auto_aim, [4.0, 2.0]);
+        let assets = hud::HudAssets::load(&game).expect("hud");
+        let strip = &assets.layout.weapon_strip;
+        assert_eq!(strip.slots.len(), 6);
+        assert!(assets.bitmaps.contains_key(&strip.sheet.file));
         assert!(weapons["pumpshotgun"].auto_aim);
         assert!(!weapons["sniper"].auto_aim);
         assert_eq!(difficulty.player_health, 1.0);

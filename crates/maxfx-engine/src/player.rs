@@ -420,6 +420,15 @@ pub fn stops_bullet_time(def: &ClipDef) -> bool {
         .any(|(_, text)| clip_effect(text) == Some(ClipEffect::BulletTimeOff))
 }
 
+/// The sounds of a reload clip's `(frame, message)`s, in seconds at `rate` frames per second.
+/// `C_Reload` is left out: the inventory times the refill itself.
+pub fn reload_clip_sounds(def: &ClipDef, rate: f32) -> Vec<(f32, String)> {
+    let sound =
+        |(_, text): &&(u32, String)| matches!(clip_effect(text), Some(ClipEffect::Sound { .. }));
+    let timed = |(frame, text): &(u32, String)| (*frame as f32 / rate.max(1.0), text.clone());
+    def.messages.iter().filter(sound).map(timed).collect()
+}
+
 /// What a clip message does to the player.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClipEffect {
@@ -837,6 +846,32 @@ mod tests {
         assert_eq!(motion.state, State::Dead);
         motion.die(&clips, 0.0);
         assert!(motion.death_over(), "a second death changes nothing");
+    }
+
+    #[test]
+    fn a_clips_messages_come_with_their_seconds() {
+        let said = clips().timed_messages("CHARANIM_SHOOTDODGEFORWARD");
+        assert_eq!(said, [(0.1, "this->C_Reload();".to_string())]);
+        assert!(clips().timed_messages("CHARANIM_NOTHING").is_empty());
+    }
+
+    #[test]
+    fn a_shotgun_reload_keeps_the_sound_of_its_character_clip() {
+        let def = ClipDef {
+            messages: vec![
+                (2, "RightHandWeapon->WS_Animate(4);".to_string()),
+                (
+                    17,
+                    "this->A_Play3DSound( weapons, Reload_PumpShotgun, gun);".to_string(),
+                ),
+                (17, "this->C_Reload();".to_string()),
+            ],
+            ..Default::default()
+        };
+        let sounds = reload_clip_sounds(&def, 10.0);
+        assert_eq!(sounds.len(), 1);
+        assert_eq!(sounds[0].0, 1.7);
+        assert!(sounds[0].1.contains("Reload_PumpShotgun"));
     }
 
     #[test]
