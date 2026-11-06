@@ -1231,6 +1231,14 @@ impl PlayerInventory {
         }
     }
 
+    /// A dry clip reloads by itself while the pocket has rounds.
+    pub fn auto_reload(&mut self) {
+        let stock = self.current.as_ref().and_then(|name| self.stock(name));
+        if stock.is_some_and(|stock| stock.clip == 0) {
+            self.start_reload();
+        }
+    }
+
     /// A `C_Reload` outside a reload clip, as a dive's first frame sends.
     pub fn reload_now(&mut self) {
         self.reloading = Some(0.0);
@@ -2146,6 +2154,21 @@ mod tests {
         player.step(0.4);
         assert_eq!(player.stock("beretta"), stock(18, 2, false));
         assert!(player.fire());
+    }
+
+    #[test]
+    fn a_dry_clip_reloads_by_itself_while_the_pocket_has_rounds() {
+        let mut player = emptied_beretta(20);
+        player.auto_reload();
+        assert_eq!(player.reload_clips, 1);
+        player.step(1.4);
+        assert_eq!(player.stock("beretta"), stock(18, 2, false));
+        player.auto_reload();
+        assert_eq!(player.reload_clips, 1, "a loaded clip stays as it is");
+
+        let mut spent = emptied_beretta(0);
+        spent.auto_reload();
+        assert_eq!(spent.reloading, None, "nothing left to load");
     }
 
     #[test]

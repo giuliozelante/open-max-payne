@@ -685,6 +685,10 @@ pub fn run_3d_walkthrough(
             scene.step_touch_triggers(&room_origins, feet);
         }
         scene.inventory.step(world_dt);
+        // The last round's cycle runs out first, so its clip is not cut short.
+        if scene.player_controls && shot_timer <= 0.0 && pending.is_empty() && !motion.diving() {
+            scene.inventory.auto_reload();
+        }
 
         // Shoot (left mouse, `F` or `LeftCtrl` / `RightCtrl`)
         // No weapon file marks a gun automatic, so held fire repeats for all of them.
