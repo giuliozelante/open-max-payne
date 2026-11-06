@@ -4,6 +4,7 @@ pub mod decals;
 pub mod frontend;
 pub mod gpu;
 pub mod hud;
+pub mod items;
 pub mod kf2;
 pub mod menu_ui;
 pub mod particles;
@@ -2772,12 +2773,72 @@ pub fn load_death_clips(game_dir: &Path) -> Vec<kf2::DeathClip> {
 
 /// The model a weapon file names (`WeaponDef::model`) with its bitmaps.
 pub fn load_weapon_model(game_dir: &Path, model: &str) -> Option<kf2::KfsMesh> {
-    const DIR: &str = r"\data\database\weapons\";
+    load_packed_model(game_dir, &format!(r"\data\database\weapons\{model}"))
+}
+
+/// The item types `scene` places, with their rules and models.
+pub fn load_level_items(
+    game_dir: &Path,
+    scene: &scene::LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+) -> (items::LevelItems, BTreeMap<String, kf2::KfsMesh>) {
+    const DIR: &str = r"\data\database\level_items\";
+    let mut level = items::LevelItems::default();
+    let mut models = BTreeMap::new();
+    let headers = read_game_bytes(game_dir, r"\data\database\level_items.h")
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    for item in &scene.items {
+        let kind = item.item_type.to_ascii_lowercase();
+        if !level.defs.contains_key(&kind) {
+            let text = read_game_bytes(game_dir, &format!("{DIR}{kind}.txt"));
+            let text = text.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+            let Some(def) = text.and_then(|text| items::LevelItemDef::parse(&headers, &text))
+            else {
+                continue;
+            };
+            let path = resolve_win_path(&format!(r"{DIR}{kind}\{}", def.model));
+            if let Some(model) = load_packed_model(game_dir, &path) {
+                models.insert(kind.clone(), model);
+            }
+            level.defs.insert(kind.clone(), def);
+        }
+        let origin = rooms.get(&item.room_id).copied().unwrap_or([0.0; 3]);
+        level.items.push(items::LiveItem {
+            kind,
+            pos: [0, 1, 2].map(|c| item.pos[c] + origin[c]),
+            taken: false,
+        });
+    }
+    (level, models)
+}
+
+/// `path` with its `..` steps taken.
+fn resolve_win_path(path: &str) -> String {
+    let mut parts = Vec::new();
+    for part in path.split('\\').filter(|part| !part.is_empty()) {
+        if part == ".." {
+            parts.pop();
+        } else {
+            parts.push(part);
+        }
+    }
+    format!(r"\{}", parts.join(r"\"))
+}
+
+/// A packed `.kf2` model. Its materials search `textures;..\\sharedtextures`.
+fn load_packed_model(game_dir: &Path, win_path: &str) -> Option<kf2::KfsMesh> {
     let mut source = GameSource::open(game_dir);
-    let parts = kf2::parse_world_sphere(&source.read(&format!("{DIR}{model}"))?)?;
-    let (folder, _) = model.rsplit_once('\\')?;
-    Some(kf2::mesh_from_parts(model, &parts, |file| {
-        let bytes = source.read(&format!(r"{DIR}{folder}\textures\{file}"))?;
+    let parts = kf2::parse_world_sphere(&source.read(win_path)?)?;
+    let (folder, _) = win_path.rsplit_once('\\')?;
+    Some(kf2::mesh_from_parts(win_path, &parts, |file| {
+        let bytes = source
+            .read(&format!(r"{folder}\textures\{file}"))
+            .or_else(|| {
+                source.read(&resolve_win_path(&format!(
+                    r"{folder}\..\sharedtextures\{file}"
+                )))
+            })?;
         let (width, height, pixels) = scene::decode_texture_blob(&bytes)?;
         Some(scene::DecodedTexture {
             path: file.to_string(),
@@ -4318,6 +4379,40 @@ mod tests {
             let pelvis = world["pelvis"].1[1];
             assert!(pelvis < 0.5, "pelvis at {pelvis} m");
             assert_eq!(death.sounds[0].1, "enemy");
+        }
+    }
+
+    #[test]
+    fn win_paths_take_their_parent_steps() {
+        assert_eq!(
+            resolve_win_path(r"\data\database\level_items\beretta\..\..\weapons\beretta\x.kf2"),
+            r"\data\database\weapons\beretta\x.kf2"
+        );
+    }
+
+    #[test]
+    fn retail_tutorial_items_all_have_rules_and_models() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        let Some(bytes) = read_game_bytes(&game, r"\data\database\levels\front_end\Tutorial.ldb")
+        else {
+            return;
+        };
+        let scene = scene::parse_ldb_scene(&bytes).expect("tutorial");
+        let (level, models) = load_level_items(&game, &scene, &BTreeMap::new());
+        assert_eq!(level.items.len(), scene.items.len());
+        for item in &level.items {
+            assert!(level.defs.contains_key(&item.kind), "{}", item.kind);
+            let model = models
+                .get(&item.kind)
+                .unwrap_or_else(|| panic!("{}", item.kind));
+            assert!(
+                model.material_textures.iter().any(Option::is_some),
+                "{}",
+                item.kind
+            );
         }
     }
 

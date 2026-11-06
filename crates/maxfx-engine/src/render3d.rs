@@ -299,6 +299,7 @@ pub fn run_3d_walkthrough(
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
     let death_clips = crate::load_death_clips(&game_root);
+    let (mut level_items, item_models) = crate::load_level_items(&game_root, &scene, &room_origins);
     let weapon_models: BTreeMap<String, crate::kf2::KfsMesh> = scene
         .inventory
         .defs
@@ -709,6 +710,9 @@ pub fn run_3d_walkthrough(
             }
         }
 
+        let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+        level_items.step(&mut scene, feet, world_dt);
+
         let reloading = scene.inventory.reloading.is_some();
         if reloading && !reload_seen {
             let def = scene.inventory.current.as_ref();
@@ -922,6 +926,16 @@ pub fn run_3d_walkthrough(
                     });
                 }
             }
+            for (mesh, verts, at) in placed_items(&level_items, &item_models) {
+                let light =
+                    character_vertex_light(mesh, &verts, at, false, &frame_lights, scene.ambient);
+                characters.push(crate::gpu::GpuCharacter {
+                    mesh,
+                    verts,
+                    dead: false,
+                    light,
+                });
+            }
             if let (true, false, Some(prig)) = (third_person, fly_mode, player_rig.as_ref()) {
                 let time =
                     player_clip_time(prig, player_moving, walk_phase, anim_clock, action_time);
@@ -1054,6 +1068,29 @@ pub fn run_3d_walkthrough(
                     &mut zb,
                 );
             }
+        }
+
+        for (mesh, verts, at) in placed_items(&level_items, &item_models)
+            .into_iter()
+            .filter(|_| cpu_characters)
+        {
+            render_kfs_character(
+                mesh,
+                &verts,
+                at,
+                false,
+                false,
+                &frame_lights,
+                scene.ambient,
+                cam_pos,
+                cam_right,
+                cam_up,
+                cam_fwd,
+                fov_scale,
+                wireframe,
+                &mut fb,
+                &mut zb,
+            );
         }
 
         // 4. Render Player (`Payne_Max_L0.KFS`) in 3rd-person view
@@ -2933,6 +2970,26 @@ fn point_in_xz_tri(px: f32, pz: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> b
 }
 
 /// Character vertices posed (or laid flat when dead) and placed in the world.
+/// A model, its world vertices and its position.
+type PlacedMesh<'a> = (&'a crate::kf2::KfsMesh, Vec<[f32; 3]>, [f32; 3]);
+
+/// Each item still lying in the level.
+fn placed_items<'a>(
+    level: &crate::items::LevelItems,
+    models: &'a BTreeMap<String, crate::kf2::KfsMesh>,
+) -> Vec<PlacedMesh<'a>> {
+    level
+        .items
+        .iter()
+        .filter(|item| !item.taken)
+        .filter_map(|item| {
+            let mesh = models.get(&item.kind)?;
+            let place = |v: &[f32; 3]| [0, 1, 2].map(|c| v[c] + item.pos[c]);
+            Some((mesh, mesh.vertices.iter().map(place).collect(), item.pos))
+        })
+        .collect()
+}
+
 /// The model of the weapon the player holds.
 fn held_weapon<'a>(
     scene: &LdbScene,
