@@ -1345,7 +1345,7 @@ pub fn run_3d_walkthrough(
                     characters.push(crate::gpu::GpuCharacter {
                         mesh: weapon,
                         verts,
-                        // The shotguns' faces are not wound consistently.
+                        // Held weapons draw both sides, as `character_face_normal` says.
                         two_sided: true,
                         light,
                     });

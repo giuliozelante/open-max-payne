@@ -4506,6 +4506,13 @@ mod tests {
         // `ProjectileOffset = (0, 0.06, 0)`: the barrel runs along +z, above the grip's pivot.
         let barrel = mesh.vertices.iter().map(|v| v[2]).fold(f32::MIN, f32::max);
         assert!((0.1..0.4).contains(&barrel), "front {barrel}");
+        // `PumpShotgun` has two material groups and `Slide` one.
+        let model = defs["pumpshotgun"].model.as_deref().expect("model");
+        let mesh = load_weapon_model(&game, model).expect("pump shotgun");
+        assert_eq!(mesh.material_textures.len(), 3);
+        assert!(mesh.material_textures.iter().all(Option::is_some));
+        assert_eq!(mesh.faces.len(), 203 + 72 + 48);
+        assert_eq!(mesh.faces[203].indices[0], 281);
     }
 
     #[test]
