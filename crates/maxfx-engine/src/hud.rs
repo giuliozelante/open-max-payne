@@ -95,11 +95,12 @@ pub fn parse_string_table(text: &str) -> BTreeMap<String, String> {
 
 /// `#USE#`-style placeholders in `text` replaced by the engine's keys.
 pub fn expand_keys(text: &str) -> String {
-    const KEYS: [(&str, &str); 4] = [
+    const KEYS: [(&str, &str); 5] = [
         ("#USE#", "E"),
         ("#SHOOT#", "Mouse 1"),
         ("#BULLETTIME#", "Mouse 2"),
         ("#JUMP#", "Space"),
+        ("#PAINKILLER#", "Tab"),
     ];
     KEYS.iter().fold(text.to_string(), |text, (token, key)| {
         text.replace(token, key)
@@ -2969,6 +2970,7 @@ Width = 200;
     fn tip_placeholders_name_the_engines_keys() {
         assert_eq!(expand_keys("premi #USE# ora"), "premi E ora");
         assert_eq!(expand_keys("#SHOOT# e #BULLETTIME#"), "Mouse 1 e Mouse 2");
+        assert_eq!(expand_keys("#PAINKILLER#"), "Tab");
         assert_eq!(expand_keys("#TOTALTIME#"), "#TOTALTIME#");
     }
 
