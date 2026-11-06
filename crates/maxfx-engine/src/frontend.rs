@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::platform::pump_events::EventLoopExtPumpEvents;
@@ -21,6 +21,10 @@ pub trait Frontend {
     fn get_mouse_down(&self, button: MouseButton) -> bool;
     /// Cursor in the 960 × 600 frame's coordinates.
     fn get_mouse_pos(&self, mode: MouseMode) -> Option<(f32, f32)>;
+    /// Relative mouse motion this frame, where the window reports it.
+    fn mouse_motion(&self) -> Option<(f32, f32)> {
+        None
+    }
 }
 
 impl Frontend for Window {
@@ -56,15 +60,33 @@ struct InputState {
     mouse_right: bool,
     cursor: Option<(f64, f64)>,
     size: (u32, u32),
+    /// Relative mouse motion since the last pump.
+    mouse_motion: (f64, f64),
+    /// The window regained focus and its cursor grab must be taken again.
+    refocused: bool,
+}
+
+impl InputState {
+    fn add_mouse_motion(&mut self, delta: (f64, f64)) {
+        self.mouse_motion.0 += delta.0;
+        self.mouse_motion.1 += delta.1;
+    }
 }
 
 impl ApplicationHandler for InputState {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
 
+    fn device_event(&mut self, _loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            self.add_mouse_motion(delta);
+        }
+    }
+
     fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => self.open = false,
             WindowEvent::Resized(size) => self.size = (size.width, size.height),
+            WindowEvent::Focused(true) => self.refocused = true,
             WindowEvent::KeyboardInput { event, .. } => {
                 let PhysicalKey::Code(code) = event.physical_key else {
                     return;
@@ -102,6 +124,8 @@ impl ApplicationHandler for InputState {
 pub struct WinitFrontend {
     pub window: Arc<winit::window::Window>,
     input: InputState,
+    /// The cursor is hidden and held in the window, for mouse look.
+    mouse_captured: bool,
 }
 
 impl WinitFrontend {
@@ -128,6 +152,7 @@ impl WinitFrontend {
                 size: (size.width, size.height),
                 ..Default::default()
             },
+            mouse_captured: false,
         })
     }
 
@@ -144,11 +169,36 @@ impl WinitFrontend {
     /// Collect the events that arrived since the last frame.
     pub fn pump(&mut self) {
         self.input.pressed.clear();
+        self.input.mouse_motion = (0.0, 0.0);
         EVENT_LOOP.with(|cell| {
             if let Some(event_loop) = cell.borrow_mut().as_mut() {
                 event_loop.pump_app_events(Some(Duration::ZERO), &mut self.input);
             }
         });
+        if std::mem::take(&mut self.input.refocused) && self.mouse_captured {
+            self.apply_mouse_capture();
+        }
+    }
+
+    /// Hides the cursor and holds it in the window, or gives it back.
+    pub fn set_mouse_captured(&mut self, captured: bool) {
+        self.mouse_captured = captured;
+        self.apply_mouse_capture();
+    }
+
+    fn apply_mouse_capture(&self) {
+        use winit::window::CursorGrabMode;
+        let grab = if self.mouse_captured {
+            self.window
+                .set_cursor_grab(CursorGrabMode::Locked)
+                .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Confined))
+        } else {
+            self.window.set_cursor_grab(CursorGrabMode::None)
+        };
+        if let Err(error) = grab {
+            eprintln!("  3D Engine: cursor grab failed: {error}");
+        }
+        self.window.set_cursor_visible(!self.mouse_captured);
     }
 }
 
@@ -175,6 +225,10 @@ impl Frontend for WinitFrontend {
         let sx = crate::render3d::FRAME_W as f64 / f64::from(w.max(1));
         let sy = crate::render3d::FRAME_H as f64 / f64::from(h.max(1));
         Some(((x * sx) as f32, (y * sy) as f32))
+    }
+    fn mouse_motion(&self) -> Option<(f32, f32)> {
+        let (x, y) = self.input.mouse_motion;
+        Some((x as f32, y as f32))
     }
 }
 
@@ -234,6 +288,13 @@ impl Screen {
     pub fn pump(&mut self) {
         if let Screen::Hard { front, .. } = self {
             front.pump();
+        }
+    }
+
+    /// Mouse look holds the cursor; menus and comics give it back.
+    pub fn set_mouse_captured(&mut self, captured: bool) {
+        if let Screen::Hard { front, .. } = self {
+            front.set_mouse_captured(captured);
         }
     }
 
@@ -333,6 +394,12 @@ impl Frontend for Screen {
             Screen::Soft(window) => window.get_mouse_pos(mode),
         }
     }
+    fn mouse_motion(&self) -> Option<(f32, f32)> {
+        match self {
+            Screen::Hard { front, .. } => front.mouse_motion(),
+            Screen::Soft(_) => None,
+        }
+    }
 }
 
 /// winit physical key → the minifb key the walkthrough checks.
@@ -370,6 +437,14 @@ pub(crate) fn minifb_key(code: KeyCode) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_motion_adds_up_within_a_frame() {
+        let mut input = InputState::default();
+        input.add_mouse_motion((3.0, -1.0));
+        input.add_mouse_motion((2.0, -1.0));
+        assert_eq!(input.mouse_motion, (5.0, -2.0));
+    }
 
     #[test]
     fn every_walkthrough_key_has_a_winit_code() {

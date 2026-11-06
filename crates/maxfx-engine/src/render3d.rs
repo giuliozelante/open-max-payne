@@ -319,6 +319,7 @@ pub fn run_3d_walkthrough(
     let mut background = vec![0u32; W * H];
     let mut last_frame = std::time::Instant::now();
 
+    screen.set_mouse_captured(true);
     loop {
         let now = std::time::Instant::now();
         let base_dt = frame_dt(now - last_frame);
@@ -412,7 +413,9 @@ pub fn run_3d_walkthrough(
         if window.is_key_down(Key::Down) {
             pitch = (pitch - turn_speed).max(-1.25);
         }
-        if window.get_mouse_down(MouseButton::Left) {
+        if let Some(motion) = window.mouse_motion() {
+            (yaw, pitch) = mouse_look(yaw, pitch, motion);
+        } else if window.get_mouse_down(MouseButton::Left) {
             if let Some((mx, my)) = window.get_mouse_pos(MouseMode::Pass) {
                 if let Some((lx, ly)) = last_mouse {
                     yaw += (mx - lx) * 0.006;
@@ -571,6 +574,10 @@ pub fn run_3d_walkthrough(
             match (mesh_hit, best_hit) {
                 (Some((midx, mt)), enemy) if enemy.is_none_or(|(_, et)| mt < et) => {
                     let scripted = scene.bullet_hits(midx);
+                    println!(
+                        "  3D Engine: shot hit {} at {mt:.1} m (scripted: {scripted})",
+                        scene.dynamic_meshes[midx].name
+                    );
                     let broke = scene.damage_mesh(midx, BERETTA_BULLET_DAMAGE);
                     if broke {
                         println!("  3D Engine: {} broke", scene.dynamic_meshes[midx].name);
@@ -961,6 +968,7 @@ pub fn run_3d_walkthrough(
             }
         }
     }
+    screen.set_mouse_captured(false);
     screen.put_gpu(gpu);
     Ok(())
 }
@@ -987,6 +995,17 @@ pub(crate) fn fov_scale(multiplier: f32) -> f32 {
     let multiplier = if multiplier > 0.0 { multiplier } else { 1.0 };
     let half = (DEFAULT_FOV * 0.5).to_radians() * multiplier;
     W as f32 * 0.5 / half.min(1.5).tan()
+}
+
+/// Radians per mouse count of free look.
+const MOUSE_LOOK: f32 = 0.003;
+
+/// `(yaw, pitch)` after a mouse move: right turns right, up looks up.
+fn mouse_look(yaw: f32, pitch: f32, (dx, dy): (f32, f32)) -> (f32, f32) {
+    (
+        yaw + dx * MOUSE_LOOK,
+        (pitch - dy * MOUSE_LOOK).clamp(-1.25, 1.25),
+    )
 }
 
 /// Longest step one frame may take (a loading stall or a window drag).
@@ -4252,6 +4271,19 @@ mod tests {
         // A railing 1 m up lifted Max onto it at the foot of the house stairs.
         let scene = floors_at(&[0.0, 1.0]);
         assert_eq!(find_floor_y(&scene, 0.0, EYE_HEIGHT, 0.0), Some(0.0));
+    }
+
+    #[test]
+    fn the_mouse_turns_the_view_with_no_button_held() {
+        let (yaw, pitch) = mouse_look(1.0, 0.0, (100.0, -100.0));
+        assert!((yaw - 1.3).abs() < 1e-5);
+        assert!((pitch - 0.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn looking_up_and_down_stops_short_of_vertical() {
+        assert_eq!(mouse_look(0.0, 1.2, (0.0, -1000.0)).1, 1.25);
+        assert_eq!(mouse_look(0.0, -1.2, (0.0, 1000.0)).1, -1.25);
     }
 
     #[test]
