@@ -476,6 +476,8 @@ pub struct WeaponDef {
     pub reload_amount: i32,
     /// `[Crosshair]` names `dot.kf2` and not `invisible.kf2`.
     pub shows_dot: bool,
+    /// First `[LOD]` `ExportData`, relative to `database\\weapons\\`.
+    pub model: Option<String>,
 }
 
 impl WeaponDef {
@@ -495,6 +497,15 @@ impl WeaponDef {
                 .find(|s| s.path == "crosshair/geometry")
                 .and_then(|s| s.text("exportdata"))
                 .is_some_and(|file| file.to_ascii_lowercase().ends_with("dot.kf2")),
+            // `[LOD] { [Geometry] ExportData = ..\x.kf2; ... }` sits on one line.
+            model: weapon_txt.lines().find_map(|line| {
+                let (_, rest) = line.split_once("[LOD]")?.1.split_once("ExportData")?;
+                let file = rest
+                    .trim_start_matches([' ', '\t', '='])
+                    .split(';')
+                    .next()?;
+                Some(file.trim().trim_start_matches(r"..\").to_string())
+            }),
         })
     }
 }
@@ -1102,6 +1113,7 @@ mod tests {
             reload_seconds: 1.3,
             reload_amount: -1,
             shows_dot: true,
+            model: None,
         };
         let mut defs = BTreeMap::new();
         for (name, weapon) in [
@@ -1155,8 +1167,20 @@ mod tests {
                 reload_seconds: 0.0,
                 reload_amount: -1,
                 shows_dot: true,
+                model: None,
             })
         );
+    }
+
+    #[test]
+    fn a_weapon_file_names_its_nearest_model() {
+        let def = WeaponDef::parse(
+            "",
+            "[LOD] { [Geometry] ExportData = ..\\beretta\\beretta_Lod0.kf2; Distance = 5 ; }\n[LOD] { [Geometry] ExportData = ..\\beretta\\beretta_Lod1.kf2; Distance = 9 ;}\n[Attributes]\nInventoryID = I;\nWeaponID = W;\nClipsize = 1;\nPocketsize = 2;\nReloadAmount = -1;\n[Crosshair]\n{\n[Geometry]\nExportData = ..\\crosshairs\\dot.kf2;\n}\n",
+        )
+        .expect("weapon");
+        assert_eq!(def.model.as_deref(), Some(r"beretta\beretta_Lod0.kf2"));
+        assert!(def.shows_dot);
     }
 
     #[test]

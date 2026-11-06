@@ -4700,6 +4700,7 @@ mod tests {
                 reload_seconds: 1.3,
                 reload_amount: -1,
                 shows_dot: true,
+                model: None,
             },
         );
         for message in [
@@ -4726,6 +4727,7 @@ mod tests {
             reload_seconds: 1.3,
             reload_amount: -1,
             shows_dot: true,
+            model: None,
         };
         scene.inventory.defs.extend([
             (
