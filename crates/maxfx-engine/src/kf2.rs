@@ -135,6 +135,11 @@ pub struct CharacterRig {
     pub two_handed: bool,
     /// The skin's `MaximumHealth`; 0 when no skin file named it.
     pub max_health: i32,
+    /// Seconds into `action`.
+    pub action_time: f32,
+    /// Lower-case `OneHandedUpperBodyBone` and `TwoHandedUpperBodyBone` names: what `action`
+    /// moves while the legs run.
+    pub upper_bones: [Vec<String>; 2],
 }
 
 fn read_i32(data: &[u8], i: &mut usize) -> Option<i32> {
@@ -840,6 +845,41 @@ pub fn skin_vertices(
     out
 }
 
+/// Bone locals by lower-case name.
+pub type BoneLocals = BTreeMap<String, ([f32; 9], [f32; 3])>;
+
+/// The lower-case names under each `[tag]` of a skeleton file.
+pub fn parse_body_bones(skeleton: &str, tag: &str) -> Vec<String> {
+    let header = format!("[{tag}]");
+    skeleton
+        .lines()
+        .filter_map(|line| {
+            let (_, name) = line.trim().strip_prefix(&header)?.split_once('"')?;
+            Some(name.split('"').next()?.to_ascii_lowercase())
+        })
+        .collect()
+}
+
+/// `mesh.vertices` skinned to `locals` over `anim`'s hierarchy.
+pub fn pose_locals(
+    mesh: &KfsMesh,
+    skin: Option<&SkdSkin>,
+    bind: Option<&Kf2Anim>,
+    anim: &Kf2Anim,
+    locals: &BoneLocals,
+) -> Vec<[f32; 3]> {
+    let Some(skin) = skin else {
+        return mesh.vertices.clone();
+    };
+    let pose_world = compose_world(anim, locals);
+    let bind_world = if let Some(bind) = bind {
+        compose_world(bind, &sample_locals(bind, 0.0))
+    } else {
+        BTreeMap::new()
+    };
+    skin_vertices(&mesh.vertices, skin, &bind_world, &pose_world)
+}
+
 /// Pose `mesh.vertices` with `anim` at `time_s`. `bind` is `Pose.kf2` when present.
 pub fn pose_mesh(
     mesh: &KfsMesh,
@@ -848,16 +888,10 @@ pub fn pose_mesh(
     anim: Option<&Kf2Anim>,
     time_s: f32,
 ) -> Vec<[f32; 3]> {
-    let (Some(skin), Some(anim)) = (skin, anim) else {
+    let Some(anim) = anim else {
         return mesh.vertices.clone();
     };
-    let pose_world = compose_world(anim, &sample_locals(anim, time_s));
-    let bind_world = if let Some(bind) = bind {
-        compose_world(bind, &sample_locals(bind, 0.0))
-    } else {
-        BTreeMap::new()
-    };
-    skin_vertices(&mesh.vertices, skin, &bind_world, &pose_world)
+    pose_locals(mesh, skin, bind, anim, &sample_locals(anim, time_s))
 }
 
 fn find_file_ci(dirs: &[PathBuf], names: &[&str]) -> Option<PathBuf> {
@@ -977,6 +1011,8 @@ fn rig_from_mesh(mesh: KfsMesh, skin: Option<SkdSkin>, path: &Path) -> Character
         two_handed_walk: load_anim_named(path, &["2_run.kf2"]),
         two_handed: false,
         max_health: 0,
+        action_time: 0.0,
+        upper_bones: [Vec::new(), Vec::new()],
     }
 }
 
@@ -1341,10 +1377,10 @@ pub fn mesh_from_parts(
 pub fn bone_verts(
     verts: &[[f32; 3]],
     anim: &Kf2Anim,
+    locals: &BoneLocals,
     bone: &str,
-    time_s: f32,
 ) -> Option<Vec<[f32; 3]>> {
-    let world = compose_world(anim, &sample_locals(anim, time_s));
+    let world = compose_world(anim, locals);
     let (mat, pos) = *world.get(&bone.to_ascii_lowercase())?;
     Some(verts.iter().map(|v| xform(mat, pos, *v)).collect())
 }
@@ -1646,6 +1682,15 @@ mod tests {
     }
 
     #[test]
+    fn body_bones_list_their_tag_only_in_lower_case() {
+        let text = "[OneHandedLowerBodyBone] Name = \"Pelvis\";\t\t// Lower\n[OneHandedUpperBodyBone]  Name = \"Torso\";\n[TwoHandedUpperBodyBone]  Name = \"Neck\";\n[OneHandedUpperBodyBone]   Name = \"UpArm-R\";\t\t// Right\n";
+        assert_eq!(
+            parse_body_bones(text, "OneHandedUpperBodyBone"),
+            ["torso", "uparm-r"]
+        );
+    }
+
+    #[test]
     fn a_clip_ends_on_its_last_key() {
         let key = |frame| AnimKeyframe {
             frame,
@@ -1683,11 +1728,12 @@ mod tests {
                 bone("Gun", Some("Hand-R"), [0.0, 2.0, 0.0]),
             ],
         };
+        let locals = sample_locals(&anim, 0.0);
         assert_eq!(
-            bone_verts(&[[0.0, 0.0, 3.0]], &anim, "gun", 0.0),
+            bone_verts(&[[0.0, 0.0, 3.0]], &anim, &locals, "gun"),
             Some(vec![[1.0, 2.0, 3.0]])
         );
-        assert_eq!(bone_verts(&[[0.0; 3]], &anim, "missing", 0.0), None);
+        assert_eq!(bone_verts(&[[0.0; 3]], &anim, &locals, "missing"), None);
     }
 
     #[test]

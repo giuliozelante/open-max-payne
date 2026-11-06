@@ -2770,6 +2770,15 @@ pub fn particle_effect_file(particles_txt: &str, effect: &str) -> Option<(String
     ))
 }
 
+/// `OneHandedUpperBodyBone` and `TwoHandedUpperBodyBone` of the default skeleton.
+pub fn load_upper_bones(game_dir: &Path) -> [Vec<String>; 2] {
+    let skeleton = read_game_bytes(game_dir, r"\data\database\skeletons\default_skeleton.txt")
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    ["OneHandedUpperBodyBone", "TwoHandedUpperBodyBone"]
+        .map(|tag| kf2::parse_body_bones(&skeleton, tag))
+}
+
 /// `CHARANIM_RANDOMDEATH1..4` of the default skeleton, with their sounds.
 pub fn load_death_clips(game_dir: &Path) -> Vec<kf2::DeathClip> {
     const DIR: &str = r"\data\database\skeletons\";

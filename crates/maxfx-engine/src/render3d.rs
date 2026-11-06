@@ -308,6 +308,9 @@ pub fn run_3d_walkthrough(
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
     let death_clips = crate::load_death_clips(&game_root);
+    if let Some(rig) = player_rig.as_mut() {
+        rig.upper_bones = crate::load_upper_bones(&game_root);
+    }
     let (mut level_items, item_models) = crate::load_level_items(&game_root, &scene, &room_origins);
     let weapon_models: BTreeMap<String, crate::kf2::KfsMesh> = scene
         .inventory
@@ -623,10 +626,12 @@ pub fn run_3d_walkthrough(
             if let Some(rig) = player_rig.as_mut() {
                 rig.action = def.fire_clip.clone();
                 action_time = 0.0;
-                let frame = character_clip(rig, player_moving).and_then(|clip| {
-                    let time = if player_moving { walk_phase } else { 0.0 };
-                    bone_frame(clip, "Gun", time, feet, player_mesh_yaw(yaw))
-                });
+                rig.action_time = 0.0;
+                let time = if player_moving { walk_phase } else { 0.0 };
+                let frame =
+                    character_locals(rig, player_moving, time).and_then(|(clip, locals)| {
+                        bone_frame(clip, &locals, "Gun", feet, player_mesh_yaw(yaw))
+                    });
                 if let Some((frame, muzzle)) = frame.zip(def.muzzle.as_deref()) {
                     hit_effects.start_muzzle(&mut particle_sprites, muzzle, frame);
                 }
@@ -791,6 +796,7 @@ pub fn run_3d_walkthrough(
         }
         if let Some(rig) = player_rig.as_mut() {
             action_time += world_dt;
+            rig.action_time = action_time;
             if rig
                 .action
                 .as_ref()
@@ -3091,6 +3097,27 @@ fn spread_aim(dir: [f32; 3], accuracy: f32, seed: &mut u32) -> [f32; 3] {
     spread.map(|c| c / length)
 }
 
+/// The hierarchy and bone locals of a character now: its clip, with the upper bones of a running
+/// character's action laid over the run.
+fn character_locals(
+    rig: &CharacterRig,
+    moving: bool,
+    time: f32,
+) -> Option<(&crate::kf2::Kf2Anim, crate::kf2::BoneLocals)> {
+    let clip = character_clip(rig, moving)?;
+    let mut locals = crate::kf2::sample_locals(clip, time);
+    if let Some(action) = rig.action.as_ref().filter(|_| moving) {
+        let upper = &rig.upper_bones[usize::from(rig.two_handed)];
+        let mut action = crate::kf2::sample_locals(action, rig.action_time);
+        for bone in upper {
+            if let Some(local) = action.remove(bone) {
+                locals.insert(bone.clone(), local);
+            }
+        }
+    }
+    Some((clip, locals))
+}
+
 /// Where the player's current clip is.
 fn player_clip_time(
     rig: &CharacterRig,
@@ -3109,13 +3136,12 @@ fn player_clip_time(
 /// World position and rotation (columns) of `bone`, for a character at `world_pos` turned `yaw`.
 fn bone_frame(
     anim: &crate::kf2::Kf2Anim,
+    locals: &crate::kf2::BoneLocals,
     bone: &str,
-    time: f32,
     world_pos: [f32; 3],
     yaw: f32,
 ) -> Option<crate::particles::Frame> {
-    let locals = crate::kf2::sample_locals(anim, time);
-    let (rot, pos) = *crate::kf2::compose_world(anim, &locals).get(&bone.to_ascii_lowercase())?;
+    let (rot, pos) = *crate::kf2::compose_world(anim, locals).get(&bone.to_ascii_lowercase())?;
     let (sy, cy) = yaw.sin_cos();
     let turn = |[x, y, z]: [f32; 3]| [x * cy + z * sy, y, z * cy - x * sy];
     let [x, y, z] = turn(pos);
@@ -3154,8 +3180,8 @@ pub(crate) fn held_weapon_verts(
     anim_time: f32,
     moving: bool,
 ) -> Option<Vec<[f32; 3]>> {
-    let anim = character_clip(rig, moving)?;
-    let held = crate::kf2::bone_verts(&weapon.vertices, anim, "Gun", anim_time)?;
+    let (anim, locals) = character_locals(rig, moving, anim_time)?;
+    let held = crate::kf2::bone_verts(&weapon.vertices, anim, &locals, "Gun")?;
     let (sy, cy) = yaw.sin_cos();
     let place = |[x, y, z]: [f32; 3]| {
         [
@@ -3205,11 +3231,12 @@ pub(crate) fn character_world_verts(
 ) -> Vec<[f32; 3]> {
     let (sy, cy) = yaw.sin_cos();
     let mesh = &rig.mesh;
-    let anim = character_clip(rig, moving);
-    let posed = if dead {
-        mesh.vertices.clone()
-    } else {
-        pose_mesh(mesh, rig.skin.as_ref(), rig.bind.as_ref(), anim, anim_time)
+    let pose = character_locals(rig, moving, anim_time).filter(|_| !dead);
+    let posed = match pose {
+        Some((anim, locals)) => {
+            crate::kf2::pose_locals(mesh, rig.skin.as_ref(), rig.bind.as_ref(), anim, &locals)
+        }
+        None => mesh.vertices.clone(),
     };
     posed
         .iter()
@@ -4355,6 +4382,8 @@ mod tests {
             two_handed_walk: None,
             two_handed: false,
             max_health: 0,
+            action_time: 0.0,
+            upper_bones: [Vec::new(), Vec::new()],
         };
         let name = |moving| character_clip(&rig, moving).map(|c| c.bones[0].name.as_str());
         assert_eq!(name(false), Some("shoot"));
@@ -4372,6 +4401,42 @@ mod tests {
         // Pump shotgun: at most 150 / 2500 = 0.06 off a unit aim.
         let widest = shots.iter().map(|s| s[0].hypot(s[1])).fold(0.0, f32::max);
         assert!((0.02..=0.0601).contains(&widest), "{widest}");
+    }
+
+    #[test]
+    fn a_running_character_takes_only_the_upper_bones_from_its_action() {
+        let two_bones = |pelvis: [f32; 3], torso: [f32; 3]| {
+            let mut anim = clip("Pelvis", pelvis);
+            anim.bones.extend(clip("Torso", torso).bones);
+            anim
+        };
+        let mesh = crate::kf2::KfsMesh {
+            name: String::new(),
+            vertices: Vec::new(),
+            faces: Vec::new(),
+            material_textures: Vec::new(),
+        };
+        let mut rig = CharacterRig {
+            mesh,
+            skin: None,
+            idle: None,
+            walk: Some(two_bones([1.0; 3], [2.0; 3])),
+            bind: None,
+            action: Some(two_bones([8.0; 3], [9.0; 3])),
+            two_handed_idle: None,
+            two_handed_walk: None,
+            two_handed: false,
+            max_health: 0,
+            action_time: 0.0,
+            upper_bones: [vec!["torso".to_string()], Vec::new()],
+        };
+        let (_, locals) = character_locals(&rig, true, 0.0).expect("pose");
+        assert_eq!(locals["pelvis"].1, [1.0; 3]);
+        assert_eq!(locals["torso"].1, [9.0; 3]);
+        // Two-handed weapons have their own set, empty here.
+        rig.two_handed = true;
+        let (_, locals) = character_locals(&rig, true, 0.0).expect("pose");
+        assert_eq!(locals["torso"].1, [2.0; 3]);
     }
 
     #[test]
@@ -4393,6 +4458,8 @@ mod tests {
             two_handed_walk: Some(clip("2_run", [0.0; 3])),
             two_handed: true,
             max_health: 0,
+            action_time: 0.0,
+            upper_bones: [Vec::new(), Vec::new()],
         };
         let name = |rig: &CharacterRig, moving: bool| {
             let clip = character_clip(rig, moving).expect("clip");
@@ -4415,10 +4482,11 @@ mod tests {
     #[test]
     fn the_gun_frame_turns_with_the_character() {
         let anim = clip("Gun", [1.0, 2.0, 0.0]);
+        let locals = crate::kf2::sample_locals(&anim, 0.0);
         let (pos, rot) = bone_frame(
             &anim,
+            &locals,
             "gun",
-            0.0,
             [10.0, 0.0, 0.0],
             std::f32::consts::FRAC_PI_2,
         )
