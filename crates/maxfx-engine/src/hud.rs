@@ -25,6 +25,102 @@ pub struct HudText {
     pub position: [f32; 2],
 }
 
+/// `[Print]` or `[PrintTip]` of `hud.txt`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct HudPrintStyle {
+    pub anchor: HudText,
+    pub spacing: f32,
+    pub max_lines: usize,
+    pub color: [u8; 4],
+    /// Seconds on screen, then seconds of fade.
+    pub duration: f32,
+    pub fade_out: f32,
+}
+
+/// Lines of text on the HUD, oldest first, each with its age.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HudPrintLog {
+    pub lines: std::collections::VecDeque<(String, f32)>,
+}
+
+impl HudPrintLog {
+    pub fn push(&mut self, style: &HudPrintStyle, text: String) {
+        self.lines.push_back((text, 0.0));
+        while self.lines.len() > style.max_lines {
+            self.lines.pop_front();
+        }
+    }
+
+    pub fn step(&mut self, style: &HudPrintStyle, seconds: f32) {
+        for line in &mut self.lines {
+            line.1 += seconds;
+        }
+        self.lines
+            .retain(|line| line.1 < style.duration + style.fade_out);
+    }
+
+    /// `(text, position, alpha)` of each line. Tips grow down from their anchor; text anchored
+    /// to the right grows up from it, newest lowest.
+    pub fn placed(&self, style: &HudPrintStyle) -> Vec<(&str, [f32; 2], u8)> {
+        let [x, y] = style.anchor.position;
+        let grows_up = style.anchor.reference == 5;
+        let last = self.lines.len().saturating_sub(1);
+        self.lines
+            .iter()
+            .enumerate()
+            .map(|(row, (text, age))| {
+                let step = if grows_up {
+                    (row as f32 - last as f32) * style.spacing
+                } else {
+                    row as f32 * style.spacing
+                };
+                let past = (age - style.duration).max(0.0) / style.fade_out.max(1e-3);
+                let alpha = (f32::from(style.color[3]) * (1.0 - past).max(0.0)) as u8;
+                (text.as_str(), [x, y + step], alpha)
+            })
+            .collect()
+    }
+}
+
+/// `database/stringtable.txt`: `[ID] String = "text";`.
+pub fn parse_string_table(text: &str) -> BTreeMap<String, String> {
+    text.lines()
+        .filter_map(|line| {
+            let (id, rest) = line.trim().strip_prefix('[')?.split_once(']')?;
+            let value = rest.split_once('"')?.1.rsplit_once('"')?.0;
+            Some((id.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// `#USE#`-style placeholders in `text` replaced by the engine's keys.
+pub fn expand_keys(text: &str) -> String {
+    const KEYS: [(&str, &str); 4] = [
+        ("#USE#", "E"),
+        ("#SHOOT#", "Mouse 1"),
+        ("#BULLETTIME#", "Mouse 2"),
+        ("#JUMP#", "Space"),
+    ];
+    KEYS.iter().fold(text.to_string(), |text, (token, key)| {
+        text.replace(token, key)
+    })
+}
+
+/// `text` broken at spaces so no line is wider than `width`.
+pub fn wrap_text(font: &HudFont, text: &str, width: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split(' ') {
+        match lines.last_mut() {
+            Some(line) if font.size(&format!("{line} {word}"))[0] <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
+}
+
 /// The parts of `hud.txt` the engine draws.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct HudLayout {
@@ -41,6 +137,8 @@ pub struct HudLayout {
     /// `UnlimitedAmmoText` by `id`.
     pub unlimited_text: BTreeMap<String, String>,
     pub hourglass_colors: HourglassColors,
+    pub print: HudPrintStyle,
+    pub tip: HudPrintStyle,
 }
 
 /// `[SlowMotionSpecific]`, as RGBA.
@@ -283,6 +381,23 @@ pub(crate) fn parse_sections(text: &str) -> Vec<Section> {
     sections
 }
 
+fn print_style(sections: &[Section], block: &str) -> Option<HudPrintStyle> {
+    let find = |name: &str| {
+        let path = format!("{block}/{name}");
+        sections.iter().find(|s| s.path == path)
+    };
+    let specific = find("printspecific")?;
+    let visibility = find("visibility")?;
+    Some(HudPrintStyle {
+        anchor: find("text")?.anchor()?,
+        spacing: specific.number("yspacing")?,
+        max_lines: specific.number("maximumlines")? as usize,
+        color: specific.color("color"),
+        duration: visibility.number("duration")?,
+        fade_out: visibility.number("fadeouttime")?,
+    })
+}
+
 impl HudLayout {
     pub fn parse(text: &str) -> Option<Self> {
         let sections = parse_sections(text);
@@ -320,6 +435,8 @@ impl HudLayout {
             hourglass_colors: find("slowmotion/slowmotionspecific")
                 .map(Section::hourglass_colors)
                 .unwrap_or_default(),
+            print: print_style(&sections, "print").unwrap_or_default(),
+            tip: print_style(&sections, "printtip").unwrap_or_default(),
         })
     }
 }
@@ -857,6 +974,18 @@ impl HudTarget<'_> {
         if let Some((clip, pocket)) = state.inventory.ammo_text(unlimited) {
             self.draw_text(&assets.font, layout.ammo_in_clip, &clip, [255; 4]);
             self.draw_text(&assets.font, layout.ammo_in_pocket, &pocket, [255; 4]);
+        }
+    }
+
+    /// The lines of a print block.
+    pub fn draw_prints(&mut self, font: &HudFont, style: &HudPrintStyle, log: &HudPrintLog) {
+        let [r, g, b, _] = style.color;
+        for (text, position, alpha) in log.placed(style) {
+            let anchor = HudText {
+                reference: style.anchor.reference,
+                position,
+            };
+            self.draw_text(font, anchor, text, [r, g, b, alpha]);
         }
     }
 
@@ -1780,6 +1909,106 @@ Width = 200;
 	}
 }
 "#;
+
+    fn tip_style() -> HudPrintStyle {
+        HudPrintStyle {
+            anchor: HudText {
+                reference: 2,
+                position: [4.0, 100.0],
+            },
+            spacing: 20.0,
+            max_lines: 3,
+            color: [0xff, 0xe8, 0xa0, 0xff],
+            duration: 10.0,
+            fade_out: 0.5,
+        }
+    }
+
+    #[test]
+    fn hud_txt_reads_the_print_blocks() {
+        let text = format!(
+            "{HUD}\n#define UPLEFT 2\n[Print]\n{{\n[PrintSpecific]\nYSpacing = 20.0;\nMaximumLines = 10;\nColor = c0c0c0ff;\n[Visibility]\nDuration = 3;\nFadeInTime = 0.05;\nFadeOutTime = 0.1;\n[Text]\nReferencePoint = RIGHT;\nPosition = ( 620, 400.5, 0 );\n}}\n[PrintTip]\n{{\n[PrintSpecific]\nYSpacing = 20.0;\nMaximumLines = 3;\nColor = ffe8a0ff;\n[Visibility]\nDuration = 10;\nFadeOutTime = 0.5;\n[Text]\nReferencePoint = UPLEFT;\nPosition = ( 4, 100, 0 );\n}}\n"
+        );
+        let hud = HudLayout::parse(&text).expect("hud");
+        assert_eq!(hud.tip, tip_style());
+        assert_eq!(hud.print.anchor.position, [620.0, 400.5]);
+        assert_eq!(hud.print.max_lines, 10);
+        assert_eq!(hud.print.color, [0xc0, 0xc0, 0xc0, 0xff]);
+    }
+
+    #[test]
+    fn the_string_table_reads_ids_and_text() {
+        let table = parse_string_table(
+            "[OBJ_A]\t\t\t\tString = \"Primo.\";\n\n[TIP_07]\t\tString = \"Rispondi al telefono.\";\n",
+        );
+        assert_eq!(table["TIP_07"], "Rispondi al telefono.");
+        assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn tips_stack_down_from_their_anchor() {
+        let style = tip_style();
+        let mut log = HudPrintLog::default();
+        log.push(&style, "a".into());
+        log.push(&style, "b".into());
+        let placed = log.placed(&style);
+        assert_eq!(placed[0], ("a", [4.0, 100.0], 255));
+        assert_eq!(placed[1], ("b", [4.0, 120.0], 255));
+    }
+
+    #[test]
+    fn right_anchored_text_stacks_up_with_the_newest_lowest() {
+        let style = HudPrintStyle {
+            anchor: HudText {
+                reference: 5,
+                position: [620.0, 400.0],
+            },
+            ..tip_style()
+        };
+        let mut log = HudPrintLog::default();
+        log.push(&style, "a".into());
+        log.push(&style, "b".into());
+        let placed = log.placed(&style);
+        assert_eq!(placed[1].1, [620.0, 400.0]);
+        assert_eq!(placed[0].1, [620.0, 380.0]);
+    }
+
+    #[test]
+    fn a_line_fades_after_its_duration_and_then_goes() {
+        let style = tip_style();
+        let mut log = HudPrintLog::default();
+        log.push(&style, "a".into());
+        log.step(&style, 10.25);
+        assert_eq!(log.placed(&style)[0].2, 127);
+        log.step(&style, 0.5);
+        assert!(log.lines.is_empty());
+    }
+
+    #[test]
+    fn only_the_newest_lines_stay_when_the_block_is_full() {
+        let style = tip_style();
+        let mut log = HudPrintLog::default();
+        for text in ["a", "b", "c", "d"] {
+            log.push(&style, text.into());
+        }
+        assert_eq!(log.lines.len(), 3);
+        assert_eq!(log.lines[0].0, "b");
+    }
+
+    #[test]
+    fn tip_placeholders_name_the_engines_keys() {
+        assert_eq!(expand_keys("premi #USE# ora"), "premi E ora");
+        assert_eq!(expand_keys("#SHOOT# e #BULLETTIME#"), "Mouse 1 e Mouse 2");
+        assert_eq!(expand_keys("#TOTALTIME#"), "#TOTALTIME#");
+    }
+
+    #[test]
+    fn long_text_breaks_at_spaces_within_the_width() {
+        let font = ruler_font();
+        // Each glyph but `A` is 2 wide in this font.
+        let lines = wrap_text(&font, "bb bb bb", 11.0);
+        assert_eq!(lines, ["bb bb", "bb"]);
+    }
 
     #[test]
     fn hud_txt_places_the_health_figure_and_its_pain_fill() {

@@ -284,6 +284,18 @@ pub fn run_3d_walkthrough(
     scene.inventory.best_weapons = crate::load_best_weapons(&game_root);
     scene.apply_startup_player_scripts();
     let hud_assets = crate::hud::HudAssets::load(&game_root);
+    // Latin-1, like the HUD font's character codes.
+    let hud_strings = crate::read_game_bytes(&game_root, r"\data\database\stringtable.txt")
+        .map(|bytes| {
+            bytes
+                .iter()
+                .map(|byte| char::from(*byte))
+                .collect::<String>()
+        })
+        .map(|text| crate::hud::parse_string_table(&text))
+        .unwrap_or_default();
+    let mut print_log = crate::hud::HudPrintLog::default();
+    let mut tip_log = crate::hud::HudPrintLog::default();
     let text = |path: &str| {
         crate::read_game_bytes(&game_root, path)
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -953,6 +965,23 @@ pub fn run_3d_walkthrough(
             );
         }
 
+        if let Some(assets) = hud_assets.as_ref() {
+            let layout = &assets.layout;
+            for (tip, id) in scene.hud_prints.drain(..) {
+                let text = hud_strings.get(&id).unwrap_or(&id);
+                let text = crate::hud::expand_keys(text);
+                let (log, style) = if tip {
+                    (&mut tip_log, &layout.tip)
+                } else {
+                    (&mut print_log, &layout.print)
+                };
+                for line in crate::hud::wrap_text(&assets.font, &text, 620.0) {
+                    log.push(style, line);
+                }
+            }
+            tip_log.step(&layout.tip, base_dt);
+            print_log.step(&layout.print, base_dt);
+        }
         if let Some(assets) = hud_assets.as_ref().filter(|_| crosshair_visible(&scene)) {
             let mut target = crate::hud::HudTarget {
                 pixels: &mut fb,
@@ -966,6 +995,8 @@ pub fn run_3d_walkthrough(
             };
             target.draw_hud(assets, &state);
             target.draw_crosshair(&scene.inventory);
+            target.draw_prints(&assets.font, &assets.layout.tip, &tip_log);
+            target.draw_prints(&assets.font, &assets.layout.print, &print_log);
         }
 
         if let (Some((renderer, _)), Some(view)) = (gpu.as_mut(), scene_view) {
@@ -4780,6 +4811,7 @@ mod tests {
             widescreen: crate::scene::Ramp::at(0.0),
             fov_multiplier: crate::scene::Ramp::at(1.0),
             inventory: Default::default(),
+            hud_prints: Vec::new(),
             gravity: None,
         }
     }

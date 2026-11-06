@@ -686,6 +686,8 @@ pub struct LdbScene {
     pub fov_multiplier: Ramp,
     /// The player's weapons, as the `C_PickupWeapon` family of messages leaves them.
     pub inventory: crate::hud::PlayerInventory,
+    /// `MPHM_Print*` messages not yet shown: is it a tip, and the string ID or text.
+    pub hud_prints: Vec<(bool, String)>,
 }
 
 /// A value moving linearly to its target (script verbs with a fade time).
@@ -1163,6 +1165,21 @@ impl LdbScene {
                         self.inventory.set_infinite(&weapon, on);
                     }
                 }
+                true
+            }
+            verb @ ("mphm_print"
+            | "mphm_printdirect"
+            | "mphm_printtip"
+            | "mphm_printtipalways"
+            | "mphm_printtipnym"
+            | "mphm_printbullettimetip"
+            | "mphm_printshootdodgetip") => {
+                let Some(id) = msg.args.first() else {
+                    return false;
+                };
+                let tip = verb.contains("tip");
+                let id = id.trim().trim_matches(['"', '\\']).to_string();
+                self.hud_prints.push((tip, id));
                 true
             }
             "gm_setplayercontrols" => {
@@ -3071,6 +3088,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         widescreen: Ramp::at(0.0),
         fov_multiplier: Ramp::at(1.0),
         inventory: Default::default(),
+        hud_prints: Vec::new(),
         gravity: None,
     })
 }
@@ -3186,6 +3204,7 @@ mod tests {
             widescreen: Ramp::at(0.0),
             fov_multiplier: Ramp::at(1.0),
             inventory: Default::default(),
+            hud_prints: Vec::new(),
             gravity: None,
         }
     }
@@ -4621,6 +4640,26 @@ mod tests {
         assert_eq!(
             scene.music_request.as_deref(),
             Some("elevated_city_ambience")
+        );
+    }
+
+    #[test]
+    fn print_messages_queue_as_tips_or_plain_lines() {
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        for message in [
+            "maxpayne_hudmode->mphm_printtipalways(TIP_07);",
+            "maxpayne_hudmode->MPHM_PrintTip(TIP_12);",
+            "maxpayne_hudmode->mphm_print(\"HUDPRINT_PICKUP_BERETTA\");",
+        ] {
+            assert!(scene.dispatch_message("", message), "{message}");
+        }
+        assert_eq!(
+            scene.hud_prints,
+            [
+                (true, "TIP_07".to_string()),
+                (true, "TIP_12".to_string()),
+                (false, "HUDPRINT_PICKUP_BERETTA".to_string()),
+            ]
         );
     }
 
