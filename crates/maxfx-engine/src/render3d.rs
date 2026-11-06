@@ -730,6 +730,7 @@ pub fn run_3d_walkthrough(
                     action_time = 0.0;
                     rig.action_time = 0.0;
                     action_index = "CHARANIM_SHOOT".to_string();
+                    rig.aim = def.aim_clips.clone();
                 }
                 if let Some(muzzle) = &def.muzzle {
                     scene.effect_queue.push(crate::scene::QueuedEffect {
@@ -1039,6 +1040,7 @@ pub fn run_3d_walkthrough(
                     rig.action = def.reload_clip.clone().filter(|_| !motion.diving());
                     action_time = 0.0;
                     action_index = "CHARANIM_RELOAD".to_string();
+                    rig.aim = None;
                 }
                 reload_cue = def
                     .reload_sound
@@ -1059,6 +1061,7 @@ pub fn run_3d_walkthrough(
         action_time += world_dt;
         if let Some(rig) = player_rig.as_mut() {
             rig.action_time = action_time;
+            rig.aim_pitch = pitch;
             if rig
                 .action
                 .as_ref()
@@ -3801,6 +3804,21 @@ fn spread_aim(dir: [f32; 3], accuracy: f32, seed: &mut u32) -> [f32; 3] {
     spread.map(|c| c / length)
 }
 
+/// A shot's `locals` at `time`, turned toward where the character aims.
+fn aimed_locals(
+    rig: &CharacterRig,
+    locals: crate::kf2::BoneLocals,
+    time: f32,
+) -> crate::kf2::BoneLocals {
+    let Some(aim) = rig.aim.as_ref() else {
+        return locals;
+    };
+    let (clip, how_far) = aim.toward(rig.aim_pitch);
+    let mut aimed = crate::kf2::sample_locals(clip, time);
+    crate::clips::mix_locals(&locals, &mut aimed, how_far);
+    aimed
+}
+
 /// The hierarchy and bone locals of a character now: its clip, with the upper bones of a running
 /// character's action laid over the run.
 fn character_locals(
@@ -3810,9 +3828,13 @@ fn character_locals(
 ) -> Option<(&crate::kf2::Kf2Anim, crate::kf2::BoneLocals)> {
     let clip = character_clip(rig, moving)?;
     let mut locals = crate::kf2::sample_locals(clip, time);
+    if rig.action.is_some() && !moving {
+        locals = aimed_locals(rig, locals, time);
+    }
     if let Some(action) = rig.action.as_ref().filter(|_| moving) {
         let upper = &rig.upper_bones[usize::from(rig.two_handed_bones)];
-        let mut action = crate::kf2::sample_locals(action, rig.action_time);
+        let action = crate::kf2::sample_locals(action, rig.action_time);
+        let mut action = aimed_locals(rig, action, rig.action_time);
         for bone in upper {
             if let Some(local) = action.remove(bone) {
                 locals.insert(bone.clone(), local);
@@ -5093,6 +5115,8 @@ mod tests {
             action: Some(clip("shoot", [0.0; 3])),
             motion: None,
             fade: Default::default(),
+            aim: None,
+            aim_pitch: 0.0,
             two_handed_idle: None,
             two_handed_walk: None,
             two_handed: false,
@@ -5131,6 +5155,8 @@ mod tests {
             action: None,
             motion: Some(std::sync::Arc::new(clip("strafe", [0.0; 3]))),
             fade: Default::default(),
+            aim: None,
+            aim_pitch: 0.0,
             two_handed_idle: None,
             two_handed_walk: None,
             two_handed: false,
@@ -5205,6 +5231,8 @@ mod tests {
             action: Some(two_bones([8.0; 3], [9.0; 3])),
             motion: None,
             fade: Default::default(),
+            aim: None,
+            aim_pitch: 0.0,
             two_handed_idle: None,
             two_handed_walk: None,
             two_handed: false,
@@ -5258,6 +5286,8 @@ mod tests {
             action: None,
             motion: None,
             fade: Default::default(),
+            aim: None,
+            aim_pitch: 0.0,
             two_handed_idle: Some(clip("2_idle", [0.0; 3])),
             two_handed_walk: Some(clip("2_run", [0.0; 3])),
             two_handed: true,
@@ -5281,6 +5311,50 @@ mod tests {
     }
 
     #[test]
+    fn a_shot_turns_toward_where_the_character_aims() {
+        let mesh = crate::kf2::KfsMesh {
+            name: String::new(),
+            vertices: Vec::new(),
+            faces: Vec::new(),
+            material_textures: Vec::new(),
+        };
+        let aimed = |degrees: f32, y: f32| {
+            let (sin, cos) = degrees.to_radians().sin_cos();
+            let mut clip = clip("gun", [0.0, y, 0.0]);
+            clip.bones[0].keys[0].mat = [1.0, 0.0, 0.0, 0.0, cos, -sin, 0.0, sin, cos];
+            clip
+        };
+        let aim = crate::clips::AimClips::new(aimed(-90.0, 0.0), aimed(90.0, 2.0), "gun");
+        let rig = CharacterRig {
+            mesh,
+            skin: None,
+            idle: None,
+            walk: None,
+            bind: None,
+            action: Some(clip("gun", [0.0, 1.0, 0.0])),
+            motion: None,
+            fade: Default::default(),
+            aim: aim.map(std::sync::Arc::new),
+            aim_pitch: -45_f32.to_radians(),
+            two_handed_idle: None,
+            two_handed_walk: None,
+            two_handed: false,
+            max_health: 0,
+            action_time: 0.0,
+            upper_bones: [Vec::new(), Vec::new()],
+            two_handed_bones: false,
+            gun_bones: [String::new(), String::new()],
+        };
+        let (_, locals) = character_locals(&rig, false, 0.0).expect("pose");
+        let (mat, pos) = locals["gun"];
+        assert!((pos[1] - 0.5).abs() < 1e-5, "{pos:?}");
+        assert!(
+            (mat[7] - -45_f32.to_radians().sin()).abs() < 1e-5,
+            "{mat:?}"
+        );
+    }
+
+    #[test]
     fn a_character_starts_a_new_clip_from_its_last_pose() {
         let mesh = crate::kf2::KfsMesh {
             name: String::new(),
@@ -5297,6 +5371,8 @@ mod tests {
             action: None,
             motion: None,
             fade: Default::default(),
+            aim: None,
+            aim_pitch: 0.0,
             two_handed_idle: None,
             two_handed_walk: None,
             two_handed: false,

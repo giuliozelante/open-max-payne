@@ -2,7 +2,9 @@
 //! skin over it. Each clip names its file, how far it carries the character and what it says on
 //! which frame, so everything a character does on the move is data.
 
-use crate::kf2::{lerp3, mat_to_quat, quat_slerp, quat_to_mat, BoneLocals, Kf2Anim};
+use crate::kf2::{
+    compose_world, lerp3, mat_to_quat, quat_slerp, quat_to_mat, sample_locals, BoneLocals, Kf2Anim,
+};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -202,6 +204,49 @@ pub fn blend_seconds(index: &str) -> f32 {
     }
 }
 
+/// A shot's clips for aiming low and high. Each is the shot with the gun turned as far as it goes,
+/// about 90 degrees for Max, so the clips say themselves how far they reach.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AimClips {
+    low: Kf2Anim,
+    high: Kf2Anim,
+    /// Radians `bone` points above level in each.
+    reach: [f32; 2],
+}
+
+impl AimClips {
+    /// `None` when `low` and `high` do not aim `bone` below and above level.
+    pub fn new(low: Kf2Anim, high: Kf2Anim, bone: &str) -> Option<Self> {
+        let pitch = |clip: &Kf2Anim| {
+            let world = compose_world(clip, &sample_locals(clip, 0.0));
+            let (mat, _) = world.get(&bone.to_ascii_lowercase())?;
+            Some(mat[7].clamp(-1.0, 1.0).asin())
+        };
+        let reach = [pitch(&low)?, pitch(&high)?];
+        (reach[0] < 0.0 && reach[1] > 0.0).then_some(Self { low, high, reach })
+    }
+
+    /// The clip toward `pitch` radians, and how far toward it to go.
+    pub fn toward(&self, pitch: f32) -> (&Kf2Anim, f32) {
+        if pitch < 0.0 {
+            (&self.low, (pitch / self.reach[0]).min(1.0))
+        } else {
+            (&self.high, (pitch / self.reach[1]).min(1.0))
+        }
+    }
+}
+
+/// `to` moved back `from`, all of the way at `progress` 0 and none at 1.
+pub fn mix_locals(from: &BoneLocals, to: &mut BoneLocals, progress: f32) {
+    for (bone, (mat, pos)) in to {
+        if let Some((from_mat, from_pos)) = from.get(bone) {
+            let turn = quat_slerp(mat_to_quat(*from_mat), mat_to_quat(*mat), progress);
+            *mat = quat_to_mat(turn);
+            *pos = lerp3(*from_pos, *pos, progress);
+        }
+    }
+}
+
 /// What carries a character from one pose to the next when its clips change.
 #[derive(Debug, Clone, Default)]
 pub struct ClipFade {
@@ -245,25 +290,55 @@ impl ClipFade {
         if self.left <= 0.0 {
             return;
         }
-        let progress = 1.0 - self.left / self.seconds;
-        for (bone, (mat, pos)) in locals {
-            if let Some((from_mat, from_pos)) = self.from.get(bone) {
-                let turn = quat_slerp(mat_to_quat(*from_mat), mat_to_quat(*mat), progress);
-                *mat = quat_to_mat(turn);
-                *pos = lerp3(*from_pos, *pos, progress);
-            }
-        }
+        mix_locals(&self.from, locals, 1.0 - self.left / self.seconds);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kf2::{AnimBone, AnimKeyframe};
 
     fn turned(degrees: f32) -> BoneLocals {
         let (sin, cos) = degrees.to_radians().sin_cos();
         let mat = [cos, sin, 0.0, -sin, cos, 0.0, 0.0, 0.0, 1.0];
         BoneLocals::from([("arm".to_string(), (mat, [degrees, 0.0, 0.0]))])
+    }
+
+    /// One frame with `gun` pointing `degrees` above level.
+    fn aimed(degrees: f32) -> Kf2Anim {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        Kf2Anim {
+            bones: vec![AnimBone {
+                name: "Gun".to_string(),
+                parent: None,
+                duration: 10,
+                fps: 10.0,
+                keys: vec![AnimKeyframe {
+                    frame: 0,
+                    mat: [1.0, 0.0, 0.0, 0.0, cos, -sin, 0.0, sin, cos],
+                    pos: [0.0; 3],
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn aiming_goes_toward_the_clip_that_points_that_way_as_far_as_the_pitch_asks() {
+        let aim = AimClips::new(aimed(-80.0), aimed(40.0), "gun").expect("clips");
+        let (clip, how_far) = aim.toward(-40_f32.to_radians());
+        assert_eq!(clip.bones[0].keys[0].mat, aimed(-80.0).bones[0].keys[0].mat);
+        assert!((how_far - 0.5).abs() < 1e-4, "{how_far}");
+        let (clip, how_far) = aim.toward(10_f32.to_radians());
+        assert_eq!(clip.bones[0].keys[0].mat, aimed(40.0).bones[0].keys[0].mat);
+        assert!((how_far - 0.25).abs() < 1e-4, "{how_far}");
+        assert_eq!(aim.toward(2.0).1, 1.0);
+    }
+
+    #[test]
+    fn clips_that_do_not_aim_opposite_ways_are_not_aim_clips() {
+        assert!(AimClips::new(aimed(10.0), aimed(40.0), "gun").is_none());
+        assert!(AimClips::new(aimed(-10.0), aimed(40.0), "hand").is_none());
     }
 
     #[test]

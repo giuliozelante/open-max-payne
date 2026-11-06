@@ -134,6 +134,10 @@ pub struct CharacterRig {
     pub motion: Option<std::sync::Arc<Kf2Anim>>,
     /// The blend from the last clip to this one.
     pub fade: crate::clips::ClipFade,
+    /// What turns a shot `action` toward `aim_pitch`.
+    pub aim: Option<std::sync::Arc<crate::clips::AimClips>>,
+    /// Radians the character aims above level.
+    pub aim_pitch: f32,
     /// `CHARANIM_2_STAND` and `CHARANIM_2_RUN`, for a `TwoHandedAnimation` weapon.
     pub two_handed_idle: Option<Kf2Anim>,
     pub two_handed_walk: Option<Kf2Anim>,
@@ -1019,6 +1023,8 @@ fn rig_from_mesh(mesh: KfsMesh, skin: Option<SkdSkin>, path: &Path) -> Character
         action: None,
         motion: None,
         fade: Default::default(),
+        aim: None,
+        aim_pitch: 0.0,
         two_handed_idle: load_anim_named(path, &["2_stand.kf2"]),
         two_handed_walk: load_anim_named(path, &["2_run.kf2"]),
         two_handed: false,
