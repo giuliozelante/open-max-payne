@@ -618,6 +618,8 @@ pub struct SceneItem {
     pub item_type: String,
     pub room_id: i32,
     pub pos: [f32; 3],
+    /// Columns of the item's rotation, as `xform_point` takes them.
+    pub rot: [f32; 9],
     /// Set by `LI_ActivateLevelItem`. An inactive item cannot be picked up.
     pub active: bool,
 }
@@ -3062,7 +3064,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
             for _ in 0..icnt {
                 let name = read_str(data, &mut i)?;
                 let _parent = read_str(data, &mut i)?;
-                let pos = read_xform_pos(data, &mut i)?;
+                let (rot, pos) = read_xform(data, &mut i)?;
                 let _x2 = read_xform_pos(data, &mut i)?;
                 let room_id = read_i32(data, &mut i)?;
                 let _unk = read_str(data, &mut i)?;
@@ -3073,6 +3075,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                     item_type,
                     room_id,
                     pos,
+                    rot,
                 });
             }
         }

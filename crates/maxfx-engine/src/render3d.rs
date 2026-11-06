@@ -3674,7 +3674,7 @@ fn placed_items<'a>(
         .filter(|item| !item.taken)
         .filter_map(|item| {
             let mesh = models.get(&item.kind)?;
-            let place = |v: &[f32; 3]| [0, 1, 2].map(|c| v[c] + item.pos[c]);
+            let place = |v: &[f32; 3]| item.world_point(*v);
             Some((mesh, mesh.vertices.iter().map(place).collect(), item.pos))
         })
         .collect()
