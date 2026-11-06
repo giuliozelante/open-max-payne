@@ -348,3 +348,28 @@ particle effect data (`PS_RTParticleEmitter`, `0x77d08e` path) and are not read 
 2. ~~Do static point lights also add to lightmapped level polygons?~~ No (see above, house only).
 3. ~~Dynamic lights: do they enter level-object light lists?~~ Yes, after a shot (second capture above).
 4. Muzzle-flash light parameters (colour, range, lifetime) from the particle effect data behind `0x77d08e`.
+
+## Lightmap filtering (HYPOTHESIS, 2026-11-03)
+
+Both renderers sample lightmaps bilinearly, clamped to the edge (`render3d::sample_lightmap`, and the
+wgpu `lmap_sampler` with linear filtering). Nearest sampling showed each lightmap texel as a hard step.
+In the retail house, the owner sees the same shading change smoothly. The `FILTER_MODE` values passed
+to `addTextureLayer` (`0x1000000`, `0x5000000`) are not decoded, so this rests on that visual
+comparison. Diffuse textures keep nearest sampling until the filter values are read.
+
+## Diffuse texture filtering (2026-11-03)
+
+- **VERIFIED (strings):** the exe and the D3D8 driver carry a user filtering option: `FilteringMode`,
+  `FilteringBilinear`, `FilteringTrilinear`, `FilteringAnisotropic`, `Mipmap Bias`. The driver
+  falls back with "reducing trilinear to bilinear", "reducing anisotropic to trilinear" and "reducing
+  bi/trilinear to point sampling". `P_Material::setDefaultFilter` / `getDefaultFilter` hold the default
+  `FILTER_MODE`, and `P_Map` has a mipmap callback.
+- **Owner's install:** the Wine registry `Video Settings` has no `Filtering Mode` value (so the
+  default applies, UNKNOWN which one) and `Mipmap Bias = 5000` (slider midpoint).
+- **Retail screenshots** (`~/Pictures/omp-compare/original`): wallpaper and water are smoothed and
+  blur with distance, consistent with bilinear plus mipmaps.
+
+**Engine:** the wgpu renderer samples diffuse textures trilinearly over box-filtered mip levels
+(`gpu::mip_chain`). The software renderer samples them bilinearly (`render3d::sample_texture`), without
+mipmaps. Lightmaps keep their linear sampler without mipmaps. The sky strip and the screen-space layers
+stay nearest. **HYPOTHESIS:** trilinear as the retail default.

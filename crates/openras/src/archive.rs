@@ -65,50 +65,15 @@ impl RasArchive {
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, RasError> {
-        if data.len() < HEADER_SIZE || &data[..4] != MAGIC.as_slice() {
-            return Err(RasError::Msg("Not a RAS archive".into()));
-        }
-        let seed = i32::from_le_bytes(data[4..8].try_into().unwrap());
-        let meta = decrypt_with_seed(&data[8..HEADER_SIZE], seed);
-        let mut hdr = data[..HEADER_SIZE].to_vec();
-        hdr[8..].copy_from_slice(&meta);
-
-        let file_count = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
-        let dir_count = u32::from_le_bytes(hdr[12..16].try_into().unwrap());
-        let file_table_size = u32::from_le_bytes(hdr[16..20].try_into().unwrap()) as usize;
-        let dir_table_size = u32::from_le_bytes(hdr[20..24].try_into().unwrap()) as usize;
-        let version = f32::from_bits(u32::from_le_bytes(hdr[0x18..0x1C].try_into().unwrap()));
-        let header_crc = u32::from_le_bytes(hdr[0x1C..0x20].try_into().unwrap());
-        let file_crc = u32::from_le_bytes(hdr[0x20..0x24].try_into().unwrap());
-        let dir_crc = u32::from_le_bytes(hdr[0x24..0x28].try_into().unwrap());
-        let compatibility = u32::from_le_bytes(hdr[0x28..0x2C].try_into().unwrap());
-
-        let mut check = hdr.clone();
-        check[0x1C..0x20].copy_from_slice(&0u32.to_le_bytes());
-        if crc32fast::hash(&check) != header_crc {
-            return Err(RasError::Msg(
-                "Header CRC mismatch (archive corrupted or wrong decrypt)".into(),
-            ));
-        }
-
-        let mut off = HEADER_SIZE;
-        if off + file_table_size + dir_table_size > data.len() {
-            return Err(RasError::Msg("Truncated archive tables".into()));
-        }
-        let ft = decrypt_with_seed(&data[off..off + file_table_size], seed);
-        off += file_table_size;
-        let dt = decrypt_with_seed(&data[off..off + dir_table_size], seed);
-        off += dir_table_size;
-
-        if crc32fast::hash(&ft) != file_crc {
-            return Err(RasError::Msg("File table CRC mismatch".into()));
-        }
-        if crc32fast::hash(&dt) != dir_crc {
-            return Err(RasError::Msg("Directory table CRC mismatch".into()));
-        }
-
-        let directories = parse_dirs(&dt, dir_count as usize)?;
-        let files_meta = parse_files(&ft, file_count as usize)?;
+        let Tables {
+            seed,
+            version,
+            compatibility,
+            directories,
+            files: files_meta,
+            payload_start,
+        } = parse_tables(data)?;
+        let mut off = payload_start;
 
         let mut files = Vec::with_capacity(files_meta.len());
         for meta_f in files_meta {
@@ -469,4 +434,166 @@ fn parse_files(ft: &[u8], count: usize) -> Result<Vec<FileMeta>, RasError> {
         });
     }
     Ok(out)
+}
+
+/// Header and tables of an archive; members follow at `payload_start`, one after another.
+struct Tables {
+    seed: i32,
+    version: f32,
+    compatibility: u32,
+    directories: Vec<RasDirEntry>,
+    files: Vec<FileMeta>,
+    payload_start: usize,
+}
+
+/// `data` must cover at least the header and both tables ([`tables_end`]).
+fn parse_tables(data: &[u8]) -> Result<Tables, RasError> {
+    if data.len() < HEADER_SIZE || &data[..4] != MAGIC.as_slice() {
+        return Err(RasError::Msg("Not a RAS archive".into()));
+    }
+    let seed = i32::from_le_bytes(data[4..8].try_into().unwrap());
+    let meta = decrypt_with_seed(&data[8..HEADER_SIZE], seed);
+    let mut hdr = data[..HEADER_SIZE].to_vec();
+    hdr[8..].copy_from_slice(&meta);
+
+    let file_count = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
+    let dir_count = u32::from_le_bytes(hdr[12..16].try_into().unwrap());
+    let file_table_size = u32::from_le_bytes(hdr[16..20].try_into().unwrap()) as usize;
+    let dir_table_size = u32::from_le_bytes(hdr[20..24].try_into().unwrap()) as usize;
+    let version = f32::from_bits(u32::from_le_bytes(hdr[0x18..0x1C].try_into().unwrap()));
+    let header_crc = u32::from_le_bytes(hdr[0x1C..0x20].try_into().unwrap());
+    let file_crc = u32::from_le_bytes(hdr[0x20..0x24].try_into().unwrap());
+    let dir_crc = u32::from_le_bytes(hdr[0x24..0x28].try_into().unwrap());
+    let compatibility = u32::from_le_bytes(hdr[0x28..0x2C].try_into().unwrap());
+
+    let mut check = hdr.clone();
+    check[0x1C..0x20].copy_from_slice(&0u32.to_le_bytes());
+    if crc32fast::hash(&check) != header_crc {
+        return Err(RasError::Msg(
+            "Header CRC mismatch (archive corrupted or wrong decrypt)".into(),
+        ));
+    }
+
+    let mut off = HEADER_SIZE;
+    if off + file_table_size + dir_table_size > data.len() {
+        return Err(RasError::Msg("Truncated archive tables".into()));
+    }
+    let ft = decrypt_with_seed(&data[off..off + file_table_size], seed);
+    off += file_table_size;
+    let dt = decrypt_with_seed(&data[off..off + dir_table_size], seed);
+    off += dir_table_size;
+
+    if crc32fast::hash(&ft) != file_crc {
+        return Err(RasError::Msg("File table CRC mismatch".into()));
+    }
+    if crc32fast::hash(&dt) != dir_crc {
+        return Err(RasError::Msg("Directory table CRC mismatch".into()));
+    }
+
+    Ok(Tables {
+        seed,
+        version,
+        compatibility,
+        directories: parse_dirs(&dt, dir_count as usize)?,
+        files: parse_files(&ft, file_count as usize)?,
+        payload_start: off,
+    })
+}
+
+/// Byte length of the header plus both tables, from the header alone.
+fn tables_end(header: &[u8]) -> Result<usize, RasError> {
+    if header.len() < HEADER_SIZE || &header[..4] != MAGIC.as_slice() {
+        return Err(RasError::Msg("Not a RAS archive".into()));
+    }
+    let seed = i32::from_le_bytes(header[4..8].try_into().unwrap());
+    let meta = decrypt_with_seed(&header[8..HEADER_SIZE], seed);
+    let file_table_size = u32::from_le_bytes(meta[8..12].try_into().unwrap()) as usize;
+    let dir_table_size = u32::from_le_bytes(meta[12..16].try_into().unwrap()) as usize;
+    Ok(HEADER_SIZE + file_table_size + dir_table_size)
+}
+
+/// One member's place in the archive file.
+#[derive(Debug, Clone)]
+struct IndexedMember {
+    win_path: String,
+    offset: u64,
+    compressed_size: usize,
+    uncompressed_size: usize,
+    mode: u32,
+}
+
+/// The tables of an archive on disk: one member is read and decoded on request, so a lookup
+/// costs one seek instead of decoding every member ([`RasArchive::read`]).
+#[derive(Debug, Clone)]
+pub struct RasIndex {
+    path: PathBuf,
+    members: Vec<IndexedMember>,
+}
+
+impl RasIndex {
+    pub fn open(path: &Path) -> Result<Self, RasError> {
+        use std::io::Read;
+        let mut file = fs::File::open(path)?;
+        let mut head = vec![0u8; HEADER_SIZE];
+        file.read_exact(&mut head)?;
+        head.resize(tables_end(&head)?, 0);
+        file.read_exact(&mut head[HEADER_SIZE..])?;
+        let tables = parse_tables(&head)?;
+        let mut offset = tables.payload_start as u64;
+        let members = tables
+            .files
+            .into_iter()
+            .map(|f| {
+                let dir = tables
+                    .directories
+                    .get(f.dir_index as usize)
+                    .map_or("\\", |d| d.name.as_str());
+                let member = IndexedMember {
+                    win_path: format!("{dir}{}", f.name),
+                    offset,
+                    compressed_size: f.compressed_size,
+                    uncompressed_size: f.uncompressed_size,
+                    mode: f.mode,
+                };
+                offset += f.compressed_size as u64;
+                member
+            })
+            .collect();
+        Ok(Self {
+            path: path.to_path_buf(),
+            members,
+        })
+    }
+
+    /// The decoded bytes of `win_path` (`\dir\name`, any case), `None` when absent.
+    pub fn read_member(&self, win_path: &str) -> Result<Option<Vec<u8>>, RasError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut want = win_path.replace('/', "\\");
+        if !want.starts_with('\\') {
+            want.insert(0, '\\');
+        }
+        let Some(m) = self
+            .members
+            .iter()
+            .find(|m| m.win_path.eq_ignore_ascii_case(&want))
+        else {
+            return Ok(None);
+        };
+        let mut file = fs::File::open(&self.path)?;
+        file.seek(SeekFrom::Start(m.offset))?;
+        let mut blob = vec![0u8; m.compressed_size];
+        file.read_exact(&mut blob)?;
+        let mut payload = match m.mode {
+            MODE_STORED => blob,
+            MODE_LZSS => lzss_decompress(&blob, Some(m.uncompressed_size)),
+            other => {
+                return Err(RasError::Msg(format!(
+                    "Unsupported compression mode {other} for {}",
+                    m.win_path
+                )))
+            }
+        };
+        payload.truncate(m.uncompressed_size);
+        Ok(Some(payload))
+    }
 }

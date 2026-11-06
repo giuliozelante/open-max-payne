@@ -2641,6 +2641,7 @@ dependencies = [
  "bytemuck",
  "jpeg-decoder",
  "minifb",
+ "openpfx",
  "openras",
  "pollster",
  "thiserror 2.0.21",

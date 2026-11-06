@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 openras = { path = "../openras" }
+openpfx = { path = "../openpfx" }
 thiserror = "2"
 minifb = "0.28"
 jpeg-decoder = "0.3"

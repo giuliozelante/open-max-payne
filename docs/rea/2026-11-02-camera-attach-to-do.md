@@ -46,6 +46,54 @@ colours are `0xRRGGBBAA` (`0x0` → `0x000000ff` = fade to black). The engine ho
 the fade once a fade to alpha 0 ends. HYPOTHESIS from the argument patterns (all 189 occurrences in the retail `.ldb` files, FSM and track lists, fit); the
 handler has not been read. `MPHM_FlashToColor` (4 args, 101 uses) is not handled.
 
+## `CAM_AnimateInPlace` (camera paths)
+
+`data\database\camerapaths\camerapaths.txt` names blocks. Each block has `[Attributes]` (FadeInTime,
+FadeOutTime, Abortable), an `[Animationset]` of `[Animation]` entries (`Index`, `Filename`) and an `[Exit]` list.
+`Filename` is relative to `data\database\camerapaths\`. The name does not always match the file: `shake_quick`
+plays `effects\explosion.kf2` and `shake_normal` plays `effects\shake_quick.kf2` (VERIFIED, retail text).
+
+Each file is an ordinary skeletal KF2 with one `0x00010012` v5 channel, `Camera01`, at 30 fps. The shakes are
+small jitters (centimetres, a few degrees) whose first and last keys are equal and whose first rotation is
+identity. `death_01` starts 1.9 m in front of the target and turns 180° to look back at it (VERIFIED, parsed
+keys).
+
+All 313 `CAM_AnimateInPlace` calls in the shipped levels go to `player`: `shake_quick` 269, `shake_normal` 26,
+`shake_slow` 11, `rumble_medium` 4, `rumble_low` 2, `shake_subway` 1.
+
+The handler `0x672c10` first checks three camera vcalls (`+0x8`, `+0xc` and `+0x10`) and returns if any of
+them is true. It then looks the block up by name (`0x54a470`). How the path is composed each frame has not been
+read.
+
+**Engine (HYPOTHESIS, from the tutorial's "relative to the current player camera"):** the path is applied in
+camera space on top of the player view. The offset is measured from the first key, with x right, y up and
+z forward (the `CAM_AttachToDO` axes). A new block replaces a running one. The path runs in game time and ends
+with its duration. An attached DO camera takes precedence.
+
+## `CAM_AnimateParented` (death cams)
+
+All 64 calls are enemy death cams (`Death_01..03`, `special_killed`). Most come from a character's own
+`OnDeath` list (`::end_combat::boris->CAM_AnimateParented(death_03)`). The rest come from a level death
+counter: each enemy's `OnDeath` sends `::storage::death_counter->fsm_Send(add1)`. The counter steps through
+its states, and in its last state it sends `::storage::e1->CAM_AnimateParented(death_03)`, so the last kill
+gets the camera.
+
+The character record in the `.ldb` holds four message lists after the skin. They were identified by their
+content across every shipped level (STRONGLY SUPPORTED; the X_LevelDBCharacter reader has not been read):
+
+| List | Tab | Evidence |
+|------|-----|----------|
+| 1 | StartUp | `c_setstatemachine`, `c_removeallweapons`, `c_pickupweapon` |
+| 2 | OnDeath | all 99 death counters and death cams; 141 `A_StopAll3DSounds`, which the tutorial says belongs on OnDeath |
+| 3 | OnActivate | 149 alert shouts, combat state machines |
+| 4 | UNKNOWN | — |
+
+**Engine (HYPOTHESIS for the frame):** when an enemy's health reaches 0, its `OnDeath` list is sent. A death
+cam plays its `Camera01` path in the target's frame, standing at its feet and facing its yaw (+z), with x right,
+y up and z forward. `death_01` starts 1.9 m in front at 0.63 m, faces back and circles to the side. The death
+cam ends with its path. An attached DO camera still takes precedence, and the death cam takes precedence over a
+shake.
+
 ## Open
 
 - The view pose has been checked only in offline engine frames, not against a retail frame.
@@ -56,4 +104,4 @@ handler has not been read. `MPHM_FlashToColor` (4 args, 101 uses) is not handled
   `x_modeswitch->s_modeswitch(graphicnovel)`, which closes the intro. The old flyover covered only the last shot.
 - `::street02::camera1` and P3L6 `altitude::camera1` along +z once their tracks run.
 - Blend between weights (does 50 mix the views?), arg 1, field of view (`GM_ChangeFOV`).
-- `CAM_AnimateInPlace` (184) and `CAM_AnimateParented` (64).
+- Camera path fades, `Abortable`, the `[Exit]` lists and the slow motion during death cams.

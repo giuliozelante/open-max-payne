@@ -6,7 +6,7 @@
 
 use crate::kf2::KfsMesh;
 use crate::render3d::{
-    dynamic_mesh_drawn, dynamic_world, poly_policy, DETAIL_OFFSET_M, FAR_Z, FRAME_H, FRAME_W,
+    back_plane, dynamic_mesh_drawn, dynamic_world, poly_policy, DETAIL_OFFSET_M, FRAME_H, FRAME_W,
     NEAR_Z,
 };
 use crate::scene::LdbScene;
@@ -36,6 +36,8 @@ pub struct StaticBatch {
     pub depth_bias: f32,
     /// Dynamic mesh index, `None` for static room geometry.
     pub mesh: Option<usize>,
+    /// Room of static geometry (`render3d::static_meshes_in_view`), `None` for dynamic meshes.
+    pub room: Option<i32>,
     /// Alpha-blended after the alpha test (`BlendedAlphaTest`).
     pub blended: bool,
     pub verts: Vec<GpuVertex>,
@@ -173,7 +175,7 @@ fn window_targets(
         &renderer.device,
         &renderer.image_layout,
         &color.create_view(&Default::default()),
-        &renderer.binder.tex_sampler,
+        &renderer.binder.image_sampler,
     );
     (color, depth, group)
 }
@@ -246,7 +248,7 @@ fn fullscreen_pipeline(
 /// `paint_sky_strip` per pixel: the view direction through the pixel centre, then
 /// `sky_strip_uv`. Without a sphere, the flat two-tone background of the software path.
 const SKY_SHADER: &str = r#"
-struct Camera { pos: vec4f, right: vec4f, up: vec4f, fwd: vec4f, params: vec4f, params2: vec4f };
+struct Camera { pos: vec4f, right: vec4f, up: vec4f, fwd: vec4f, params: vec4f, params2: vec4f, fog: vec4f, fog_range: vec4f };
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(1) @binding(0) var img: texture_2d<f32>;
 @group(1) @binding(1) var img_sampler: sampler;
@@ -306,6 +308,8 @@ struct Binder {
     model_layout: wgpu::BindGroupLayout,
     tex_sampler: wgpu::Sampler,
     lmap_sampler: wgpu::Sampler,
+    /// Nearest, for screen-space images (frame layers, render targets) and the sky strip.
+    image_sampler: wgpu::Sampler,
     blank: wgpu::TextureView,
 }
 
@@ -391,51 +395,99 @@ struct CharacterCache {
 pub struct GpuCharacter<'a> {
     pub mesh: &'a KfsMesh,
     pub verts: Vec<[f32; 3]>,
+    /// Lying dead: drawn two-sided (`character_face_normal`).
+    pub dead: bool,
     /// Per-vertex diffuse from `character_vertex_light`.
     pub light: Vec<[f32; 3]>,
 }
 
+/// Box-filtered mip levels, from the full image down to 1x1 (`(width, height, pixels)`).
+fn mip_chain(width: u32, height: u32, pixels: &[u32]) -> Vec<(u32, u32, Vec<u32>)> {
+    let mut levels = vec![(width, height, pixels.to_vec())];
+    while let Some((w, h, src)) = levels.last().filter(|l| l.0 > 1 || l.1 > 1) {
+        let (w, h) = (*w, *h);
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let texel = |x: u32, y: u32| src[(y.min(h - 1) * w + x.min(w - 1)) as usize];
+        let mut out = Vec::with_capacity((nw * nh) as usize);
+        for y in 0..nh {
+            for x in 0..nw {
+                let quad = [
+                    texel(2 * x, 2 * y),
+                    texel(2 * x + 1, 2 * y),
+                    texel(2 * x, 2 * y + 1),
+                    texel(2 * x + 1, 2 * y + 1),
+                ];
+                let channel = |shift: u32| {
+                    let sum: u32 = quad.iter().map(|p| (p >> shift) & 0xff).sum();
+                    ((sum + 2) / 4) << shift
+                };
+                out.push(channel(24) | channel(16) | channel(8) | channel(0));
+            }
+        }
+        levels.push((nw, nh, out));
+    }
+    levels
+}
+
+/// Upload an image; `mipmaps` adds the `mip_chain` levels (diffuse textures, sampled trilinearly).
 fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     width: u32,
     height: u32,
     pixels: &[u32],
+    mipmaps: bool,
 ) -> wgpu::TextureView {
-    let size = wgpu::Extent3d {
-        width,
-        height,
-        depth_or_array_layers: 1,
+    let levels = if mipmaps {
+        mip_chain(width, height, pixels)
+    } else {
+        vec![(width, height, pixels.to_vec())]
     };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
-        size,
-        mip_level_count: 1,
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: levels.len() as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let bytes: Vec<u8> = pixels
-        .iter()
-        .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8])
-        .collect();
-    queue.write_texture(
-        texture.as_image_copy(),
-        &bytes,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4 * width),
-            rows_per_image: Some(height),
-        },
-        size,
-    );
+    for (mip_level, (w, h, level)) in levels.iter().enumerate() {
+        let bytes: Vec<u8> = level
+            .iter()
+            .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8])
+            .collect();
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: mip_level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * w),
+                rows_per_image: Some(*h),
+            },
+            wgpu::Extent3d {
+                width: *w,
+                height: *h,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
     texture.create_view(&Default::default())
 }
 
 struct GpuDraw {
     mesh: Option<usize>,
+    room: Option<i32>,
     writes_z: bool,
     blended: bool,
     vertices: wgpu::Buffer,
@@ -454,6 +506,10 @@ struct CameraUniform {
     params: [f32; 4],
     /// x = near plane, y = has sky, z/w = frame width/height (sky directions).
     params2: [f32; 4],
+    /// Fog colour (0..1) in xyz, w = fog on; `render3d::apply_fog` in the fragment stage.
+    fog: [f32; 4],
+    /// x = fog start, y = fog end (view depth).
+    fog_range: [f32; 4],
 }
 
 #[repr(C)]
@@ -478,12 +534,12 @@ impl ModelUniform {
         }
     }
 
-    /// Identity placement, no culling, per-vertex light (characters).
+    /// Identity placement, back-face cull, per-vertex light (characters).
     fn vertex_lit() -> Self {
         let mut m = Self::new(
             [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             [0.0; 3],
-            false,
+            true,
         );
         m.flags[1] = 1.0;
         m
@@ -500,7 +556,7 @@ struct BatchUniform {
 }
 
 const SHADER: &str = r#"
-struct Camera { pos: vec4f, right: vec4f, up: vec4f, fwd: vec4f, params: vec4f, params2: vec4f };
+struct Camera { pos: vec4f, right: vec4f, up: vec4f, fwd: vec4f, params: vec4f, params2: vec4f, fog: vec4f, fog_range: vec4f };
 struct Batch { params: vec4f, params2: vec4f };
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(1) @binding(0) var<uniform> batch: Batch;
@@ -563,7 +619,7 @@ struct Frag { @location(0) color: vec4f, @builtin(frag_depth) depth: f32 };
 fn fs(i: Out) -> Frag {
     var base = vec4f(0.533, 0.6, 0.667, 1.0);
     if batch.params.z > 0.5 {
-        base = textureSample(tex, tex_sampler, fract(i.uv));
+        base = textureSample(tex, tex_sampler, i.uv);
     }
     if batch.params.x >= 0.0 && base.a < batch.params.x {
         discard;
@@ -571,6 +627,12 @@ fn fs(i: Out) -> Frag {
     var rgb = base.rgb * i.shade;
     if batch.params.w > 0.5 && cam.params.z > 0.5 {
         rgb = base.rgb * textureSample(lmap, lmap_sampler, clamp(i.luv, vec2f(0.0), vec2f(1.0))).rgb;
+    }
+    if cam.fog.w > 0.5 {
+        // render3d::fog_amount: linear in view depth, a step when end <= start.
+        let span = cam.fog_range.y - cam.fog_range.x;
+        let k = select(step(cam.fog_range.y, i.vz), clamp((i.vz - cam.fog_range.x) / span, 0.0, 1.0), span > 0.0);
+        rgb = mix(rgb, cam.fog.rgb, k);
     }
     var f: Frag;
     // Blended batches (BlendedAlphaTest) hand the texel alpha to the blend stage.
@@ -587,6 +649,26 @@ fn frame_rgba(pixels: &[u32], transparent: Option<u32>) -> Vec<u8> {
         .flat_map(|&p| {
             let a = if Some(p) == transparent { 0 } else { 255 };
             [(p >> 16) as u8, (p >> 8) as u8, p as u8, a]
+        })
+        .collect()
+}
+
+/// The HUD layer with the screen fade on it: clear pixels carry the fade colour at its alpha
+/// (alpha-blended over the scene), drawn HUD pixels get the fade mixed in and stay opaque.
+fn overlay_rgba(hud: &[u32], fade: Option<[u8; 4]>) -> Vec<u8> {
+    let Some(fade) = fade else {
+        return frame_rgba(hud, Some(HUD_CLEAR));
+    };
+    let mut faded = hud.to_vec();
+    crate::render3d::blend_screen(&mut faded, fade);
+    hud.iter()
+        .zip(&faded)
+        .flat_map(|(&p, &f)| {
+            if p == HUD_CLEAR {
+                fade
+            } else {
+                [(f >> 16) as u8, (f >> 8) as u8, f as u8, 255]
+            }
         })
         .collect()
 }
@@ -775,29 +857,39 @@ impl GpuRenderer {
             }],
         });
 
-        let sampler = |address| {
+        let sampler = |address, filter| {
             device.create_sampler(&wgpu::SamplerDescriptor {
                 address_mode_u: address,
                 address_mode_v: address,
                 address_mode_w: address,
+                mag_filter: filter,
+                min_filter: filter,
+                mipmap_filter: match filter {
+                    wgpu::FilterMode::Linear => wgpu::MipmapFilterMode::Linear,
+                    wgpu::FilterMode::Nearest => wgpu::MipmapFilterMode::Nearest,
+                },
                 ..Default::default()
             })
         };
-        let tex_sampler = sampler(wgpu::AddressMode::Repeat);
-        let lmap_sampler = sampler(wgpu::AddressMode::ClampToEdge);
+        // Retail filters diffuse textures (`FilteringMode`: bilinear, trilinear or anisotropic; the
+        // default is not read yet). Trilinear over `mip_chain` levels.
+        let tex_sampler = sampler(wgpu::AddressMode::Repeat, wgpu::FilterMode::Linear);
+        // `render3d::sample_lightmap`: lightmaps are filtered, so their shading is smooth.
+        let lmap_sampler = sampler(wgpu::AddressMode::ClampToEdge, wgpu::FilterMode::Linear);
         let binder = Binder {
             batch_layout,
             model_layout,
             tex_sampler,
             lmap_sampler,
-            blank: upload(&device, &queue, 1, 1, &[0xffff_ffff]),
+            image_sampler: sampler(wgpu::AddressMode::Repeat, wgpu::FilterMode::Nearest),
+            blank: upload(&device, &queue, 1, 1, &[0xffff_ffff], false),
         };
         let textures: Vec<_> = scene
             .textures
             .iter()
             .map(|t| {
                 (t.width > 0 && t.height > 0)
-                    .then(|| upload(&device, &queue, t.width, t.height, &t.pixels))
+                    .then(|| upload(&device, &queue, t.width, t.height, &t.pixels, true))
             })
             .collect();
         let lightmaps: Vec<_> = scene
@@ -805,7 +897,7 @@ impl GpuRenderer {
             .iter()
             .map(|l| {
                 (l.width > 0 && l.height > 0)
-                    .then(|| upload(&device, &queue, l.width, l.height, &l.pixels))
+                    .then(|| upload(&device, &queue, l.width, l.height, &l.pixels, false))
             })
             .collect();
 
@@ -852,6 +944,7 @@ impl GpuRenderer {
             queue.write_buffer(&vertices, 0, bytemuck::cast_slice(&batch.verts));
             draws.push(GpuDraw {
                 mesh: batch.mesh,
+                room: batch.room,
                 writes_z: batch.writes_z,
                 blended: batch.blended,
                 vertices,
@@ -932,7 +1025,7 @@ impl GpuRenderer {
                 view_formats: &[],
             });
             let view = texture.create_view(&Default::default());
-            let group = image_group(&device, &image_layout, &view, &binder.tex_sampler);
+            let group = image_group(&device, &image_layout, &view, &binder.image_sampler);
             (texture, group)
         };
         let background_image = frame_image();
@@ -955,7 +1048,7 @@ impl GpuRenderer {
             None,
             true,
         );
-        let sky_group = image_group(&device, &image_layout, &binder.blank, &binder.tex_sampler);
+        let sky_group = image_group(&device, &image_layout, &binder.blank, &binder.image_sampler);
         Self {
             device,
             queue,
@@ -1068,12 +1161,13 @@ impl GpuRenderer {
             self.depth_out.slice(..).get_mapped_range(),
         ) {
             let depths: &[f32] = bytemuck::cast_slice(&depths);
+            let far = back_plane(scene.fog);
             for (i, (rgba, &d)) in colors.as_chunks::<4>().0.iter().zip(depths).enumerate() {
                 if d >= 1.0 {
                     continue;
                 }
                 fb[i] = (u32::from(rgba[0]) << 16) | (u32::from(rgba[1]) << 8) | u32::from(rgba[2]);
-                zb[i] = d * FAR_Z;
+                zb[i] = d * far;
             }
         }
         self.color_out.unmap();
@@ -1085,7 +1179,7 @@ impl GpuRenderer {
 pub fn build_dynamic_batches(scene: &LdbScene) -> Vec<StaticBatch> {
     let mut batches = Vec::new();
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
-        add_polys(scene, &dm.polys, [0.0; 3], Some(idx), &mut batches);
+        add_polys(scene, &dm.polys, [0.0; 3], Some(idx), None, &mut batches);
     }
     batches
 }
@@ -1100,6 +1194,8 @@ struct CharacterDraw {
 /// Per-frame scene state: which dynamic meshes draw, and the character draws.
 struct SceneFrame {
     visible: Vec<bool>,
+    /// Rooms whose static batches are drawn (`render3d::static_meshes_in_view`).
+    rooms_in_view: std::collections::BTreeSet<i32>,
     characters: Vec<CharacterDraw>,
 }
 
@@ -1125,9 +1221,20 @@ impl GpuRenderer {
                 fov_scale / (w * 0.5),
                 fov_scale / (h * 0.5),
                 if use_lightmaps { 1.0 } else { 0.0 },
-                FAR_Z,
+                back_plane(scene.fog),
             ],
             params2: [NEAR_Z, if self.sky.1 { 1.0 } else { 0.0 }, w, h],
+            fog: scene.fog.map_or([0.0; 4], |fog| {
+                [
+                    fog.color[0] / 255.0,
+                    fog.color[1] / 255.0,
+                    fog.color[2] / 255.0,
+                    1.0,
+                ]
+            }),
+            fog_range: scene
+                .fog
+                .map_or([0.0; 4], |fog| [fog.start, fog.end, 0.0, 0.0]),
         };
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&camera));
@@ -1146,8 +1253,12 @@ impl GpuRenderer {
                     .write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
             }
         }
+        let rooms_in_view = crate::render3d::static_meshes_in_view(scene, scene.attached_camera)
+            .filter_map(|sm| sm.room_id)
+            .collect();
         SceneFrame {
             visible,
+            rooms_in_view,
             characters: character_draws,
         }
     }
@@ -1168,6 +1279,9 @@ impl GpuRenderer {
                 .iter()
                 .filter(|d| d.writes_z == writes_z && d.blended == blended)
             {
+                if draw.room.is_some_and(|r| !frame.rooms_in_view.contains(&r)) {
+                    continue;
+                }
                 let model = match draw.mesh {
                     Some(i) if !frame.visible.get(i).copied().unwrap_or(false) => continue,
                     Some(i) => i + 1,
@@ -1212,7 +1326,7 @@ impl GpuRenderer {
     ) {
         surface.resize(self, window_size.0, window_size.1);
         let frame = view.map(|v| self.prepare_scene(scene, v, use_lightmaps, characters));
-        self.upload_layers(background, hud);
+        self.upload_layers(background, hud, scene.screen_fade.map(|fade| fade.color()));
         let output = match surface.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -1269,7 +1383,14 @@ impl GpuRenderer {
                     .map(|m| {
                         let tex = ch.mesh.material_textures.get(m).and_then(Option::as_ref);
                         let view = tex.filter(|t| t.width > 0 && t.height > 0).map(|t| {
-                            upload(&self.device, &self.queue, t.width, t.height, &t.pixels)
+                            upload(
+                                &self.device,
+                                &self.queue,
+                                t.width,
+                                t.height,
+                                &t.pixels,
+                                true,
+                            )
                         });
                         let uniform = BatchUniform {
                             params: [-1.0, 0.0, if view.is_some() { 1.0 } else { 0.0 }, 0.0],
@@ -1297,6 +1418,9 @@ impl GpuRenderer {
             for face in &ch.mesh.faces {
                 let material = face.mat_index.min(materials - 1);
                 let out = by_material.entry(material).or_default();
+                let normal =
+                    crate::render3d::character_face_normal(&ch.verts, face.indices, ch.dead);
+                let cull_ref = ch.verts.get(face.indices[0]).copied().unwrap_or([0.0; 3]);
                 for (k, &i) in face.indices.iter().enumerate() {
                     let Some(&pos) = ch.verts.get(i) else {
                         continue;
@@ -1305,8 +1429,8 @@ impl GpuRenderer {
                         pos,
                         uv: face.uvs[k],
                         luv: [0.5, 0.5],
-                        cull_ref: pos,
-                        normal: [0.0; 3],
+                        cull_ref,
+                        normal,
                         light: ch.light.get(i).copied().unwrap_or([1.0; 3]),
                     });
                 }
@@ -1350,20 +1474,27 @@ impl GpuRenderer {
 impl GpuRenderer {
     /// The level's world sphere strip (`sky_strip_uv`), or `None` for the flat background.
     pub fn set_sky(&mut self, sky: Option<&crate::scene::DecodedTexture>) {
-        let view = sky
-            .filter(|t| t.width > 0 && t.height > 0)
-            .map(|t| upload(&self.device, &self.queue, t.width, t.height, &t.pixels));
+        let view = sky.filter(|t| t.width > 0 && t.height > 0).map(|t| {
+            upload(
+                &self.device,
+                &self.queue,
+                t.width,
+                t.height,
+                &t.pixels,
+                false,
+            )
+        });
         let group = image_group(
             &self.device,
             &self.image_layout,
             view.as_ref().unwrap_or(&self.binder.blank),
-            &self.binder.tex_sampler,
+            &self.binder.image_sampler,
         );
         self.sky = (group, view.is_some());
     }
 
-    /// Upload `background` (when given) and `hud` into their frame images.
-    fn upload_layers(&self, background: Option<&[u32]>, hud: &[u32]) {
+    /// Upload `background` (when given) and `hud`, with the screen fade on it, into their frame images.
+    fn upload_layers(&self, background: Option<&[u32]>, hud: &[u32], fade: Option<[u8; 4]>) {
         let size = wgpu::Extent3d {
             width: FRAME_W as u32,
             height: FRAME_H as u32,
@@ -1374,14 +1505,16 @@ impl GpuRenderer {
             bytes_per_row: Some(4 * FRAME_W as u32),
             rows_per_image: Some(FRAME_H as u32),
         };
-        let mut layers = vec![(&self.overlay_image.0, hud, Some(HUD_CLEAR))];
+        self.queue.write_texture(
+            self.overlay_image.0.as_image_copy(),
+            &overlay_rgba(hud, fade),
+            layout,
+            size,
+        );
         if let Some(bg) = background {
-            layers.push((&self.background_image.0, bg, None));
-        }
-        for (image, pixels, transparent) in layers {
             self.queue.write_texture(
-                image.as_image_copy(),
-                &frame_rgba(pixels, transparent),
+                self.background_image.0.as_image_copy(),
+                &frame_rgba(bg, None),
                 layout,
                 size,
             );
@@ -1449,7 +1582,7 @@ impl GpuRenderer {
         hud: &[u32],
     ) -> Vec<u32> {
         let frame = view.map(|v| self.prepare_scene(scene, v, use_lightmaps, characters));
-        self.upload_layers(background, hud);
+        self.upload_layers(background, hud, scene.screen_fade.map(|fade| fade.color()));
         let color = self.color.create_view(&Default::default());
         let depth = self.depth.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -1503,12 +1636,19 @@ impl GpuRenderer {
 pub fn build_static_batches(scene: &LdbScene) -> Vec<StaticBatch> {
     let mut batches = Vec::new();
     for sm in &scene.static_meshes {
-        add_polys(scene, &sm.polys, sm.world_origin, None, &mut batches);
+        add_polys(
+            scene,
+            &sm.polys,
+            sm.world_origin,
+            None,
+            sm.room_id,
+            &mut batches,
+        );
     }
     batches
 }
 
-/// Texture, lightmap, alpha reference, writes depth, detail offset, dynamic mesh.
+/// Texture, lightmap, alpha reference, writes depth, detail offset, dynamic mesh, blended, room.
 type BatchKey = (
     Option<usize>,
     Option<usize>,
@@ -1517,6 +1657,7 @@ type BatchKey = (
     i32,
     Option<usize>,
     bool,
+    Option<i32>,
 );
 
 fn add_polys(
@@ -1524,6 +1665,7 @@ fn add_polys(
     polys: &[crate::scene::ScenePoly],
     o: [f32; 3],
     mesh: Option<usize>,
+    room: Option<i32>,
     batches: &mut Vec<StaticBatch>,
 ) {
     let mut index: BTreeMap<BatchKey, usize> = batches
@@ -1540,6 +1682,7 @@ fn add_polys(
                     detail,
                     b.mesh,
                     b.blended,
+                    b.room,
                 ),
                 i,
             )
@@ -1563,6 +1706,7 @@ fn add_polys(
             policy.detail_offset,
             mesh,
             blended,
+            room,
         );
         let at = *index.entry(key).or_insert_with(|| {
             batches.push(StaticBatch {
@@ -1572,6 +1716,7 @@ fn add_polys(
                 writes_z: policy.writes_z,
                 depth_bias: policy.detail_offset as f32 * DETAIL_OFFSET_M,
                 mesh,
+                room,
                 blended,
                 verts: Vec::new(),
             });
@@ -1764,13 +1909,49 @@ mod tests {
                     [0.5, 1.8, 0.0],
                     [-0.5, 1.8, 0.0],
                 ],
-                faces: vec![face([0, 1, 2]), face([0, 2, 3])],
+                // Wound so that (b - a) x (c - a) = -z, the KFS front.
+                faces: vec![face([0, 2, 1]), face([0, 3, 2])],
                 material_textures: vec![None],
             },
             skin: None,
             idle: None,
             walk: None,
             bind: None,
+        }
+    }
+
+    #[test]
+    fn characters_hide_their_back_faces() {
+        // A camera inside Max's head saw the inside of his face. KFS fronts are wound so that
+        // (b - a) x (c - a) points out of the mesh (188 of 193 head triangles of Payne_Max_L0).
+        let rig = quad_rig();
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let front = crate::render3d::test_view([0.0, 1.0, -3.0], [0.0, 0.0, 1.0]);
+        let back = crate::render3d::test_view([0.0, 1.0, 3.0], [0.0, 0.0, -1.0]);
+        let covered = |zb: &[f32]| zb.iter().filter(|z| z.is_finite()).count();
+        let (_, sw_front) = crate::render3d::test_software_character(&rig, [0.0; 3], false, front);
+        let (_, sw_back) = crate::render3d::test_software_character(&rig, [0.0; 3], false, back);
+        assert!(covered(&sw_front) > 1000, "software front");
+        assert_eq!(covered(&sw_back), 0, "software back");
+        let scene = crate::render3d::test_empty_scene();
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: characters_hide_their_back_faces GPU half skipped");
+            return;
+        };
+        for (view, want_drawn) in [(front, true), (back, false)] {
+            let verts =
+                crate::render3d::character_world_verts(&rig, [0.0; 3], 0.0, 0.0, false, false);
+            let light = vec![[1.0; 3]; verts.len()];
+            let character = GpuCharacter {
+                mesh: &rig.mesh,
+                verts,
+                dead: false,
+                light,
+            };
+            let mut fb = vec![0u32; w * h];
+            let mut zb = vec![f32::INFINITY; w * h];
+            gpu.render(&scene, view, true, &[character], &mut fb, &mut zb);
+            assert_eq!(covered(&zb) > 1000, want_drawn, "gpu drawn={want_drawn}");
         }
     }
 
@@ -1800,6 +1981,7 @@ mod tests {
             let character = GpuCharacter {
                 mesh: &rig.mesh,
                 verts,
+                dead: false,
                 light,
             };
             let mut fb = vec![0u32; w * h];
@@ -1883,6 +2065,21 @@ mod tests {
     }
 
     #[test]
+    fn screen_fade_goes_into_the_hud_overlay() {
+        // `MPHM_FadeToColor` covers scene and HUD, as `render3d::blend_screen` does in software.
+        let hud = [HUD_CLEAR, 0x00ff_dd66];
+        assert_eq!(overlay_rgba(&hud, None), frame_rgba(&hud, Some(HUD_CLEAR)));
+        assert_eq!(
+            overlay_rgba(&hud, Some([0, 0, 0, 255])),
+            vec![0, 0, 0, 255, 0, 0, 0, 255]
+        );
+        assert_eq!(
+            overlay_rgba(&hud, Some([255, 255, 255, 128])),
+            vec![255, 255, 255, 128, 0xff, 0xee, 0xb3, 255]
+        );
+    }
+
+    #[test]
     fn hud_clear_pixels_become_transparent_and_drawn_ones_opaque() {
         let hud = [HUD_CLEAR, 0x00ff_dd66, 0x0000_0000];
         assert_eq!(
@@ -1935,6 +2132,195 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert!(gap <= 1, "{:06x} vs {:06x}", fb[center], sw_fb[center]);
+    }
+
+    #[test]
+    fn gpu_fog_matches_the_software_fog() {
+        let mut scene = scene_with(vec![quad(7, -1)], [0.0; 3]);
+        scene.static_meshes[0].polys[0].normal = [-1.0, 0.0, 0.0];
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: gpu_fog_matches_the_software_fog skipped");
+            return;
+        };
+        let view = crate::render3d::test_view([-4.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        let (mut sw_fb, sw_zb) = crate::render3d::test_software_static(&scene, view);
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let center = (h / 2) * w + w / 2;
+        let clear = sw_fb[center];
+        // The quad is 4 m away: half way through a 0..8 m fog.
+        scene.fog = Some(crate::scene::LevelFog {
+            color: [200.0, 40.0, 40.0],
+            start: 0.0,
+            end: 8.0,
+        });
+        crate::render3d::apply_fog(&mut sw_fb, &sw_zb, scene.fog);
+        assert_ne!(sw_fb[center], clear, "the fog must tint the quad");
+        let mut fb = vec![0u32; w * h];
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
+        let gap = (0..3)
+            .map(|k| ((fb[center] >> (8 * k)) & 0xff).abs_diff((sw_fb[center] >> (8 * k)) & 0xff))
+            .max()
+            .unwrap_or(0);
+        assert!(gap <= 1, "{:06x} vs {:06x}", fb[center], sw_fb[center]);
+    }
+
+    #[test]
+    fn gpu_lightmap_filtering_matches_the_software_lightmap() {
+        // A black-to-white 2x1 lightmap stretched across the quad: both renderers blend it.
+        let mut poly = quad(7, 0);
+        for v in &mut poly.vertices {
+            v.luv = [(v.pos[2] + 1.0) * 0.5, 0.5];
+        }
+        let mut scene = scene_with(vec![poly], [0.0; 3]);
+        scene.lightmaps.push(crate::scene::DecodedLightmap {
+            width: 2,
+            height: 1,
+            pixels: vec![0x0000_0000, 0x00ff_ffff],
+        });
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!(
+                "no GPU adapter: gpu_lightmap_filtering_matches_the_software_lightmap skipped"
+            );
+            return;
+        };
+        let view = crate::render3d::test_view([-4.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        let (sw_fb, sw_zb) = crate::render3d::test_software_static(&scene, view);
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let mut fb = vec![0u32; w * h];
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
+        let row = (h / 2) * w;
+        let covered: Vec<usize> = (row..row + w).filter(|&i| sw_zb[i].is_finite()).collect();
+        assert!(covered.len() > 20, "the quad must cover the middle row");
+        let close = covered
+            .iter()
+            .filter(|&&i| {
+                (0..3).all(|k| {
+                    ((fb[i] >> (8 * k)) & 0xff).abs_diff((sw_fb[i] >> (8 * k)) & 0xff) <= 3
+                })
+            })
+            .count();
+        assert!(
+            close as f32 / covered.len() as f32 > 0.95,
+            "{close} of {}",
+            covered.len()
+        );
+    }
+
+    #[test]
+    fn mip_chain_halves_each_level_with_a_box_filter() {
+        let levels = mip_chain(2, 2, &[0xff00_0000, 0xff00_0000, 0xffff_ffff, 0x00ff_ffff]);
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[1], (1, 1, vec![0xbf80_8080]));
+        // Non-square: 4x1 -> 2x1 -> 1x1.
+        let levels = mip_chain(4, 1, &[0, 0x0004_0404, 0x0008_0808, 0x000c_0c0c]);
+        assert_eq!(
+            levels.iter().map(|l| (l.0, l.1)).collect::<Vec<_>>(),
+            [(4, 1), (2, 1), (1, 1)]
+        );
+        assert_eq!(levels[2].2, vec![0x0006_0606]);
+    }
+
+    #[test]
+    fn gpu_texture_filtering_matches_the_software_texture() {
+        // A black-to-white 2x1 texture stretched across the quad: both renderers blend it.
+        let mut poly = quad(1, -1);
+        for v in &mut poly.vertices {
+            v.uv = [(v.pos[2] + 1.0) * 0.5, 0.5];
+        }
+        let mut scene = scene_with(vec![poly], [0.0; 3]);
+        scene.textures.push(crate::scene::DecodedTexture {
+            path: "ramp".into(),
+            flag: 0,
+            width: 2,
+            height: 1,
+            pixels: vec![0xff00_0000, 0xffff_ffff],
+        });
+        scene.materials.insert(
+            1,
+            SceneMaterial {
+                id: 1,
+                category: "wall".into(),
+                texture_path: String::new(),
+                texture_index: Some(0),
+                alpha_reference: None,
+                blended: false,
+            },
+        );
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: gpu_texture_filtering_matches_the_software_texture skipped");
+            return;
+        };
+        let view = crate::render3d::test_view([-4.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        let (sw_fb, sw_zb) = crate::render3d::test_software_static(&scene, view);
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let mut fb = vec![0u32; w * h];
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
+        let row = (h / 2) * w;
+        let covered: Vec<usize> = (row..row + w).filter(|&i| sw_zb[i].is_finite()).collect();
+        assert!(covered.len() > 20, "the quad must cover the middle row");
+        let distinct: std::collections::BTreeSet<u32> =
+            covered.iter().map(|&i| sw_fb[i] & 0xff).collect();
+        assert!(
+            distinct.len() > 20,
+            "software must blend, not step: {distinct:?}"
+        );
+        let close = covered
+            .iter()
+            .filter(|&&i| {
+                (0..3).all(|k| {
+                    ((fb[i] >> (8 * k)) & 0xff).abs_diff((sw_fb[i] >> (8 * k)) & 0xff) <= 3
+                })
+            })
+            .count();
+        assert!(
+            close as f32 / covered.len() as f32 > 0.95,
+            "{close} of {}",
+            covered.len()
+        );
+    }
+
+    #[test]
+    fn a_level_camera_sees_only_its_room_group() {
+        // startup_level: the opening water scene (::start, ::help) overlaps the street
+        // (::startroom, ::teleport01) in space. Street cameras showed the water scene's floor.
+        let mut scene = scene_with(vec![quad(7, -1)], [0.0; 3]);
+        scene.static_meshes[0].room_id = Some(2);
+        let room = |id: i32| crate::scene::SceneRoom {
+            id,
+            name: format!("::room{id}"),
+            static_meshes: Vec::new(),
+            exits: Vec::new(),
+            dynamic_meshes: Vec::new(),
+            world_origin: [0.0; 3],
+        };
+        scene.rooms = vec![room(1), room(2)];
+        let mut cam = crate::render3d::test_glass_quad(true);
+        cam.room_id = 1;
+        scene.dynamic_meshes.push(cam);
+        let view = crate::render3d::test_view([-4.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        let covered = |zb: &[f32]| zb.iter().filter(|z| z.is_finite()).count();
+        // The free player camera does not track its room: every room is drawn.
+        let (_, sw_zb) = crate::render3d::test_software_static(&scene, view);
+        assert!(covered(&sw_zb) > 1000, "free camera");
+        scene.attached_camera = Some(0);
+        let (_, sw_zb) = crate::render3d::test_software_static(&scene, view);
+        assert_eq!(covered(&sw_zb), 0, "software, camera in room 1");
+        let Some(mut gpu) = GpuRenderer::new(&scene) else {
+            eprintln!("no GPU adapter: a_level_camera_sees_only_its_room_group GPU half skipped");
+            return;
+        };
+        let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
+        let mut fb = vec![0u32; w * h];
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
+        assert_eq!(covered(&zb), 0, "gpu, camera in room 1");
+        scene.attached_camera = None;
+        let mut zb = vec![f32::INFINITY; w * h];
+        gpu.render(&scene, view, true, &[], &mut fb, &mut zb);
+        assert!(covered(&zb) > 1000, "gpu, free camera");
     }
 
     #[test]

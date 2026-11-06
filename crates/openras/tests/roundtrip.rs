@@ -159,3 +159,30 @@ fn pack_keeps_source_path_without_exclude() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn index_reads_one_member_without_decoding_the_archive() {
+    // The engine looks up one sound or catalog at a time; decoding a 190 MB archive per lookup
+    // stalled frames for seconds.
+    for (mode, compress) in [(MODE_STORED, false), (MODE_LZSS, true)] {
+        let arc = sample_archive(mode);
+        let dir = tmpdir(&format!("index-{mode}"));
+        let path = dir.join("x.ras");
+        fs::write(&path, arc.to_bytes(compress).unwrap()).unwrap();
+        let index = openras::archive::RasIndex::open(&path).unwrap();
+        assert_eq!(
+            index.read_member("\\data\\note.txt").unwrap(),
+            Some(arc.files[2].data.clone())
+        );
+        assert_eq!(
+            index.read_member("\\DATA\\Blob.bin").unwrap(),
+            Some(arc.files[1].data.clone())
+        );
+        assert_eq!(
+            index.read_member("\\readme.txt").unwrap(),
+            Some(arc.files[0].data.clone())
+        );
+        assert_eq!(index.read_member("\\data\\missing.txt").unwrap(), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

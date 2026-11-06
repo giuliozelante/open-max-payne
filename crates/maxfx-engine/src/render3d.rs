@@ -10,7 +10,7 @@
 
 use crate::kf2::{load_character_rigs, load_skin_body, pose_mesh, CharacterRig, KfsFace};
 use crate::scene::{
-    decode_texture_blob, material_policy, DecodedLightmap, DecodedTexture, LdbScene,
+    decode_texture_blob, material_policy, DecodedLightmap, DecodedTexture, LdbScene, LevelFog,
     MaterialPolicy, ScenePointLight, ScenePoly, SceneVertex,
 };
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode};
@@ -37,7 +37,11 @@ pub(crate) fn hardware_renderer() -> bool {
 pub(crate) const FRAME_W: usize = W;
 pub(crate) const FRAME_H: usize = H;
 pub(crate) const NEAR_Z: f32 = 0.15;
-pub(crate) const FAR_Z: f32 = 220.0;
+/// Back plane without fog. HYPOTHESIS: retail's fog-less back plane is not read yet; 1000 m
+/// is past every room the shipped levels can show, where 220 m visibly cut the startup city.
+pub(crate) const FAR_Z: f32 = 1000.0;
+/// `globalconfig.txt` `[camera]` `MinimumBackPlaneDistance`.
+const MIN_BACK_PLANE: f32 = 10.0;
 const EYE_HEIGHT: f32 = 1.65;
 /// One `DetailOffset` step from `materials.txt`, in metres toward the camera.
 pub(crate) const DETAIL_OFFSET_M: f32 = 0.02;
@@ -258,13 +262,35 @@ pub fn run_3d_walkthrough(
         }
     );
     let mut sounds = SoundChannels::default();
+    // Level scripts' `A_PlayMusic`; dropped (stopped) when the level ends.
+    let mut music = crate::menu_ui::Music::default();
+    let camerapaths_txt = crate::read_game_bytes(
+        &catalog_root(level_path),
+        r"\data\database\camerapaths\camerapaths.txt",
+    )
+    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    .unwrap_or_default();
+    let mut camera_shake: Option<CameraShake> = None;
+    // `CAM_AnimateParented`: the path and the character it follows.
+    let mut death_cam: Option<(CameraShake, String)> = None;
+    // Last frame's eye: the sound listener.
+    let mut listener = player_pos;
+    let game_root = catalog_root(level_path);
+    let particles_txt =
+        crate::read_game_bytes(&game_root, r"\data\database\particles\particles.txt")
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+    let mut particle_lights = ParticleLights::default();
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
     let mut background = vec![0u32; W * H];
-    let base_dt = 1.0 / 60.0f32;
+    let mut last_frame = std::time::Instant::now();
 
     loop {
+        let now = std::time::Instant::now();
+        let base_dt = frame_dt(now - last_frame);
+        last_frame = now;
         screen.pump();
         let window: &dyn crate::frontend::Frontend = &*screen;
         if !window.is_open() || window.is_key_down(Key::Escape) {
@@ -323,7 +349,13 @@ pub fn run_3d_walkthrough(
         if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             toggle_nearest_dynamic_mesh(&mut scene, &room_origins, player_pos, 36.0);
             if scene.activate_nearest_trigger(&room_origins, player_pos, 36.0) {
-                play_queued_sounds(&mut scene, &catalog_root(level_path), &mut sounds);
+                play_queued_sounds(
+                    &mut scene,
+                    &catalog_root(level_path),
+                    &mut sounds,
+                    &room_origins,
+                    listener,
+                );
             }
         }
 
@@ -392,7 +424,7 @@ pub fn run_3d_walkthrough(
         let mv_len = (mv[0] * mv[0] + mv[2] * mv[2]).sqrt();
         let player_moving = mv_len > 0.01;
         if player_moving {
-            walk_phase += player_dt * speed * 1.9;
+            walk_phase = move_clip_time(walk_phase, player_dt);
         } else {
             walk_phase = 0.0;
         }
@@ -478,13 +510,22 @@ pub fn run_3d_walkthrough(
                 (Some((midx, mt)), enemy) if enemy.is_none_or(|(_, et)| mt < et) => {
                     if scene.damage_mesh(midx, BERETTA_BULLET_DAMAGE) {
                         println!("  3D Engine: {} broke", scene.dynamic_meshes[midx].name);
-                        play_queued_sounds(&mut scene, &catalog_root(level_path), &mut sounds);
+                        play_queued_sounds(
+                            &mut scene,
+                            &catalog_root(level_path),
+                            &mut sounds,
+                            &room_origins,
+                            listener,
+                        );
                     }
                 }
                 (_, Some((idx, _))) => {
                     let en = &mut enemies[idx];
                     en.health -= 1;
                     en.hit_flash = 0.25;
+                    if en.health == 0 {
+                        scene.kill_character(&en.name);
+                    }
                     println!(
                         "  3D Engine: Hit {}! (health={})",
                         en.name,
@@ -526,7 +567,7 @@ pub fn run_3d_walkthrough(
                         {
                             en.world_pos[1] = fy;
                         }
-                        en.walk_phase += world_dt * 5.0;
+                        en.walk_phase = move_clip_time(en.walk_phase, world_dt);
                     }
                 } else {
                     en.walk_phase = 0.0;
@@ -536,8 +577,44 @@ pub fn run_3d_walkthrough(
 
         scene.step_dynamic_anims(base_dt);
         scene.step_screen_fade(base_dt);
+        scene.step_fog(base_dt);
         // Scripted sounds (sirens, the chopper) start and stop with the scripts.
-        play_queued_sounds(&mut scene, &catalog_root(level_path), &mut sounds);
+        play_queued_sounds(
+            &mut scene,
+            &catalog_root(level_path),
+            &mut sounds,
+            &room_origins,
+            listener,
+        );
+        start_queued_effects(&mut scene, &game_root, &particles_txt, &mut particle_lights);
+        particle_lights.step(base_dt);
+        let frame_lights: Vec<ScenePointLight> = world_lights
+            .iter()
+            .cloned()
+            .chain(particle_lights.point_lights(&scene, &room_origins))
+            .collect();
+        start_camera_shakes(
+            &mut scene,
+            &catalog_root(level_path),
+            &camerapaths_txt,
+            &mut camera_shake,
+        );
+        if let Some(shake) = camera_shake.as_mut() {
+            shake.time += world_dt;
+        }
+        for (block, target) in std::mem::take(&mut scene.death_cams) {
+            if let Some(anim) =
+                load_camera_path(&catalog_root(level_path), &camerapaths_txt, &block)
+            {
+                death_cam = Some((CameraShake { anim, time: 0.0 }, target));
+            }
+        }
+        if let Some((path, _)) = death_cam.as_mut() {
+            path.time += world_dt;
+        }
+        if let Some(cue) = scene.music_request.take() {
+            music.play_cue(&catalog_root(level_path), &cue);
+        }
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
 
@@ -546,21 +623,25 @@ pub fn run_3d_walkthrough(
         let mut cam_up = [-sy * sp, cp, -cy * sp];
         let mut cam_fwd = [sy * cp, sp, cy * cp];
         let mut cam_pos = if third_person && !fly_mode {
-            let mut dist = CHASE_BACK;
-            while dist > 0.45 {
-                let cand = chase_eye(player_pos, cam_fwd, dist);
-                if !hits_wall(&scene, &room_origins, cand[0], cand[1], cand[2]) {
-                    break;
-                }
-                dist -= 0.25;
-            }
-            chase_eye(player_pos, cam_fwd, dist)
+            chase_camera(&scene, player_pos, cam_fwd)
         } else {
             player_pos
         };
         if let Some((pos, right, up, fwd)) = attached_view(&scene, &room_origins) {
             (cam_pos, cam_right, cam_up, cam_fwd) = (pos, right, up, fwd);
+        } else if let Some(view) = death_cam.as_ref().and_then(|(path, target)| {
+            let pose = path.pose()?;
+            let en = enemies
+                .iter()
+                .find(|en| en.name.eq_ignore_ascii_case(target))?;
+            Some(parented_view(en.world_pos, en.yaw, pose))
+        }) {
+            (cam_pos, cam_right, cam_up, cam_fwd) = view;
+        } else if let Some(delta) = camera_shake.as_ref().and_then(CameraShake::delta) {
+            (cam_pos, cam_right, cam_up, cam_fwd) =
+                shaken_view((cam_pos, cam_right, cam_up, cam_fwd), delta);
         }
+        listener = cam_pos;
 
         let fov_scale = (H as f32) * 0.85;
         // World sphere (house = sunset) or the flat ceiling when the level names none.
@@ -599,12 +680,13 @@ pub fn run_3d_walkthrough(
                         &verts,
                         en.world_pos,
                         en.hit_flash > 0.0,
-                        &world_lights,
+                        &frame_lights,
                         scene.ambient,
                     );
                     characters.push(crate::gpu::GpuCharacter {
                         mesh: &erig.mesh,
                         verts,
+                        dead: en.health <= 0,
                         light,
                     });
                 }
@@ -628,19 +710,20 @@ pub fn run_3d_walkthrough(
                     &verts,
                     player_feet,
                     false,
-                    &world_lights,
+                    &frame_lights,
                     scene.ambient,
                 );
                 characters.push(crate::gpu::GpuCharacter {
                     mesh: &prig.mesh,
                     verts,
+                    dead: false,
                     light,
                 });
             }
             scene_view = Some((cam_pos, cam_right, cam_up, cam_fwd));
         } else {
             let mut tris = Vec::new();
-            for sm in &scene.static_meshes {
+            for sm in static_meshes_in_view(&scene, scene.attached_camera) {
                 queue_poly_batch(
                     &sm.polys,
                     IDENT_MAT,
@@ -696,7 +779,7 @@ pub fn run_3d_walkthrough(
                     en.walk_phase > 0.0,
                     en.health <= 0,
                     en.hit_flash > 0.0,
-                    &world_lights,
+                    &frame_lights,
                     scene.ambient,
                     cam_pos,
                     cam_right,
@@ -725,7 +808,7 @@ pub fn run_3d_walkthrough(
                     player_moving,
                     false,
                     false,
-                    &world_lights,
+                    &frame_lights,
                     scene.ambient,
                     cam_pos,
                     cam_right,
@@ -737,6 +820,10 @@ pub fn run_3d_walkthrough(
                     &mut zb,
                 );
             }
+        }
+
+        if gpu.is_none() && !wireframe {
+            apply_fog(&mut fb, &zb, scene.fog);
         }
 
         // Hardware: everything drawn so far (sky, wireframe geometry) is the background; the HUD
@@ -792,6 +879,14 @@ pub fn run_3d_walkthrough(
     }
     screen.put_gpu(gpu);
     Ok(())
+}
+
+/// Longest step one frame may take (a loading stall or a window drag).
+const MAX_FRAME_DT: f32 = 0.1;
+
+/// Game time for one frame: the wall time since the previous frame, capped at `MAX_FRAME_DT`.
+fn frame_dt(elapsed: std::time::Duration) -> f32 {
+    elapsed.as_secs_f32().min(MAX_FRAME_DT)
 }
 
 fn toggle_nearest_dynamic_mesh(
@@ -1012,6 +1107,12 @@ fn blocks_character(scene: &LdbScene, material_id: i32) -> bool {
     poly_policy(scene, material_id).character_collides
 }
 
+/// Clock of a character's move clip after `dt` seconds of moving. Clips carry their own frame
+/// rate (`Kf2Anim` bones), so the clock is plain game time.
+fn move_clip_time(time: f32, dt: f32) -> f32 {
+    time + dt
+}
+
 const CHASE_BACK: f32 = 2.2;
 const CHASE_UP: f32 = 0.4;
 
@@ -1021,6 +1122,136 @@ fn chase_eye(player: [f32; 3], cam_fwd: [f32; 3], dist: f32) -> [f32; 3] {
         player[1] - cam_fwd[1] * dist + CHASE_UP,
         player[2] - cam_fwd[2] * dist,
     ]
+}
+
+/// How far the chase camera stays off what it hits: `globalconfig.txt` `[camera]`
+/// `SphereRadius` (0.1) plus the near plane, so the wall itself is not clipped.
+const CAMERA_CLEARANCE: f32 = 0.1 + NEAR_Z;
+
+/// Third-person eye: cast from the player toward the follow position and stop before the first
+/// level polygon in the way (retail casts the camera "from its startpoint" toward the follow
+/// distance). `CameraCollision` polygons count: they exist for this.
+fn chase_camera(scene: &LdbScene, player: [f32; 3], cam_fwd: [f32; 3]) -> [f32; 3] {
+    let want = chase_eye(player, cam_fwd, CHASE_BACK);
+    let d = [
+        want[0] - player[0],
+        want[1] - player[1],
+        want[2] - player[2],
+    ];
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    let Some(t) = segment_hit(scene, player, d) else {
+        return keep_clear(scene, want);
+    };
+    let k = (t * len - CAMERA_CLEARANCE).max(0.0) / len;
+    keep_clear(
+        scene,
+        [
+            player[0] + d[0] * k,
+            player[1] + d[1] * k,
+            player[2] + d[2] * k,
+        ],
+    )
+}
+
+/// Push the eye out to `CAMERA_CLEARANCE` from every camera-blocking polygon it sits over: the
+/// retail camera is a sphere (`SphereRadius`), so walls alongside the follow ray hold it off too.
+fn keep_clear(scene: &LdbScene, mut eye: [f32; 3]) -> [f32; 3] {
+    for sm in &scene.static_meshes {
+        let o = sm.world_origin;
+        for poly in sm
+            .polys
+            .iter()
+            .filter(|p| p.vertices.len() >= 3 && blocks_camera(scene, p.material_id))
+        {
+            let n = poly.normal;
+            let world = poly_world(&poly.vertices, o);
+            let dist = dot3(n, sub3(eye, world[0]));
+            if dist.abs() >= CAMERA_CLEARANCE {
+                continue;
+            }
+            let foot = [0, 1, 2].map(|k| eye[k] - n[k] * dist);
+            if !inside_convex(&world, n, foot) {
+                continue;
+            }
+            let push = CAMERA_CLEARANCE.copysign(dist) - dist;
+            eye = [0, 1, 2].map(|k| eye[k] + n[k] * push);
+        }
+    }
+    eye
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn poly_world(vertices: &[SceneVertex], o: [f32; 3]) -> Vec<[f32; 3]> {
+    vertices
+        .iter()
+        .map(|v| [v.pos[0] + o[0], v.pos[1] + o[1], v.pos[2] + o[2]])
+        .collect()
+}
+
+/// `p` (on the polygon's plane) is on the same side of every edge of the convex polygon.
+fn inside_convex(world: &[[f32; 3]], n: [f32; 3], p: [f32; 3]) -> bool {
+    let cross = |a: [f32; 3], b: [f32; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let (mut pos, mut neg) = (false, false);
+    for i in 0..world.len() {
+        let a = world[i];
+        let b = world[(i + 1) % world.len()];
+        let side = dot3(cross(sub3(b, a), sub3(p, a)), n);
+        pos |= side > 1e-6;
+        neg |= side < -1e-6;
+    }
+    !(pos && neg)
+}
+
+/// Drawn solid surfaces and `CameraCollision`; not the sky, decals or script helpers.
+fn blocks_camera(scene: &LdbScene, material_id: i32) -> bool {
+    let camera_only = scene
+        .materials
+        .get(&material_id)
+        .is_some_and(|m| m.category.eq_ignore_ascii_case("cameracollision"));
+    let policy = poly_policy(scene, material_id);
+    camera_only || (policy.draw && policy.writes_z && !policy.skybox)
+}
+
+/// Smallest `t` in `0..=1` where `from + t * d` crosses a static polygon.
+fn segment_hit(scene: &LdbScene, from: [f32; 3], d: [f32; 3]) -> Option<f32> {
+    let mut best: Option<f32> = None;
+    for sm in &scene.static_meshes {
+        let o = sm.world_origin;
+        for poly in sm
+            .polys
+            .iter()
+            .filter(|p| p.vertices.len() >= 3 && blocks_camera(scene, p.material_id))
+        {
+            let n = poly.normal;
+            let denom = dot3(n, d);
+            if denom.abs() < 1e-6 {
+                continue;
+            }
+            let world = poly_world(&poly.vertices, o);
+            let t = dot3(n, sub3(world[0], from)) / denom;
+            if !(0.0..=1.0).contains(&t) || best.is_some_and(|b| t >= b) {
+                continue;
+            }
+            let hit = [from[0] + d[0] * t, from[1] + d[1] * t, from[2] + d[2] * t];
+            if inside_convex(&world, n, hit) {
+                best = Some(t);
+            }
+        }
+    }
+    best
 }
 
 /// Visible and not a script helper (`_Tip_`, `Start_FSM.DO`).
@@ -1132,26 +1363,92 @@ fn ray_slab(origin: [f32; 3], dir: [f32; 3], min: [f32; 3], max: [f32; 3]) -> Op
     Some(if tmin >= 0.0 { tmin } else { tmax })
 }
 
-/// Playing sounds, each tagged with its emitter. Dropping it stops them all (end of level).
+/// Sound voices, each tagged with its emitter. Dropping it stops them all (end of level).
 #[derive(Default)]
 struct SoundChannels {
-    playing: Vec<(String, Child)>,
+    voices: Vec<Voice>,
 }
 
-impl Drop for SoundChannels {
-    fn drop(&mut self) {
-        for (_, mut child) in self.playing.drain(..) {
+/// One cue's player. A positional loop keeps its voice while out of range, with no player.
+struct Voice {
+    emitter: String,
+    wav: PathBuf,
+    looping: bool,
+    range: Option<crate::SoundRange>,
+    /// The player and the gain it was started at.
+    child: Option<(Child, f32)>,
+}
+
+impl Voice {
+    fn kill(&mut self) {
+        if let Some((mut child, _)) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
     }
+
+    fn start(&mut self, gain: f32) {
+        self.kill();
+        let volume = (gain * 100.0).round().clamp(1.0, 100.0) as u32;
+        self.child = std::process::Command::new("ffplay")
+            .args(sound_player_args(&self.wav, self.looping, volume))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()
+            .map(|child| (child, gain));
+    }
 }
 
-/// `ffplay` without a window; `-loop 0` repeats a looping cue until it is killed.
-pub(crate) fn sound_player_args(wav: &Path, looping: bool) -> Vec<String> {
+impl Drop for SoundChannels {
+    fn drop(&mut self) {
+        for voice in &mut self.voices {
+            voice.kill();
+        }
+    }
+}
+
+/// Linear gain of a positional cue `distance` metres from the listener: full inside the hotspot,
+/// `hotspot / distance` beyond it, nothing past the falloff.
+fn sound_gain(distance: f32, range: &crate::SoundRange) -> f32 {
+    if distance > range.falloff {
+        return 0.0;
+    }
+    range.volume * (range.hotspot / distance).min(1.0)
+}
+
+/// What a positional voice needs this frame, given the gain it was started at (if running).
+#[derive(Debug, PartialEq)]
+enum VoiceAction {
+    Keep,
+    /// Out of range: release the player (retail `0x1000bb60` stops the buffer).
+    Stop,
+    /// (Re)start at the new gain: `ffplay` cannot change volume while it plays.
+    Start,
+}
+
+fn voice_action(running: Option<f32>, gain: f32) -> VoiceAction {
+    match running {
+        _ if gain <= 0.0 => {
+            if running.is_some() {
+                VoiceAction::Stop
+            } else {
+                VoiceAction::Keep
+            }
+        }
+        None => VoiceAction::Start,
+        Some(started) if gain > started * 2.0 || gain < started * 0.5 => VoiceAction::Start,
+        Some(_) => VoiceAction::Keep,
+    }
+}
+
+/// `ffplay` without a window at `volume` percent; `-loop 0` repeats a looping cue until it is killed.
+pub(crate) fn sound_player_args(wav: &Path, looping: bool, volume: u32) -> Vec<String> {
     let mut args: Vec<String> = ["-nodisp", "-autoexit", "-loglevel", "quiet"]
         .map(String::from)
         .to_vec();
+    args.extend(["-volume".to_string(), volume.to_string()]);
     if looping {
         args.extend(["-loop".to_string(), "0".to_string()]);
     }
@@ -1159,23 +1456,88 @@ pub(crate) fn sound_player_args(wav: &Path, looping: bool) -> Vec<String> {
     args
 }
 
-/// Stop what `A_StopAll3DSounds` asked for, then start the queued cues. Not positional yet:
-/// every cue plays at full volume.
-fn play_queued_sounds(scene: &mut LdbScene, game_dir: &Path, sounds: &mut SoundChannels) {
+/// Load the catalog of each queued cue whose category is not loaded yet, then resolve the cue.
+fn resolve_queued_sounds(scene: &mut LdbScene, game_dir: &Path) {
+    for index in 0..scene.sound_queue.len() {
+        if scene.sound_queue[index].filename.is_some() {
+            continue;
+        }
+        let category = scene.sound_queue[index].category.to_ascii_lowercase();
+        if !scene
+            .sound_catalogs
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case(&category))
+        {
+            // An empty text marks a missing catalog, so it is read once.
+            let text = crate::load_sound_catalog(game_dir, &category).unwrap_or_default();
+            scene.sound_catalogs.insert(category, text);
+        }
+        let mut sound = scene.sound_queue[index].clone();
+        scene.resolve_sound(&mut sound);
+        scene.sound_queue[index] = sound;
+    }
+}
+
+/// Gain of `voice` heard at `listener`: full for a non-positional cue or an emitter with no position.
+fn voice_gain(
+    voice: &Voice,
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    listener: [f32; 3],
+) -> f32 {
+    let Some(range) = &voice.range else {
+        return 1.0;
+    };
+    let Some(pos) = scene.emitter_world_pos(&voice.emitter) else {
+        return range.volume;
+    };
+    let origin = rooms
+        .get(&emitter_room(scene, &voice.emitter))
+        .copied()
+        .unwrap_or([0.0; 3]);
+    let d = (0..3)
+        .map(|k| (origin[k] + pos[k] - listener[k]).powi(2))
+        .sum::<f32>()
+        .sqrt();
+    sound_gain(d, range)
+}
+
+/// Stop what `A_StopAll3DSounds` asked for, start the queued cues, and keep positional loops at
+/// the listener's distance: a loop is released past its falloff and restarted when the gain
+/// halves or doubles (`ffplay` cannot change volume while it plays).
+fn play_queued_sounds(
+    scene: &mut LdbScene,
+    game_dir: &Path,
+    sounds: &mut SoundChannels,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    listener: [f32; 3],
+) {
     for emitter in std::mem::take(&mut scene.sound_stops) {
-        sounds.playing.retain_mut(|(owner, child)| {
-            if owner.eq_ignore_ascii_case(&emitter) {
-                let _ = child.kill();
-                let _ = child.wait();
+        sounds.voices.retain_mut(|voice| {
+            if voice.emitter.eq_ignore_ascii_case(&emitter) {
+                voice.kill();
                 return false;
             }
             true
         });
     }
     // Reap one-shots that finished.
-    sounds
-        .playing
-        .retain_mut(|(_, child)| matches!(child.try_wait(), Ok(None)));
+    sounds.voices.retain_mut(|voice| {
+        voice.looping
+            || voice
+                .child
+                .as_mut()
+                .is_some_and(|(child, _)| matches!(child.try_wait(), Ok(None)))
+    });
+    for voice in sounds.voices.iter_mut().filter(|voice| voice.looping) {
+        let gain = voice_gain(voice, scene, rooms, listener);
+        match voice_action(voice.child.as_ref().map(|(_, g)| *g), gain) {
+            VoiceAction::Keep => {}
+            VoiceAction::Stop => voice.kill(),
+            VoiceAction::Start => voice.start(gain),
+        }
+    }
+    resolve_queued_sounds(scene, game_dir);
     for sound in std::mem::take(&mut scene.sound_queue) {
         let Some(filename) = sound.filename.as_deref() else {
             continue;
@@ -1189,16 +1551,217 @@ fn play_queued_sounds(scene: &mut LdbScene, game_dir: &Path, sounds: &mut SoundC
         if !wav.is_file() && std::fs::write(&wav, &bytes).is_err() {
             continue;
         }
-        let child = std::process::Command::new("ffplay")
-            .args(sound_player_args(&wav, sound.looping))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        if let Ok(child) = child {
-            sounds.playing.push((sound.emitter, child));
+        let mut voice = Voice {
+            emitter: sound.emitter,
+            wav,
+            looping: sound.looping,
+            range: sound.range,
+            child: None,
+        };
+        let gain = voice_gain(&voice, scene, rooms, listener);
+        if gain > 0.0 {
+            voice.start(gain);
+        }
+        // A one-shot out of range is never heard; a loop waits for the listener.
+        if voice.looping || voice.child.is_some() {
+            sounds.voices.push(voice);
         }
     }
+}
+
+/// One `CAM_AnimateInPlace` path playing on the player camera.
+struct CameraShake {
+    anim: crate::kf2::Kf2Anim,
+    time: f32,
+}
+
+impl CameraShake {
+    /// The path's `(rotation, position)` now, or `None` once the path is over.
+    fn pose(&self) -> Option<([f32; 9], [f32; 3])> {
+        let bone = self.anim.bones.first()?;
+        if self.time * bone.fps >= bone.duration as f32 {
+            return None;
+        }
+        crate::kf2::sample_locals(&self.anim, self.time).remove(&bone.name.to_ascii_lowercase())
+    }
+
+    /// Camera-local `(rotation, offset)` now, or `None` once the path is over.
+    fn delta(&self) -> Option<([f32; 9], [f32; 3])> {
+        let first = self.anim.bones.first()?.keys.first()?;
+        let (mat, pos) = self.pose()?;
+        // Offset from the first key, so the path starts on the player camera. Every retail shake
+        // starts with an identity rotation, so the key rotation is used as is.
+        Some((mat, [0, 1, 2].map(|k| pos[k] - first.pos[k])))
+    }
+}
+
+/// The view of a camera-path pose `(rotation, offset)` in the frame of a character standing at
+/// `feet` and facing `yaw` (its +z), with the path's x right, y up and z forward.
+fn parented_view(feet: [f32; 3], yaw: f32, pose: ([f32; 9], [f32; 3])) -> View {
+    let (sy, cy) = yaw.sin_cos();
+    let world = |v: [f32; 3]| [v[0] * cy + v[2] * sy, v[1], v[2] * cy - v[0] * sy];
+    let (mat, offset) = pose;
+    let at = world(offset);
+    let fwd = world(xform_dir(mat, [0.0, 0.0, 1.0]));
+    let up = world(xform_dir(mat, [0.0, 1.0, 0.0]));
+    let right = [
+        up[1] * fwd[2] - up[2] * fwd[1],
+        up[2] * fwd[0] - up[0] * fwd[2],
+        up[0] * fwd[1] - up[1] * fwd[0],
+    ];
+    ([0, 1, 2].map(|k| feet[k] + at[k]), right, up, fwd)
+}
+
+/// Start the path of the last `CAM_AnimateInPlace` block; it replaces a running one.
+fn start_camera_shakes(
+    scene: &mut LdbScene,
+    game_dir: &Path,
+    camerapaths_txt: &str,
+    shake: &mut Option<CameraShake>,
+) {
+    for block in std::mem::take(&mut scene.camera_shakes) {
+        if let Some(anim) = load_camera_path(game_dir, camerapaths_txt, &block) {
+            *shake = Some(CameraShake { anim, time: 0.0 });
+        }
+    }
+}
+
+/// The `Camera01` KF2 path of a `camerapaths.txt` block.
+fn load_camera_path(
+    game_dir: &Path,
+    camerapaths_txt: &str,
+    block: &str,
+) -> Option<crate::kf2::Kf2Anim> {
+    crate::camera_path_file(camerapaths_txt, block)
+        .and_then(|path| crate::read_game_bytes(game_dir, &path))
+        .and_then(|bytes| crate::kf2::parse_kf2_anim(&bytes))
+}
+
+/// The view moved by a camera-local `(rotation, offset)`: x along right, y up, z forward.
+fn shaken_view(view: View, delta: ([f32; 9], [f32; 3])) -> View {
+    let (pos, right, up, fwd) = view;
+    let world = |v: [f32; 3]| [0, 1, 2].map(|k| right[k] * v[0] + up[k] * v[1] + fwd[k] * v[2]);
+    let (mat, offset) = delta;
+    let moved = world(offset);
+    let new_fwd = world(xform_dir(mat, [0.0, 0.0, 1.0]));
+    let new_up = world(xform_dir(mat, [0.0, 1.0, 0.0]));
+    let new_right = [
+        new_up[1] * new_fwd[2] - new_up[2] * new_fwd[1],
+        new_up[2] * new_fwd[0] - new_up[0] * new_fwd[2],
+        new_up[0] * new_fwd[1] - new_up[1] * new_fwd[0],
+    ];
+    (
+        [0, 1, 2].map(|k| pos[k] + moved[k]),
+        new_right,
+        new_up,
+        new_fwd,
+    )
+}
+
+/// Stop what `PS_StopAllEmissions` asked for, then start the lights of queued `PS_StartEffect`s.
+fn start_queued_effects(
+    scene: &mut LdbScene,
+    game_dir: &Path,
+    particles_txt: &str,
+    lights: &mut ParticleLights,
+) {
+    for emitter in std::mem::take(&mut scene.effect_stops) {
+        lights.stop(&emitter);
+    }
+    for effect in std::mem::take(&mut scene.effect_queue) {
+        let Some((win_path, looping)) = crate::particle_effect_file(particles_txt, &effect.effect)
+        else {
+            continue;
+        };
+        let rps = lights
+            .files
+            .entry(win_path.to_ascii_lowercase())
+            .or_insert_with(|| {
+                crate::read_game_bytes(game_dir, &win_path)
+                    .map(|bytes| openpfx::light::rps_lights(&bytes))
+                    .unwrap_or_default()
+            })
+            .clone();
+        lights.start(effect.emitter, rps, looping);
+    }
+}
+
+/// Point lights of running particle effects (ParticleFX emitter "Use Light").
+#[derive(Default)]
+struct ParticleLights {
+    /// Lights per `.rps` archive path (lower case), read once.
+    files: BTreeMap<String, Vec<openpfx::light::RpsLight>>,
+    /// `(emitter, lights, looping, seconds since start)`.
+    active: Vec<(String, Vec<openpfx::light::RpsLight>, bool, f32)>,
+}
+
+impl ParticleLights {
+    fn start(&mut self, emitter: String, lights: Vec<openpfx::light::RpsLight>, looping: bool) {
+        if !lights.is_empty() {
+            self.active.push((emitter, lights, looping, 0.0));
+        }
+    }
+
+    fn stop(&mut self, emitter: &str) {
+        self.active
+            .retain(|(owner, ..)| !owner.eq_ignore_ascii_case(emitter));
+    }
+
+    /// Age every effect; a one-shot effect ends with its longest cycle.
+    fn step(&mut self, dt: f32) {
+        for (_, _, _, age) in &mut self.active {
+            *age += dt;
+        }
+        self.active.retain(|(_, lights, looping, age)| {
+            *looping || lights.iter().any(|light| *age < light.cycle_length)
+        });
+    }
+
+    fn point_lights(
+        &self,
+        scene: &LdbScene,
+        rooms: &BTreeMap<i32, [f32; 3]>,
+    ) -> Vec<ScenePointLight> {
+        let mut out = Vec::new();
+        for (emitter, lights, looping, age) in &self.active {
+            let Some(pos) = scene.emitter_world_pos(emitter) else {
+                continue;
+            };
+            let room = emitter_room(scene, emitter);
+            let origin = rooms.get(&room).copied().unwrap_or([0.0; 3]);
+            for light in lights {
+                let t = if *looping && light.cycle_length > 0.0 {
+                    age % light.cycle_length
+                } else {
+                    *age
+                };
+                let (rgb, radius) = light.sample(t);
+                out.push(ScenePointLight {
+                    id: -1,
+                    room_id: room,
+                    pos: [0, 1, 2].map(|k| origin[k] + pos[k] + light.offset[k]),
+                    color: [rgb[0], rgb[1], rgb[2], 255.0],
+                    radius,
+                    // ParticleFX "Brightness" has no effect; the colour graph sets the strength.
+                    intensity: 1.0,
+                });
+            }
+        }
+        out
+    }
+}
+
+/// Room of the mesh, trigger or FSM named `emitter` (0 when none matches).
+fn emitter_room(scene: &LdbScene, emitter: &str) -> i32 {
+    scene
+        .dynamic_meshes
+        .iter()
+        .map(|mesh| (&mesh.name, mesh.room_id))
+        .chain(scene.triggers.iter().map(|t| (&t.name, t.room_id)))
+        .chain(scene.fsms.iter().map(|fsm| (&fsm.name, fsm.room_id)))
+        .chain(scene.characters.iter().map(|c| (&c.name, c.room_id)))
+        .find(|(name, _)| name.eq_ignore_ascii_case(emitter))
+        .map_or(0, |(_, room)| room)
 }
 
 fn catalog_root(path: &Path) -> PathBuf {
@@ -1254,15 +1817,18 @@ pub fn render_frame(
 ) -> Result<(usize, usize, Vec<u32>), String> {
     let rooms: BTreeMap<i32, [f32; 3]> =
         scene.rooms.iter().map(|r| (r.id, r.world_origin)).collect();
-    let (pos, right, up, fwd) = match camera {
-        Some(name) => {
-            let idx = scene
+    let camera_idx = match camera {
+        Some(name) => Some(
+            scene
                 .dynamic_meshes
                 .iter()
                 .position(|m| m.name.eq_ignore_ascii_case(name))
-                .ok_or_else(|| format!("no dynamic mesh named {name}"))?;
-            camera_view(scene, idx, &rooms)
-        }
+                .ok_or_else(|| format!("no dynamic mesh named {name}"))?,
+        ),
+        None => None,
+    };
+    let (pos, right, up, fwd) = match camera_idx {
+        Some(idx) => camera_view(scene, idx, &rooms),
         None => {
             let pos = spawn_pos(scene, &rooms, scene.spawn_jumppoint_index(None));
             let (sy, cy) = std::f32::consts::PI.sin_cos();
@@ -1280,7 +1846,7 @@ pub fn render_frame(
     let fov_scale = (H as f32) * 0.85;
     const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
     let mut tris = Vec::new();
-    for sm in &scene.static_meshes {
+    for sm in static_meshes_in_view(scene, camera_idx) {
         queue_poly_batch(
             &sm.polys,
             IDENT_MAT,
@@ -1302,6 +1868,7 @@ pub fn render_frame(
     draw_dynamic_meshes(
         scene, &rooms, pos, right, up, fwd, fov_scale, true, false, &mut fb, &mut zb,
     );
+    apply_fog(&mut fb, &zb, scene.fog);
     Ok((W, H, fb))
 }
 
@@ -1312,6 +1879,25 @@ pub fn write_ppm(path: &Path, w: usize, h: usize, fb: &[u32]) -> std::io::Result
         out.extend_from_slice(&[(px >> 16) as u8, (px >> 8) as u8, *px as u8]);
     }
     std::fs::write(path, out)
+}
+
+/// Static room meshes a view shows. A level camera (`camera`, a dynamic mesh) sees the exit
+/// group of its room (`LdbScene::room_group`): `startup_level`'s opening water scene overlaps
+/// its street in space. The free player camera does not track its room, so it sees every room.
+pub(crate) fn static_meshes_in_view(
+    scene: &LdbScene,
+    camera: Option<usize>,
+) -> impl Iterator<Item = &crate::scene::SceneStaticMesh> {
+    let group = camera
+        .and_then(|i| scene.dynamic_meshes.get(i))
+        .map(|dm| scene.room_group(dm.room_id));
+    scene
+        .static_meshes
+        .iter()
+        .filter(move |sm| match (&group, sm.room_id) {
+            (Some(group), Some(room)) => group.contains(&room),
+            _ => true,
+        })
 }
 
 /// The HUD crosshair is hidden while a cutscene camera owns the view.
@@ -1342,8 +1928,37 @@ fn camera_view(scene: &LdbScene, idx: usize, rooms: &BTreeMap<i32, [f32; 3]>) ->
     (pos, right, up, fwd)
 }
 
+/// Back plane: the fog's end (nothing past it shows through full fog), else [`FAR_Z`].
+pub(crate) fn back_plane(fog: Option<LevelFog>) -> f32 {
+    fog.map_or(FAR_Z, |fog| fog.end.max(MIN_BACK_PLANE))
+}
+
+/// Linear fog amount at view depth `z`: 0 before `start`, 1 from `end` on.
+pub(crate) fn fog_amount(fog: &LevelFog, z: f32) -> f32 {
+    if fog.end <= fog.start {
+        return if z >= fog.end { 1.0 } else { 0.0 };
+    }
+    ((z - fog.start) / (fog.end - fog.start)).clamp(0.0, 1.0)
+}
+
+/// Software fog after rasterisation: each pixel with a depth mixes toward the fog colour by its
+/// view depth. Sky pixels (no depth) stay clear.
+pub(crate) fn apply_fog(fb: &mut [u32], zb: &[f32], fog: Option<LevelFog>) {
+    let Some(fog) = fog else {
+        return;
+    };
+    for (px, &z) in fb.iter_mut().zip(zb).filter(|(_, z)| z.is_finite()) {
+        let k = fog_amount(&fog, z);
+        let mix = |shift: u32, c: f32| {
+            let v = ((*px >> shift) & 0xff) as f32;
+            ((v + (c - v) * k).round() as u32) << shift
+        };
+        *px = mix(16, fog.color[0]) | mix(8, fog.color[1]) | mix(0, fog.color[2]);
+    }
+}
+
 /// Mix `rgba` over every `0x00RRGGBB` pixel by its alpha.
-fn blend_screen(fb: &mut [u32], rgba: [u8; 4]) {
+pub(crate) fn blend_screen(fb: &mut [u32], rgba: [u8; 4]) {
     let a = u32::from(rgba[3]);
     if a == 0 {
         return;
@@ -1382,6 +1997,53 @@ fn player_mesh_yaw(look_yaw: f32) -> f32 {
 
 /// Lightmap layer `MUL` = `D3DTOP_MODULATE` (`e2_d3d8_driver_mfc` `0x10008082`): per channel
 /// `texture × lightmap / 255`, no overbright. Alpha bits are dropped.
+/// Bilinear lightmap texel at `(u, v)`, clamped to the edges (wgpu `ClampToEdge`, linear filter).
+/// HYPOTHESIS: retail filters lightmaps linearly; the `addTextureLayer` filter values (`0x1000000`,
+/// `0x5000000`) are not decoded, but the retail house shades smoothly.
+fn sample_lightmap(lm: &DecodedLightmap, u: f32, v: f32) -> u32 {
+    let (w, h) = (lm.width.max(1), lm.height.max(1));
+    let x = (u.clamp(0.0, 1.0) * w as f32 - 0.5).clamp(0.0, (w - 1) as f32);
+    let y = (v.clamp(0.0, 1.0) * h as f32 - 0.5).clamp(0.0, (h - 1) as f32);
+    let (x0, y0) = (x as u32, y as u32);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+    let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+    let texel = |tx: u32, ty: u32| lm.pixels.get((ty * w + tx) as usize).copied().unwrap_or(0);
+    let (c00, c10, c01, c11) = (texel(x0, y0), texel(x1, y0), texel(x0, y1), texel(x1, y1));
+    let channel = |shift: u32| {
+        let c = |p: u32| ((p >> shift) & 0xff) as f32;
+        let top = c(c00) + (c(c10) - c(c00)) * fx;
+        let bottom = c(c01) + (c(c11) - c(c01)) * fx;
+        ((top + (bottom - top) * fy).round() as u32) << shift
+    };
+    channel(16) | channel(8) | channel(0)
+}
+
+/// Bilinear diffuse texel at `(u, v)` with repeat addressing, all four channels (alpha is
+/// filtered before the alpha test, as in D3D). Retail offers bilinear, trilinear and anisotropic
+/// filtering (`FilteringMode`); the software renderer has no mipmaps.
+fn sample_texture(t: &crate::scene::DecodedTexture, u: f32, v: f32) -> u32 {
+    let (w, h) = (t.width.max(1), t.height.max(1));
+    let x = (u * w as f32 - 0.5).rem_euclid(w as f32);
+    let y = (v * h as f32 - 0.5).rem_euclid(h as f32);
+    let (x0, y0) = ((x as u32).min(w - 1), (y as u32).min(h - 1));
+    let (x1, y1) = ((x0 + 1) % w, (y0 + 1) % h);
+    let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+    let texel = |tx: u32, ty: u32| {
+        t.pixels
+            .get((ty * w + tx) as usize)
+            .copied()
+            .unwrap_or(0x0099_9999)
+    };
+    let (c00, c10, c01, c11) = (texel(x0, y0), texel(x1, y0), texel(x0, y1), texel(x1, y1));
+    let channel = |shift: u32| {
+        let c = |p: u32| ((p >> shift) & 0xff) as f32;
+        let top = c(c00) + (c(c10) - c(c00)) * fx;
+        let bottom = c(c01) + (c(c11) - c(c01)) * fx;
+        ((top + (bottom - top) * fy).round() as u32) << shift
+    };
+    channel(24) | channel(16) | channel(8) | channel(0)
+}
+
 fn lightmap_modulate(texture: u32, lightmap: u32) -> u32 {
     let channel =
         |shift: u32| (((texture >> shift) & 0xff) * ((lightmap >> shift) & 0xff) / 255) << shift;
@@ -1546,6 +2208,33 @@ pub(crate) fn character_world_verts(
         .collect()
 }
 
+/// Unit front normal of a posed character triangle. KFS fronts are wound so that
+/// `(b - a) x (c - a)` points out of the mesh (188 of 193 head triangles of `Payne_Max_L0`).
+/// Zero for dead bodies, whose lie-flat placement mirrors the mesh: they are drawn two-sided.
+pub(crate) fn character_face_normal(
+    world: &[[f32; 3]],
+    [a, b, c]: [usize; 3],
+    dead: bool,
+) -> [f32; 3] {
+    let (Some(&a), Some(&b), Some(&c)) = (world.get(a), world.get(b), world.get(c)) else {
+        return [0.0; 3];
+    };
+    if dead {
+        return [0.0; 3];
+    }
+    let (e1, e2) = (sub3(b, a), sub3(c, a));
+    let n = [
+        e1[1] * e2[2] - e1[2] * e2[1],
+        e1[2] * e2[0] - e1[0] * e2[2],
+        e1[0] * e2[1] - e1[1] * e2[0],
+    ];
+    let len = dot3(n, n).sqrt();
+    if len < 1e-12 {
+        return [0.0; 3];
+    }
+    n.map(|x| x / len)
+}
+
 /// Per-vertex diffuse of a posed character: the retail point-light selection and D3D diffuse
 /// (#37), or a flat 1.35 while a hit flash lasts.
 pub(crate) fn character_vertex_light(
@@ -1629,6 +2318,10 @@ fn render_kfs_character(
             continue;
         }
         if c0[2] > FAR_Z && c1[2] > FAR_Z && c2[2] > FAR_Z {
+            continue;
+        }
+        let n = character_face_normal(&world, face.indices, dead);
+        if !wireframe && dot3(sub3(world[i0], cam_pos), n) >= 0.05 {
             continue;
         }
         let cam_verts = [
@@ -1857,7 +2550,7 @@ fn draw_poly<'a>(
         if cz >= NEAR_Z {
             all_behind = false;
         }
-        if cz <= FAR_Z {
+        if cz <= back_plane(scene.fog) {
             all_far = false;
         }
         cam_verts.push(CamVert {
@@ -2042,12 +2735,7 @@ fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usi
             let v = (w0 * p0.v_over_z + w1 * p1.v_over_z + w2 * p2.v_over_z) * z;
 
             let base_rgb = if let Some(t) = tex {
-                let tx = (u.rem_euclid(1.0) * t.width as f32) as u32 % t.width.max(1);
-                let ty = (v.rem_euclid(1.0) * t.height as f32) as u32 % t.height.max(1);
-                t.pixels
-                    .get((ty * t.width + tx) as usize)
-                    .copied()
-                    .unwrap_or(0x00999999)
+                sample_texture(t, u, v)
             } else {
                 0x008899aa
             };
@@ -2067,14 +2755,10 @@ fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usi
             if let Some(lm) = lmap {
                 let lu = (w0 * p0.lu_over_z + w1 * p1.lu_over_z + w2 * p2.lu_over_z) * z;
                 let lv = (w0 * p0.lv_over_z + w1 * p1.lv_over_z + w2 * p2.lv_over_z) * z;
-                let lx = (lu.clamp(0.0, 1.0) * (lm.width - 1) as f32) as u32;
-                let ly = (lv.clamp(0.0, 1.0) * (lm.height - 1) as f32) as u32;
-                if let Some(&lcol) = lm.pixels.get((ly * lm.width + lx) as usize) {
-                    let lit = lightmap_modulate(base_rgb, lcol);
-                    r = ((lit >> 16) & 0xff) as f32;
-                    g = ((lit >> 8) & 0xff) as f32;
-                    b = (lit & 0xff) as f32;
-                }
+                let lit = lightmap_modulate(base_rgb, sample_lightmap(lm, lu, lv));
+                r = ((lit >> 16) & 0xff) as f32;
+                g = ((lit >> 8) & 0xff) as f32;
+                b = (lit & 0xff) as f32;
             } else {
                 let light = [0, 1, 2].map(|c| {
                     (w0 * p0.light_over_z[c] + w1 * p1.light_over_z[c] + w2 * p2.light_over_z[c])
@@ -2313,7 +2997,7 @@ pub(crate) fn test_software_static(
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
     const IDENT_MAT: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-    for sm in &scene.static_meshes {
+    for sm in static_meshes_in_view(scene, scene.attached_camera) {
         render_poly_batch(
             &sm.polys,
             IDENT_MAT,
@@ -2338,6 +3022,190 @@ pub(crate) fn test_software_static(
 mod tests {
     use super::*;
     use crate::scene::{SceneDynamicMesh, SceneMaterial, ScenePoly, SceneVertex};
+
+    fn shake(keys: &[(u32, [f32; 3])], duration: u32) -> CameraShake {
+        let ident = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        CameraShake {
+            anim: crate::kf2::Kf2Anim {
+                bones: vec![crate::kf2::AnimBone {
+                    name: "Camera01".into(),
+                    parent: None,
+                    duration,
+                    fps: 30.0,
+                    keys: keys
+                        .iter()
+                        .map(|&(frame, pos)| crate::kf2::AnimKeyframe {
+                            frame,
+                            mat: ident,
+                            pos,
+                        })
+                        .collect(),
+                }],
+            },
+            time: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_camera_shake_offsets_from_its_first_key_and_ends_with_the_path() {
+        let mut path = shake(&[(0, [0.5, 0.0, 0.0]), (30, [0.5, 0.3, 0.0])], 31);
+        assert_eq!(path.delta().map(|d| d.1), Some([0.0, 0.0, 0.0]));
+        path.time = 0.5;
+        let (_, offset) = path.delta().expect("still playing");
+        assert!((offset[1] - 0.15).abs() < 1e-6, "offset={offset:?}");
+        path.time = 31.0 / 30.0;
+        assert_eq!(path.delta(), None);
+    }
+
+    #[test]
+    fn retail_shake_quick_plays_the_explosion_path_and_ends() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        let Some(text) =
+            crate::read_game_bytes(&game, r"\data\database\camerapaths\camerapaths.txt")
+        else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&text).into_owned();
+        let mut scene = LdbScene::default();
+        assert!(scene.dispatch_message("::x", "player->cam_animateinplace(shake_quick);"));
+        let mut shake = None;
+        start_camera_shakes(&mut scene, &game, &text, &mut shake);
+        let mut shake = shake.expect("shake_quick loads effects\\explosion.kf2");
+        let mut largest = 0.0f32;
+        let mut frames = 0;
+        while let Some((_, offset)) = shake.delta() {
+            largest = offset.iter().fold(largest, |m, c| m.max(c.abs()));
+            shake.time += 1.0 / 60.0;
+            frames += 1;
+            assert!(frames < 6000, "the path must end");
+        }
+        assert!(largest > 0.0 && largest < 0.5, "largest offset {largest} m");
+    }
+
+    #[test]
+    fn a_death_cam_sits_in_the_frame_of_its_character() {
+        let back = [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0];
+        let close = |a: [f32; 3], b: [f32; 3]| (0..3).all(|k| (a[k] - b[k]).abs() < 1e-5);
+        let (eye, _, up, fwd) = parented_view([10.0, 0.0, 0.0], 0.0, (back, [0.0, 0.5, 2.0]));
+        assert!(close(eye, [10.0, 0.5, 2.0]), "eye={eye:?}");
+        assert!(close(fwd, [0.0, 0.0, -1.0]), "fwd={fwd:?}");
+        assert!(close(up, [0.0, 1.0, 0.0]), "up={up:?}");
+        let half_turn = std::f32::consts::FRAC_PI_2;
+        let (eye, right, _, fwd) =
+            parented_view([10.0, 0.0, 0.0], half_turn, (back, [0.0, 0.5, 2.0]));
+        assert!(close(eye, [12.0, 0.5, 0.0]), "eye={eye:?}");
+        assert!(close(fwd, [-1.0, 0.0, 0.0]), "fwd={fwd:?}");
+        assert!(close(right, [0.0, 0.0, 1.0]), "right={right:?}");
+    }
+
+    #[test]
+    fn shaken_view_moves_and_turns_the_eye_in_camera_space() {
+        let view = (
+            [1.0, 2.0, 3.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        );
+        let ident = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        assert_eq!(shaken_view(view, (ident, [0.0; 3])), view);
+        let (pos, right, up, fwd) = shaken_view(view, (ident, [1.0, 0.5, 2.0]));
+        assert_eq!(pos, [3.0, 2.5, 2.0]);
+        assert_eq!((right, up, fwd), (view.1, view.2, view.3));
+    }
+
+    fn flash(cycle_length: f32) -> openpfx::light::RpsLight {
+        openpfx::light::RpsLight {
+            cycle_length,
+            color: vec![[255.0, 0.0, 0.0], [0.0, 0.0, 255.0]],
+            falloff: vec![4.0, 8.0],
+            offset: [0.0, 1.0, 0.0],
+        }
+    }
+
+    fn siren_scene() -> LdbScene {
+        let mut scene = LdbScene::default();
+        let mut car = glass_quad(false);
+        car.name = "::startroom::car.DO".into();
+        car.room_id = 3;
+        car.world_pos = [2.0, 0.0, 0.0];
+        car.local_start_pos = [0.0; 3];
+        scene.dynamic_meshes.push(car);
+        scene
+    }
+
+    #[test]
+    fn a_particle_light_sits_on_its_emitter_with_the_sampled_colour_and_radius() {
+        let scene = siren_scene();
+        let rooms = BTreeMap::from([(3, [10.0, 0.0, 0.0])]);
+        let mut lights = ParticleLights::default();
+        lights.start("::startroom::car.DO".into(), vec![flash(2.0)], true);
+        lights.step(1.0);
+        let out = lights.point_lights(&scene, &rooms);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].pos, [12.0, 1.0, 0.0]);
+        assert_eq!(out[0].color, [127.5, 0.0, 127.5, 255.0]);
+        assert_eq!(out[0].radius, 6.0);
+        assert_eq!(out[0].intensity, 1.0);
+    }
+
+    #[test]
+    fn retail_police_car_light_flashes_red_and_blue() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        let Some(particles) =
+            crate::read_game_bytes(&game, r"\data\database\particles\particles.txt")
+        else {
+            return;
+        };
+        let particles = String::from_utf8_lossy(&particles).into_owned();
+        let mut scene = siren_scene();
+        assert!(scene.dispatch_message(
+            "::startroom",
+            "::startroom::car.DO->ps_starteffect(light_policecar, \"\");"
+        ));
+        let mut lights = ParticleLights::default();
+        start_queued_effects(&mut scene, &game, &particles, &mut lights);
+        let rooms = BTreeMap::new();
+        let (mut red, mut blue) = (false, false);
+        for _ in 0..100 {
+            lights.step(0.05);
+            let out = lights.point_lights(&scene, &rooms);
+            assert_eq!(out.len(), 1, "looping light must stay on");
+            assert!(
+                (out[0].radius - 4.78).abs() < 0.01,
+                "radius={}",
+                out[0].radius
+            );
+            let [r, _, b, _] = out[0].color;
+            red |= r > 200.0 && b < 50.0;
+            blue |= b > 200.0 && r < 50.0;
+        }
+        assert!(red && blue, "red={red} blue={blue}");
+    }
+
+    #[test]
+    fn particle_lights_loop_end_and_stop_with_their_effect() {
+        let scene = siren_scene();
+        let rooms = BTreeMap::new();
+        let mut lights = ParticleLights::default();
+        lights.start("::startroom::car.DO".into(), vec![flash(2.0)], true);
+        lights.step(3.0);
+        // Looping: 3 s into a 2 s cycle samples at 1 s.
+        assert_eq!(lights.point_lights(&scene, &rooms)[0].radius, 6.0);
+        lights.stop("::STARTROOM::car.DO");
+        assert!(lights.point_lights(&scene, &rooms).is_empty());
+
+        lights.start("::startroom::car.DO".into(), vec![flash(2.0)], false);
+        lights.step(1.5);
+        assert_eq!(lights.point_lights(&scene, &rooms).len(), 1);
+        lights.step(1.0);
+        assert!(lights.point_lights(&scene, &rooms).is_empty());
+    }
 
     fn light(pos: [f32; 3], rgb: f32, radius: f32, intensity: f32) -> ScenePointLight {
         ScenePointLight {
@@ -2383,12 +3251,90 @@ mod tests {
     }
 
     #[test]
+    fn sound_gain_is_full_inside_the_hotspot_inverse_beyond_and_silent_past_the_falloff() {
+        let range = crate::SoundRange {
+            hotspot: 2.0,
+            falloff: 50.0,
+            volume: 0.5,
+        };
+        assert_eq!(sound_gain(1.0, &range), 0.5);
+        assert_eq!(sound_gain(8.0, &range), 0.125);
+        assert_eq!(sound_gain(50.0, &range), 0.02);
+        assert_eq!(sound_gain(50.5, &range), 0.0);
+    }
+
+    #[test]
+    fn a_voice_restarts_only_when_its_gain_halves_or_doubles_and_stops_out_of_range() {
+        assert_eq!(voice_action(None, 0.0), VoiceAction::Keep);
+        assert_eq!(voice_action(None, 0.3), VoiceAction::Start);
+        assert_eq!(voice_action(Some(0.3), 0.0), VoiceAction::Stop);
+        assert_eq!(voice_action(Some(0.3), 0.5), VoiceAction::Keep);
+        assert_eq!(voice_action(Some(0.3), 0.16), VoiceAction::Keep);
+        assert_eq!(voice_action(Some(0.3), 0.61), VoiceAction::Start);
+        assert_eq!(voice_action(Some(0.3), 0.14), VoiceAction::Start);
+    }
+
+    #[test]
+    fn retail_level_catalogs_load_when_a_cue_needs_them() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        if crate::read_game_bytes(&game, r"\data\database\sounds\enemy.txt").is_none() {
+            return;
+        }
+        let mut scene = LdbScene::default();
+        let mut thug = glass_quad(false);
+        thug.name = "::bar::thug.DO".into();
+        scene.dynamic_meshes.push(thug);
+        assert!(scene.dispatch_message(
+            "::bar",
+            "::bar::thug.DO->A_Play3DSound(enemy, mobster_alert, \"\");"
+        ));
+        assert_eq!(scene.sound_queue[0].filename, None);
+        resolve_queued_sounds(&mut scene, &game);
+        assert_eq!(
+            scene.sound_queue[0].filename.as_deref(),
+            Some(r"enemy\mobster\mobster_alert_01a.wav")
+        );
+        assert!(scene.sound_queue[0].range.is_some());
+        assert!(scene.sound_catalogs.contains_key("enemy"));
+    }
+
+    #[test]
+    fn retail_house_speech_resolves_to_a_wav() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        if crate::read_game_bytes(&game, r"\data\database\sounds\maxhouse.txt").is_none() {
+            return;
+        }
+        let mut scene = LdbScene::default();
+        assert!(scene.dispatch_message("::x", "player->A_Play3DSound(maxhouse, P1L0a_01, head);"));
+        resolve_queued_sounds(&mut scene, &game);
+        let file = scene.sound_queue[0]
+            .filename
+            .clone()
+            .expect("P1L0a_01 file");
+        let wav = crate::read_game_bytes(&game, &crate::story_wav_win_path(&file)).expect("wav");
+        assert!(wav.starts_with(b"RIFF"));
+    }
+
+    #[test]
+    fn sound_player_args_set_the_start_volume() {
+        let args = sound_player_args(std::path::Path::new("/x/s.wav"), false, 37);
+        let at = args.iter().position(|a| a == "-volume").expect("-volume");
+        assert_eq!(args[at + 1], "37");
+    }
+
+    #[test]
     fn looping_sounds_play_until_stopped() {
         let wav = std::path::Path::new("/x/s.wav");
-        let once = sound_player_args(wav, false);
+        let once = sound_player_args(wav, false, 100);
         assert!(!once.iter().any(|a| a == "-loop"));
         assert!(once.iter().any(|a| a == "-autoexit"));
-        let looped = sound_player_args(wav, true);
+        let looped = sound_player_args(wav, true, 100);
         let at = looped.iter().position(|a| a == "-loop").expect("-loop");
         assert_eq!(looped[at + 1], "0");
         assert_eq!(looped.last().map(String::as_str), Some("/x/s.wav"));
@@ -2459,11 +3405,124 @@ mod tests {
     }
 
     #[test]
+    fn lightmaps_are_sampled_bilinearly() {
+        // Retail lightmaps shade smoothly; nearest sampling showed every texel as a hard step.
+        let lm = DecodedLightmap {
+            width: 2,
+            height: 1,
+            pixels: vec![0x0000_0000, 0x00ff_ffff],
+        };
+        // Texel centres at u = 0.25 and 0.75 (D3D/wgpu convention), clamped at the edges.
+        assert_eq!(sample_lightmap(&lm, 0.25, 0.5), 0x0000_0000);
+        assert_eq!(sample_lightmap(&lm, 0.75, 0.5), 0x00ff_ffff);
+        assert_eq!(sample_lightmap(&lm, 0.5, 0.5), 0x0080_8080);
+        assert_eq!(sample_lightmap(&lm, 1.0, 0.5), 0x00ff_ffff);
+    }
+
+    #[test]
+    fn textures_are_sampled_bilinearly_and_wrap() {
+        // Retail draws filtered textures (FilteringBilinear/Trilinear); nearest looked pixelated.
+        let tex = crate::scene::DecodedTexture {
+            path: String::new(),
+            flag: 0,
+            width: 2,
+            height: 1,
+            pixels: vec![0x0000_0000, 0xffff_ffff],
+        };
+        assert_eq!(sample_texture(&tex, 0.25, 0.5), 0x0000_0000);
+        assert_eq!(sample_texture(&tex, 0.75, 0.5), 0xffff_ffff);
+        assert_eq!(sample_texture(&tex, 0.5, 0.5), 0x8080_8080);
+        // Repeat addressing: u = 0 sits between the last and the first texel.
+        assert_eq!(sample_texture(&tex, 0.0, 0.5), 0x8080_8080);
+        assert_eq!(sample_texture(&tex, 1.25, 0.5), 0x0000_0000);
+    }
+
+    #[test]
     fn lightmap_modulates_the_texture_like_d3dtop_modulate() {
         // e2_d3d8_driver_mfc 0x10008082: layer MUL -> colour op 4 (D3DTOP_MODULATE).
         assert_eq!(lightmap_modulate(0x0080_8080, 0x0080_8080), 0x0040_4040);
         assert_eq!(lightmap_modulate(0x0020_4060, 0x00ff_ffff), 0x0020_4060);
         assert_eq!(lightmap_modulate(0x00ff_ffff, 0x0000_0000), 0x0000_0000);
+    }
+
+    #[test]
+    fn chase_camera_stops_in_front_of_a_wall_behind_the_player() {
+        // Backing Max against a wall pushed the camera through it: the whole house showed.
+        let mut scene = empty_scene();
+        let v = |x: f32, y: f32| SceneVertex {
+            pos: [x, y, -1.0],
+            uv: [0.0; 2],
+            luv: [0.0; 2],
+        };
+        scene.static_meshes.push(crate::scene::SceneStaticMesh {
+            mesh_id: 0,
+            room_id: None,
+            world_origin: [0.0; 3],
+            polys: vec![ScenePoly {
+                vertices: vec![v(-5.0, -5.0), v(5.0, -5.0), v(5.0, 5.0), v(-5.0, 5.0)],
+                normal: [0.0, 0.0, 1.0],
+                material_id: 0,
+                lightmap_id: -1,
+            }],
+        });
+        let player = [0.0, 1.6, 0.0];
+        let fwd = [0.0, 0.0, 1.0];
+        let eye = chase_camera(&scene, player, fwd);
+        assert!(eye[2] > -1.0 && eye[2] < -0.5, "{eye:?}");
+        // Nothing in the way: the full follow distance.
+        assert_eq!(
+            chase_camera(&empty_scene(), player, fwd),
+            chase_eye(player, fwd, CHASE_BACK)
+        );
+        // A skybox wall does not stop the camera.
+        scene.materials.insert(
+            0,
+            crate::scene::SceneMaterial {
+                id: 0,
+                category: "Skybox".into(),
+                texture_path: String::new(),
+                texture_index: None,
+                alpha_reference: None,
+                blended: false,
+            },
+        );
+        assert_eq!(
+            chase_camera(&scene, player, fwd),
+            chase_eye(player, fwd, CHASE_BACK)
+        );
+    }
+
+    #[test]
+    fn chase_camera_keeps_its_clearance_from_a_wall_beside_it() {
+        // A wall alongside the follow ray is never hit by it; the eye ended up 0.1 m off the
+        // wall and the near plane showed the level behind it.
+        let mut scene = empty_scene();
+        let v = |y: f32, z: f32| SceneVertex {
+            pos: [0.1, y, z],
+            uv: [0.0; 2],
+            luv: [0.0; 2],
+        };
+        scene.static_meshes.push(crate::scene::SceneStaticMesh {
+            mesh_id: 0,
+            room_id: None,
+            world_origin: [0.0; 3],
+            polys: vec![ScenePoly {
+                vertices: vec![v(-5.0, -5.0), v(5.0, -5.0), v(5.0, 5.0), v(-5.0, 5.0)],
+                normal: [-1.0, 0.0, 0.0],
+                material_id: 0,
+                lightmap_id: -1,
+            }],
+        });
+        let eye = chase_camera(&scene, [0.0, 1.6, 0.0], [0.0, 0.0, 1.0]);
+        assert!((eye[0] - (0.1 - CAMERA_CLEARANCE)).abs() < 1e-4, "{eye:?}");
+        assert!((eye[2] + CHASE_BACK).abs() < 1e-4, "{eye:?}");
+    }
+
+    #[test]
+    fn the_move_clip_runs_on_real_time() {
+        // The run clip played ~11x fast: its clock advanced by dt * speed * 1.9. Clips carry
+        // their own frame rate (Run.kf2 50 fps), so one second of running is one clip second.
+        assert_eq!(move_clip_time(0.25, 1.0), 1.25);
     }
 
     #[test]
@@ -2519,11 +3578,18 @@ mod tests {
             sound_catalogs: BTreeMap::new(),
             sound_queue: Vec::new(),
             sound_stops: Vec::new(),
+            music_request: None,
+            camera_shakes: Vec::new(),
+            death_cams: Vec::new(),
+            effect_queue: Vec::new(),
+            effect_stops: Vec::new(),
             attached_camera: None,
             player_controls: true,
             screen_fade: None,
             ambient: [0.0; 3],
             mode_switch: None,
+            fog: None,
+            fog_fade: None,
         }
     }
 
@@ -2627,6 +3693,42 @@ mod tests {
         assert!(close(fwd, [1.0, 0.0, 0.0]), "{fwd:?}");
         assert!(close(up, [0.0, 1.0, 0.0]), "{up:?}");
         assert!(close(right, [0.0, 0.0, -1.0]), "{right:?}");
+    }
+
+    #[test]
+    fn frame_step_follows_the_real_clock_with_a_cap() {
+        // Scripts, fades and animations follow wall time, so a slow frame does not slow the
+        // cutscene against its real-time speech; a loading stall is capped instead of skipping.
+        assert_eq!(frame_dt(std::time::Duration::from_millis(33)), 0.033);
+        assert_eq!(frame_dt(std::time::Duration::from_secs(2)), MAX_FRAME_DT);
+    }
+
+    #[test]
+    fn fog_end_is_the_back_plane_with_a_floor() {
+        // globalconfig.txt `[camera]` `MinimumBackPlaneDistance = 10.0`.
+        let fog = |end| {
+            Some(crate::scene::LevelFog {
+                color: [0.0; 3],
+                start: 0.0,
+                end,
+            })
+        };
+        assert_eq!(back_plane(None), FAR_Z);
+        assert_eq!(back_plane(fog(400.0)), 400.0);
+        assert_eq!(back_plane(fog(5.0)), 10.0);
+    }
+
+    #[test]
+    fn software_fog_mixes_by_view_depth_and_spares_the_sky() {
+        let fog = crate::scene::LevelFog {
+            color: [0.0, 0.0, 0.0],
+            start: 0.0,
+            end: 100.0,
+        };
+        let mut fb = vec![0x00ff_ffffu32; 3];
+        let zb = [50.0, 200.0, f32::INFINITY];
+        apply_fog(&mut fb, &zb, Some(fog));
+        assert_eq!(fb, vec![0x0080_8080, 0x0000_0000, 0x00ff_ffff]);
     }
 
     #[test]
