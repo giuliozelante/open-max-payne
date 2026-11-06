@@ -690,6 +690,9 @@ pub struct LdbScene {
     pub fov_multiplier: Ramp,
     /// `GM_ChangeControlledGameSpeed`: how fast the world runs.
     pub game_speed: Ramp,
+    /// `GM_ChangeGameSpeed`: what a dodge's clips multiply the game speed by, apart from the
+    /// speed bullet time sets.
+    pub dodge_speed: Ramp,
     /// The running `MPHM_FlashToColor`.
     pub screen_flash: Option<ScreenFlash>,
     /// The player's weapons, as the `C_PickupWeapon` family of messages leaves them.
@@ -1171,6 +1174,14 @@ impl LdbScene {
                     .set(if on { 1.0 } else { 0.0 }, seconds.unwrap_or(0.0));
                 true
             }
+            "gm_changegamespeed" => {
+                let number = |i: usize| msg.args.get(i).and_then(|a| a.trim().parse::<f32>().ok());
+                let Some(speed) = number(0).filter(|speed| *speed > 0.0) else {
+                    return false;
+                };
+                self.dodge_speed.set(speed, number(1).unwrap_or(0.0));
+                true
+            }
             "gm_changecontrolledgamespeed" => {
                 let number = |i: usize| msg.args.get(i).and_then(|a| a.trim().parse::<f32>().ok());
                 let Some(speed) = number(0).filter(|speed| *speed > 0.0) else {
@@ -1503,6 +1514,7 @@ impl LdbScene {
         self.widescreen.step(dt);
         self.fov_multiplier.step(dt);
         self.game_speed.step(dt);
+        self.dodge_speed.step(dt);
         if let Some(flash) = self.screen_flash.as_mut() {
             flash.age += dt;
         }
@@ -3200,6 +3212,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         widescreen: Ramp::at(0.0),
         fov_multiplier: Ramp::at(1.0),
         game_speed: Ramp::at(1.0),
+        dodge_speed: Ramp::at(1.0),
         screen_flash: None,
         inventory: Default::default(),
         hud_prints: Vec::new(),
@@ -3268,6 +3281,18 @@ fn parent_name(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dodge_changes_its_own_game_speed_and_leaves_bullet_time_alone() {
+        let mut scene = LdbScene {
+            game_speed: Ramp::at(0.5),
+            dodge_speed: Ramp::at(1.0),
+            ..Default::default()
+        };
+        assert!(scene.dispatch_message("", "maxpayne_gamemode->gm_changegamespeed( 0.2, 0.0 );"));
+        assert_eq!(scene.dodge_speed.value, 0.2);
+        assert_eq!(scene.game_speed.value, 0.5);
+    }
 
     #[test]
     fn the_game_speed_ramps_to_its_target() {
@@ -3349,6 +3374,7 @@ mod tests {
             widescreen: Ramp::at(0.0),
             fov_multiplier: Ramp::at(1.0),
             game_speed: Ramp::at(1.0),
+            dodge_speed: Ramp::at(1.0),
             screen_flash: None,
             inventory: Default::default(),
             hud_prints: Vec::new(),
