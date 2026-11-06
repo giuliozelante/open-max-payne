@@ -2762,6 +2762,18 @@ pub fn load_difficulty(game_dir: &Path) -> Option<health::Difficulty> {
     health::Difficulty::parse(&String::from_utf8_lossy(&text))
 }
 
+/// Max at full health, from `max_payne.txt` and the difficulty.
+pub fn load_player_health(game_dir: &Path) -> Option<health::PlayerHealth> {
+    let difficulty = load_difficulty(game_dir)?;
+    let skin = read_game_bytes(game_dir, r"\data\database\skins\max_payne.txt")?;
+    let ranges = read_game_bytes(game_dir, r"\data\database\ai_ranges.h").unwrap_or_default();
+    let max = kf2::skin_max_health(
+        &String::from_utf8_lossy(&skin),
+        &String::from_utf8_lossy(&ranges),
+    )?;
+    Some(health::PlayerHealth::new(max as f32, &difficulty))
+}
+
 /// `weaponpriority.txt` `[BestWeapons]`, strongest first.
 pub fn load_best_weapons(game_dir: &Path) -> Vec<String> {
     read_game_bytes(game_dir, r"\data\weaponpriority.txt")
@@ -4832,6 +4844,10 @@ mod tests {
         let difficulty = load_difficulty(&game).expect("difficulty.txt");
         assert_eq!(difficulty.enemy_health, 0.8);
         assert_eq!(difficulty.player_health, 1.0);
+        assert_eq!(difficulty.regenerate, 0.04);
+        assert_eq!(difficulty.gained_immediately, 0.05);
+        let max = load_player_health(&game).expect("max_payne.txt");
+        assert_eq!(max.max, 60.0);
     }
 
     #[test]

@@ -525,6 +525,16 @@ pub enum CharacterOrder {
     Teleport(String),
     /// `C_SetHealth`: a fraction of maximum health (0x699ad0; 0x6999a0 refuses anything outside 0..1).
     SetHealth(f32),
+    /// `C_AddHealth`, in points.
+    AddHealth(f32),
+    /// `C_CauseDamage`, in points.
+    CauseDamage(f32),
+    /// `C_SetImmortal`.
+    SetImmortal(bool),
+    /// `C_SetDodgeImmortal`.
+    SetDodgeImmortal(bool),
+    /// `C_SetInvulnerable`.
+    SetInvulnerable(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -1229,6 +1239,35 @@ impl LdbScene {
                     return false;
                 };
                 let order = CharacterOrder::SetHealth(health);
+                self.character_orders
+                    .push((msg.receiver.to_string(), order));
+                true
+            }
+            "c_addhealth" | "c_causedamage" => {
+                let points = msg.args.first().and_then(|a| a.trim().parse::<f32>().ok());
+                let Some(points) = points.filter(|points| *points >= 0.0) else {
+                    return false;
+                };
+                let order = if msg.verb.eq_ignore_ascii_case("c_addhealth") {
+                    CharacterOrder::AddHealth(points)
+                } else {
+                    CharacterOrder::CauseDamage(points)
+                };
+                self.character_orders
+                    .push((msg.receiver.to_string(), order));
+                true
+            }
+            "c_setimmortal" | "c_setdodgeimmortal" | "c_setinvulnerable" => {
+                let on = match msg.args.first().map(|a| a.trim().to_ascii_lowercase()) {
+                    Some(text) if text == "true" || text == "1" => true,
+                    Some(text) if text == "false" || text == "0" => false,
+                    _ => return false,
+                };
+                let order = match msg.verb.to_ascii_lowercase().as_str() {
+                    "c_setimmortal" => CharacterOrder::SetImmortal(on),
+                    "c_setdodgeimmortal" => CharacterOrder::SetDodgeImmortal(on),
+                    _ => CharacterOrder::SetInvulnerable(on),
+                };
                 self.character_orders
                     .push((msg.receiver.to_string(), order));
                 true
@@ -3382,6 +3421,28 @@ mod tests {
             [("::E01".to_string(), CharacterOrder::SetHealth(0.25))]
         );
         assert!(!scene.dispatch_message("", "::E01->C_SetHealth(60);"));
+    }
+
+    #[test]
+    fn health_messages_become_orders() {
+        let mut scene = LdbScene::default();
+        assert!(scene.dispatch_message("", "player->C_AddHealth(0.6);"));
+        assert!(scene.dispatch_message("", "player->C_CauseDamage(5);"));
+        assert!(scene.dispatch_message("", "player->C_SetImmortal(true);"));
+        assert!(scene.dispatch_message("", "player->C_SetDodgeImmortal(false);"));
+        assert!(scene.dispatch_message("", "player->C_SetInvulnerable(true);"));
+        assert!(!scene.dispatch_message("", "player->C_AddHealth(-1);"));
+        let orders: Vec<_> = scene.character_orders.iter().map(|o| o.1.clone()).collect();
+        assert_eq!(
+            orders,
+            [
+                CharacterOrder::AddHealth(0.6),
+                CharacterOrder::CauseDamage(5.0),
+                CharacterOrder::SetImmortal(true),
+                CharacterOrder::SetDodgeImmortal(false),
+                CharacterOrder::SetInvulnerable(true),
+            ]
+        );
     }
 
     #[test]
