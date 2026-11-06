@@ -536,7 +536,7 @@ impl SceneJumppoint {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SceneFsm {
     pub name: String,
     pub room_id: i32,
@@ -609,6 +609,8 @@ pub struct SceneItem {
     pub item_type: String,
     pub room_id: i32,
     pub pos: [f32; 3],
+    /// Set by `LI_ActivateLevelItem`. An inactive item cannot be picked up.
+    pub active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1277,6 +1279,17 @@ impl LdbScene {
                         true
                     })
             }
+            "li_activatelevelitem" => {
+                let Some(active) = script_bool(msg.args.first().copied()) else {
+                    return false;
+                };
+                let items = self.items.iter_mut();
+                let mut named = items.filter(|item| item.name.eq_ignore_ascii_case(msg.receiver));
+                named.next().is_some_and(|item| {
+                    item.active = active;
+                    true
+                })
+            }
             "do_enablecollisions" => {
                 let Some(collisions) = script_bool(msg.args.first().copied()) else {
                     return false;
@@ -1574,6 +1587,29 @@ impl LdbScene {
         for (name, act) in scripts {
             self.dispatch_message(&name, &act);
         }
+    }
+
+    /// Startup `LI_ActivateLevelItem` only.
+    pub fn apply_startup_items(&mut self) {
+        let scripts: Vec<(String, String)> = self
+            .fsms
+            .iter()
+            .flat_map(|fsm| {
+                fsm.startup_actions.iter().filter_map(|act| {
+                    let verb = Message::parse(act)?.verb.to_ascii_lowercase();
+                    (verb == "li_activatelevelitem").then(|| (fsm.name.clone(), act.clone()))
+                })
+            })
+            .collect();
+        for (name, act) in scripts {
+            self.dispatch_message(&name, &act);
+        }
+    }
+
+    /// Whether the item named `name` can be picked up.
+    pub fn item_active(&self, name: &str) -> bool {
+        let found = self.items.iter().find(|item| item.name == name);
+        found.is_none_or(|item| item.active)
     }
 
     /// Startup `T_Enable` only. Other startup verbs stay untouched.
@@ -2970,6 +3006,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
                 let _unk = read_str(data, &mut i)?;
                 let item_type = read_str(data, &mut i)?;
                 items.push(SceneItem {
+                    active: true,
                     name,
                     item_type,
                     room_id,

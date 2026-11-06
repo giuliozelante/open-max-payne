@@ -259,6 +259,7 @@ pub fn run_3d_walkthrough(
     scene.apply_startup_hitpoints();
     scene.apply_startup_hides();
     scene.apply_startup_enables();
+    scene.apply_startup_items();
     scene.apply_startup_sends();
     scene.apply_startup_animates();
     if cinematic {
@@ -1855,9 +1856,6 @@ fn dynamic_wall_hit(
                 continue;
             }
             let n = xform_dir(xform, poly.normal);
-            if n[1].abs() > 0.45 {
-                continue;
-            }
             let mut min_x = f32::INFINITY;
             let mut max_x = f32::NEG_INFINITY;
             let mut min_y = f32::INFINITY;
@@ -1874,6 +1872,14 @@ fn dynamic_wall_hit(
                 max_y = max_y.max(p[1]);
                 min_z = min_z.min(p[2]);
                 max_z = max_z.max(p[2]);
+            }
+            if n[1].abs() > 0.45 {
+                // A floor or lid the feet cannot ride onto, like a van's load bed.
+                let step = wy - EYE_HEIGHT + STEP_UP;
+                if max_y > step && min_y < body_max_y && xz_gap(&world, wx, wz) < radius {
+                    return Some(idx);
+                }
+                continue;
             }
             if body_max_y < min_y || body_min_y > max_y {
                 continue;
@@ -1892,6 +1898,25 @@ fn dynamic_wall_hit(
         }
     }
     None
+}
+
+/// How far `(x, z)` is from a convex polygon seen from above: 0 over it.
+fn xz_gap(poly: &[[f32; 3]], x: f32, z: f32) -> f32 {
+    let over = (1..poly.len() - 1).any(|k| point_in_xz_tri(x, z, poly[0], poly[k], poly[k + 1]));
+    if over {
+        return 0.0;
+    }
+    let edge = |(a, b): (&[f32; 3], &[f32; 3])| {
+        let (ex, ez) = (b[0] - a[0], b[2] - a[2]);
+        let along = ((x - a[0]) * ex + (z - a[2]) * ez) / (ex * ex + ez * ez).max(1e-9);
+        let along = along.clamp(0.0, 1.0);
+        (a[0] + ex * along - x).hypot(a[2] + ez * along - z)
+    };
+    let next = poly.iter().cycle().skip(1);
+    poly.iter()
+        .zip(next)
+        .map(edge)
+        .fold(f32::INFINITY, f32::min)
 }
 
 pub(crate) fn poly_policy(scene: &LdbScene, material_id: i32) -> MaterialPolicy {
@@ -6161,6 +6186,45 @@ mod tests {
         assert!(hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
         scene.dynamic_meshes[0].polys[0].material_id = 2;
         assert!(!hits_wall(&scene, &rooms, 0.1, 1.65, 0.0));
+    }
+
+    /// A dynamic mesh holding one flat square at `height`, x 0..2 and z -1..1.
+    fn flat_mesh(height: f32) -> SceneDynamicMesh {
+        let mut mesh = glass_quad(false);
+        let corner = |x, z| {
+            let mut vertex = mesh.polys[0].vertices[0];
+            vertex.pos = [x, height, z];
+            vertex
+        };
+        let vertices = vec![
+            corner(0.0, -1.0),
+            corner(0.0, 1.0),
+            corner(2.0, 1.0),
+            corner(2.0, -1.0),
+        ];
+        mesh.polys[0].vertices = vertices;
+        mesh.polys[0].normal = [0.0, 1.0, 0.0];
+        mesh
+    }
+
+    #[test]
+    fn a_dynamic_floor_too_high_to_step_on_stops_the_body() {
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(flat_mesh(0.75));
+        let rooms = BTreeMap::new();
+        assert!(hits_wall(&scene, &rooms, -0.2, EYE_HEIGHT, 0.0));
+        assert!(hits_wall(&scene, &rooms, 1.0, EYE_HEIGHT, 0.0));
+        assert!(!hits_wall(&scene, &rooms, -1.0, EYE_HEIGHT, 0.0));
+    }
+
+    #[test]
+    fn a_dynamic_floor_blocks_only_between_step_and_head_height() {
+        let rooms = BTreeMap::new();
+        for height in [STEP_UP - 0.1, EYE_HEIGHT + 0.5] {
+            let mut scene = empty_scene();
+            scene.dynamic_meshes.push(flat_mesh(height));
+            assert!(!hits_wall(&scene, &rooms, 1.0, EYE_HEIGHT, 0.0), "{height}");
+        }
     }
 
     #[test]
