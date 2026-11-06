@@ -138,7 +138,7 @@ pub fn run_3d_walkthrough(
     let difficulty = crate::load_difficulty(&catalog_root(level_path));
     let enemy_health = difficulty.map_or(1.0, |difficulty| difficulty.enemy_health);
     let auto_aim_scale = difficulty.map_or([1.0; 2], |difficulty| difficulty.auto_aim);
-    // Build active enemies from `scene.characters` (already C_Teleport-resolved)
+    // Build active enemies from `scene.characters`, which wait until a script teleports them.
     let mut enemies: Vec<EnemyState> = Vec::new();
     for ch in &scene.characters {
         let key = ch.skin.to_ascii_lowercase();
