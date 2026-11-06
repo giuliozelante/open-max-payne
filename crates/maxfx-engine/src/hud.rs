@@ -687,6 +687,8 @@ pub struct WeaponDef {
     pub two_handed: bool,
     /// `ShootDodgeAllowed`.
     pub dive_allowed: bool,
+    /// `AutoAimingAllowed`.
+    pub auto_aim: bool,
     /// What one shot or melee blow creates.
     pub projectiles: Vec<ProjectileDef>,
     /// What a `WEAPONANIM_SHOOT_NOEFFECTS` round creates.
@@ -738,6 +740,7 @@ impl WeaponDef {
             reload_clip: None,
             dive_allowed: key("shootdodgeallowed")
                 .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
+            auto_aim: key("autoaimingallowed").is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
             two_handed: key("twohandedanimation")
                 .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
             projectiles: Vec::new(),

@@ -37,3 +37,19 @@ result under `0.1` to `0.1` when `[esi+0x454]` or `[esi+0x455]` is set. `0x69a80
 and has not been read. The floor applies only to the living: `0x6d6eb0` guards it and is taken to be a dead flag.
 
 **UNKNOWN:** the flash, sound and death side effects in `0x695b10` and `0x695fb0`.
+
+## Auto-aim
+
+**VERIFIED (`0x6d8ca2`-`0x6d8d10`, `0x6770a0`):** a projectile test grows the target's capsule. Radius takes
+`AutoAimCapsuleRadiusMultiplier` (difficulty `+0x10`), the axis `AutoAimCapsuleHeightMultiplier` (`+0xc`), each at
+least 1. It applies when `0x89aecd` (`AutoAim Toggle`) is on, the target's flag at `+0x71` and the projectile's at
+`+0x17b` are set.
+
+**VERIFIED (`0x6d9292`-`0x6d9347`):** without a real hit, a target in front of the projectile is stored at `+0x177`.
+A real hit clears it and sets `+0x17c`. Max's aiming reads it through `0x6d8800` at `0x688f85` and works from the target.
+
+**STRONGLY SUPPORTED:** the flags are `AutoAimTarget` and `AutoAimingAllowed`, by their string tables and values.
+
+**HYPOTHESIS:** the aim turns to `AutoAimTargetBoneName`, taken as half the character's height, and spread applies
+after it. The bone transform at `0x68907a` onward is unread. The engine tests the shot's own ray; retail keeps the
+target from earlier projectiles, so a retail first shot may not turn.
