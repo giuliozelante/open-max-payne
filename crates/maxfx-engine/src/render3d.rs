@@ -213,7 +213,7 @@ pub fn run_3d_walkthrough(
 
     let mut player_pos = spawn_pos(&scene, &room_origins, jp_idx);
     let mut yaw: f32 = scene.jumppoints.get(jp_idx).map_or(0.0, |jp| jp.yaw());
-    let mut pitch: f32 = -0.08;
+    let mut pitch: f32 = 0.0;
     let mut vel_y: f32 = 0.0;
     let mut walk_phase: f32 = 0.0;
     let mut third_person = true;
@@ -785,13 +785,13 @@ pub fn run_3d_walkthrough(
             }
             // The dot marks the view's centre, so a bullet leaves from the camera. A blow leaves
             // from Max.
-            let aim_from = if third_person && !fly_mode && reach.is_none() {
-                chase_view(&scene, &room_origins, &chase_rig, player_pos, aim_dir)
+            let (aim_from, aim) = if third_person && !fly_mode && reach.is_none() {
+                let eye = chase_view(&scene, &room_origins, &chase_rig, player_pos, aim_dir);
+                (eye, chase_look(&chase_rig, player_pos, aim_dir, eye).2)
             } else {
-                player_pos
+                (player_pos, aim_dir)
             };
             let within = |t: f32| reach.is_none_or(|reach| t <= reach);
-            let aim = aim_dir;
             let rays = shot
                 .iter()
                 .flat_map(|projectile| std::iter::repeat_n(projectile, projectile.count as usize));
@@ -1231,11 +1231,11 @@ pub fn run_3d_walkthrough(
         let mut cam_right = [cy, 0.0, -sy];
         let mut cam_up = [-sy * sp, cp, -cy * sp];
         let mut cam_fwd = [sy * cp, sp, cy * cp];
-        let mut cam_pos = if third_person && !fly_mode {
-            chase_view(&scene, &room_origins, &chase_rig, player_pos, cam_fwd)
-        } else {
-            player_pos
-        };
+        let mut cam_pos = player_pos;
+        if third_person && !fly_mode {
+            cam_pos = chase_view(&scene, &room_origins, &chase_rig, player_pos, cam_fwd);
+            (cam_right, cam_up, cam_fwd) = chase_look(&chase_rig, player_pos, cam_fwd, cam_pos);
+        }
         if let Some((pos, right, up, fwd)) = attached_view(&scene, &room_origins) {
             (cam_pos, cam_right, cam_up, cam_fwd) = (pos, right, up, fwd);
         } else if let Some(view) = death_cam.as_ref().and_then(|(path, target)| {
@@ -2067,6 +2067,10 @@ pub(crate) struct ChaseRig {
     dive_point: [f32; 3],
     /// `InitialBackwardsSpeed`: metres per second the camera moves between those points.
     point_speed: f32,
+    /// `DefaultAimingPointOffset`, from the feet: where aiming starts.
+    aim_point: [f32; 3],
+    /// `LookAtMinDistance`: how far along the aim the camera looks.
+    look_at: f32,
     /// `globalconfig.txt` `[camera]` `UpFollowDistance`: the camera above the player.
     up: [f32; 3],
     /// `MiddleFollowDistance`: the camera behind the player.
@@ -2082,6 +2086,8 @@ impl ChaseRig {
             crouch_point: config_vector(skeleton, "CrouchingCameraPointOffset")?,
             dive_point: config_vector(skeleton, "ShootDodgingCameraPointOffset")?,
             point_speed: config_number(globalconfig, "InitialBackwardsSpeed")?,
+            aim_point: config_vector(skeleton, "DefaultAimingPointOffset")?,
+            look_at: config_number(globalconfig, "LookAtMinDistance")?,
             up: config_vector(globalconfig, "UpFollowDistance")?,
             middle: config_vector(globalconfig, "MiddleFollowDistance")?,
             down: config_vector(globalconfig, "DownFollowDistance")?,
@@ -2129,6 +2135,8 @@ const RETAIL_RIG: ChaseRig = ChaseRig {
     crouch_point: [0.12, 1.15, -0.12],
     dive_point: [0.12, 0.90, -0.12],
     point_speed: 5.0,
+    aim_point: [0.12, 1.50, 0.0],
+    look_at: 5.0,
     up: [0.06, 0.40, -0.40],
     middle: [0.06, 0.5, -4.00],
     down: [0.06, 0.80, -1.00],
@@ -2164,6 +2172,29 @@ fn chase_eye(rig: &ChaseRig, player: [f32; 3], cam_fwd: [f32; 3]) -> [f32; 3] {
     let up = cross3(cam_fwd, right);
     let start = chase_start(rig, player, cam_fwd);
     [0, 1, 2].map(|c| start[c] + right[c] * follow[0] + up[c] * follow[1] + cam_fwd[c] * follow[2])
+}
+
+/// Right, up and forward of a chase camera at `eye`, for a character aiming `aim`. It does not
+/// look along the aim but at the point `LookAtMinDistance` along it from the aiming point, so the
+/// view tips toward the character and the crosshair sits just above the head.
+fn chase_look(
+    rig: &ChaseRig,
+    player: [f32; 3],
+    aim: [f32; 3],
+    eye: [f32; 3],
+) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    let feet = [player[0], player[1] - EYE_HEIGHT, player[2]];
+    let start = yaw_offset(feet, aim, rig.aim_point);
+    let target = [0, 1, 2].map(|c| start[c] + aim[c] * rig.look_at);
+    let fwd = normalize(sub3(target, eye));
+    let ahead = normalize([aim[0], 0.0, aim[2]]);
+    let right = normalize(cross3([0.0, 1.0, 0.0], fwd));
+    let right = if dot3(right, right) > 0.5 {
+        right
+    } else {
+        [ahead[2], 0.0, -ahead[0]]
+    };
+    (right, cross3(fwd, right), fwd)
 }
 
 /// How far the chase camera stays off what it hits: `globalconfig.txt` `[camera]`
@@ -6063,6 +6094,21 @@ mod tests {
     }
 
     #[test]
+    fn the_chase_camera_looks_at_a_point_ahead_of_the_aiming_point() {
+        let player = [0.0, EYE_HEIGHT, 0.0];
+        let aim = [0.0, 0.0, 1.0];
+        let eye = chase_eye(&RETAIL_RIG, player, aim);
+        let (right, up, fwd) = chase_look(&RETAIL_RIG, player, aim, eye);
+        let target = [0.12, 1.5, 5.0];
+        let want = normalize(sub3(target, eye));
+        for c in 0..3 {
+            assert!((fwd[c] - want[c]).abs() < 1e-5, "{fwd:?} {want:?}");
+        }
+        assert!(dot3(right, fwd).abs() < 1e-5 && dot3(up, fwd).abs() < 1e-5);
+        assert!(right[0] > 0.9 && up[1] > 0.9, "{right:?} {up:?}");
+    }
+
+    #[test]
     fn the_chase_ray_starts_at_the_camera_point() {
         let start = chase_start(&RETAIL_RIG, [0.0, EYE_HEIGHT, 0.0], [0.0, 0.0, 1.0]);
         for (got, want) in start.iter().zip([0.12, 1.75, -0.12]) {
@@ -6072,8 +6118,8 @@ mod tests {
 
     #[test]
     fn the_rig_reads_its_offsets_from_the_retail_text() {
-        let config = "[camera]\n{\n\t[general]\n\tUpFollowDistance\t= ( 0.06, 0.40, -0.40 );\n\tMiddleFollowDistance\t= ( 0.06, 0.5, -4.00 ); //was 0,0.75,-3\n\tDownFollowDistance\t= ( 0.06, 0.80, -1.00 );\n\tInitialBackwardsSpeed\t= 5.0; \t// m/s\t- was 5\n}\n";
-        let skeleton = "[Sk]\nDefaultCameraPointOffset\t\t= ( 0.12, 1.75, -0.12 );\nCrouchingCameraPointOffset\t\t= ( 0.12, 1.15, -0.12 );\nShootDodgingCameraPointOffset\t= ( 0.12, 0.90, -0.12 );\n";
+        let config = "[camera]\n{\n\t[general]\n\tUpFollowDistance\t= ( 0.06, 0.40, -0.40 );\n\tMiddleFollowDistance\t= ( 0.06, 0.5, -4.00 ); //was 0,0.75,-3\n\tDownFollowDistance\t= ( 0.06, 0.80, -1.00 );\n\tInitialBackwardsSpeed\t= 5.0; \t// m/s\t- was 5\n\tLookAtMinDistance\t= 5.0;\t// minimum distance from aiming startpoint\n}\n";
+        let skeleton = "[Sk]\nDefaultCameraPointOffset\t\t= ( 0.12, 1.75, -0.12 );\nCrouchingCameraPointOffset\t\t= ( 0.12, 1.15, -0.12 );\nShootDodgingCameraPointOffset\t= ( 0.12, 0.90, -0.12 );\nDefaultAimingPointOffset\t\t= ( 0.12, 1.50, 0.00 );\n";
         assert_eq!(ChaseRig::parse(config, skeleton), Some(RETAIL_RIG));
     }
 
