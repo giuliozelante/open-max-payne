@@ -1967,6 +1967,8 @@ pub struct LevelsTxtEntry {
     pub ambient: Option<[f32; 3]>,
     /// `FogColor` / `FogStart` / `FogEnd`, present only when `Fogging` is on.
     pub fog: Option<crate::scene::LevelFog>,
+    /// `Gravity` (m/s², `#define`s resolved): retail is `( 0, GRAVITY_VALUE , 0 )`, -20.
+    pub gravity: Option<[f32; 3]>,
 }
 
 impl LevelsTxtEntry {
@@ -2050,6 +2052,7 @@ pub fn parse_levels_txt(text: &str) -> Vec<LevelsTxtEntry> {
             world_sphere: prop_value(body, "WorldSphere"),
             ambient: prop_value(body, "AmbientColor").and_then(|v| parse_color3(&v, &defines)),
             fog: level_fog(body, &defines),
+            gravity: prop_value(body, "Gravity").and_then(|v| parse_color3(&v, &defines)),
         });
     }
     out
@@ -4012,6 +4015,14 @@ mod tests {
             })
         );
         assert_eq!(entries[1].fog, None);
+    }
+
+    #[test]
+    fn levels_txt_reads_the_level_gravity_through_its_define() {
+        // Retail levels.txt: `#define GRAVITY_VALUE -20`, `Gravity = ( 0, GRAVITY_VALUE , 0 );`.
+        let txt = "#define\t\tGRAVITY_VALUE\t-20\n[startup_level]\n{\n\t[Properties]\n\tDirectory = front_end;\n\tLevel = startup_level.ldb;\n\tGravity \t\t= ( 0, GRAVITY_VALUE , 0 );\n}\n";
+        let entries = parse_levels_txt(txt);
+        assert_eq!(entries[0].gravity, Some([0.0, -20.0, 0.0]));
     }
 
     #[test]
