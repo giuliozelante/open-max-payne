@@ -687,6 +687,8 @@ pub struct WeaponDef {
     pub two_handed: bool,
     /// `ShootDodgeAllowed`.
     pub dive_allowed: bool,
+    /// `AutoAimingAllowed`.
+    pub auto_aim: bool,
     /// What one shot or melee blow creates.
     pub projectiles: Vec<ProjectileDef>,
     /// What a `WEAPONANIM_SHOOT_NOEFFECTS` round creates.
@@ -738,6 +740,7 @@ impl WeaponDef {
             reload_clip: None,
             dive_allowed: key("shootdodgeallowed")
                 .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
+            auto_aim: key("autoaimingallowed").is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
             two_handed: key("twohandedanimation")
                 .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
             projectiles: Vec::new(),
@@ -1137,8 +1140,17 @@ impl PlayerInventory {
         false
     }
 
+    /// Swallows a painkiller, when one is left.
+    pub fn take_painkiller(&mut self) -> bool {
+        let Some(id) = self.defs.get("painkiller").map(|def| &def.inventory_id) else {
+            return false;
+        };
+        let stock = self.ammo.get_mut(id).filter(|stock| stock.pocket > 0);
+        stock.map(|stock| stock.pocket -= 1).is_some()
+    }
+
     /// `weaponpriority.txt`: out of ammo, the player takes the best weapon that can still fire.
-    fn take_best_loaded(&mut self) {
+    pub fn take_best_loaded(&mut self) {
         let loaded = |name: &&String| {
             let def = &self.defs[*name];
             let stock = self.ammo.get(&def.inventory_id);
@@ -2142,6 +2154,15 @@ mod tests {
             assert!(player.fire());
         }
         player
+    }
+
+    #[test]
+    fn a_painkiller_leaves_the_pocket_until_none_are_left() {
+        let mut player = inventory();
+        player.pickup_ammo("painkiller", 1);
+        assert!(player.take_painkiller());
+        assert_eq!(player.painkillers(), 0);
+        assert!(!player.take_painkiller());
     }
 
     #[test]
