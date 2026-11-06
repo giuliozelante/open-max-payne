@@ -2968,8 +2968,141 @@ fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usi
     }
 }
 
-/// `bg_sunset_all.tga` is a 360°×90° strip: bottom edge on the horizon, top edge at the zenith.
-pub(crate) fn sky_strip_uv(dir: [f32; 3]) -> [f32; 2] {
+/// One mesh of a world sphere and its bitmaps, for [`bake_sky`].
+pub(crate) struct SkyLayer<'a> {
+    mesh: &'a crate::kf2::SkyMesh,
+    colour: &'a DecodedTexture,
+    opacity: Option<&'a DecodedTexture>,
+}
+
+/// Size of the baked sky: 360° by 180°, as wide as the widest world sphere bitmap.
+const SKY_SIZE: (u32, u32) = (2048, 1024);
+
+/// Paints the world sphere's meshes, in order, onto one latitude-longitude image (`sky_uv`), so
+/// both renderers draw any sphere the same way and need no mesh pass of their own.
+pub(crate) fn bake_sky(layers: &[SkyLayer], width: u32, height: u32) -> DecodedTexture {
+    let mut sky = DecodedTexture {
+        path: String::new(),
+        flag: 4,
+        width,
+        height,
+        pixels: vec![0; (width * height) as usize],
+    };
+    for layer in layers {
+        for tri in layer.mesh.indices.as_chunks::<3>().0 {
+            paint_sky_triangle(layer, *tri, &mut sky);
+        }
+    }
+    sky
+}
+
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// The texel of `tex` at `uv`, wrapping both ways.
+fn sky_texel(tex: &DecodedTexture, uv: [f32; 2]) -> u32 {
+    let x = (uv[0].rem_euclid(1.0) * tex.width as f32) as u32;
+    let y = (uv[1].rem_euclid(1.0) * tex.height as f32) as u32;
+    tex.pixels[(y.min(tex.height - 1) * tex.width + x.min(tex.width - 1)) as usize]
+}
+
+fn paint_sky_triangle(layer: &SkyLayer, tri: [usize; 3], sky: &mut DecodedTexture) {
+    use std::f32::consts::{PI, TAU};
+    let mesh = layer.mesh;
+    let p = tri.map(|i| mesh.vertices[i]);
+    let uv = tri.map(|i| mesh.uvs[i]);
+    let normal = cross3(sub3(p[1], p[0]), sub3(p[2], p[0]));
+    let (area, plane) = (dot3(normal, normal), dot3(p[0], normal));
+    if area == 0.0 || plane == 0.0 {
+        return;
+    }
+    let edges = [cross3(p[0], p[1]), cross3(p[1], p[2]), cross3(p[2], p[0])];
+    let side = dot3(edges[0], p[2]).signum();
+    let covers = |d: [f32; 3]| edges.iter().all(|e| dot3(*e, d) * side >= 0.0);
+
+    // Texels to test: the span of the triangle's outline, padded by a texel or two.
+    let (w, h) = (sky.width as i32, sky.height as i32);
+    let yaw0 = p[0][0].atan2(p[0][2]);
+    let (mut top, mut bottom) = (f32::MAX, f32::MIN);
+    let (mut west, mut east) = (f32::MAX, f32::MIN);
+    let mut on_pole = false;
+    for k in 0..3 {
+        for step in 0..16 {
+            let t = step as f32 / 16.0;
+            let (a, b) = (p[k], p[(k + 1) % 3]);
+            let d = normalize([0, 1, 2].map(|c| a[c] + (b[c] - a[c]) * t));
+            let row = (0.5 - d[1].clamp(-1.0, 1.0).asin() / PI) * h as f32;
+            (top, bottom) = (top.min(row - 2.0), bottom.max(row + 2.0));
+            let turn = (d[0].atan2(d[2]) - yaw0 + PI).rem_euclid(TAU) - PI;
+            (west, east) = (west.min(turn), east.max(turn));
+            on_pole |= d[1].abs() > 0.999;
+        }
+    }
+    let mut all_yaws = east - west >= PI || on_pole;
+    if covers([0.0, 1.0, 0.0]) {
+        (top, all_yaws) = (0.0, true);
+    }
+    if covers([0.0, -1.0, 0.0]) {
+        (bottom, all_yaws) = (h as f32, true);
+    }
+    let (first, count) = if all_yaws {
+        (0, w)
+    } else {
+        let scale = w as f32 / TAU;
+        let first = ((yaw0 + west + PI) * scale) as i32 - 2;
+        (first, ((east - west) * scale) as i32 + 5)
+    };
+
+    for y in (top.max(0.0) as i32)..(bottom.min(h as f32) as i32) {
+        let lat = (0.5 - (y as f32 + 0.5) / h as f32) * PI;
+        let (sin_lat, cos_lat) = lat.sin_cos();
+        for column in first..first + count.min(w) {
+            let x = column.rem_euclid(w);
+            let yaw = ((x as f32 + 0.5) / w as f32 - 0.5) * TAU;
+            let d = [yaw.sin() * cos_lat, sin_lat, yaw.cos() * cos_lat];
+            let along = dot3(d, normal);
+            if along == 0.0 || !covers(d) {
+                continue;
+            }
+            let reach = plane / along;
+            if reach <= 0.0 {
+                continue;
+            }
+            let hit = d.map(|c| c * reach);
+            let (a, b) = (sub3(p[0], hit), sub3(p[1], hit));
+            let c = sub3(p[2], hit);
+            let w0 = dot3(cross3(b, c), normal) / area;
+            let w1 = dot3(cross3(c, a), normal) / area;
+            let w2 = 1.0 - w0 - w1;
+            let at = [
+                uv[0][0] * w0 + uv[1][0] * w1 + uv[2][0] * w2,
+                uv[0][1] * w0 + uv[1][1] * w1 + uv[2][1] * w2,
+            ];
+            let colour = sky_texel(layer.colour, at);
+            let index = (y * w + x) as usize;
+            sky.pixels[index] = match layer.opacity {
+                None => colour,
+                Some(map) => {
+                    let alpha = sky_texel(map, at) & 0xff;
+                    let mix = |shift: u32| {
+                        let front = (colour >> shift) & 0xff;
+                        let back = (sky.pixels[index] >> shift) & 0xff;
+                        ((front * alpha + back * (255 - alpha)) / 255) << shift
+                    };
+                    mix(16) | mix(8) | mix(0)
+                }
+            };
+        }
+    }
+}
+
+/// Baked sky coordinates of a view direction: yaw across, zenith at the top, nadir at the bottom.
+pub(crate) fn sky_uv(dir: [f32; 3]) -> [f32; 2] {
     let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2])
         .sqrt()
         .max(1e-8);
@@ -2977,8 +3110,7 @@ pub(crate) fn sky_strip_uv(dir: [f32; 3]) -> [f32; 2] {
     let y = dir[1] / len;
     let z = dir[2] / len;
     let u = (x.atan2(z) / std::f32::consts::TAU + 0.5).rem_euclid(1.0);
-    let lat = y.clamp(-1.0, 1.0).asin().max(0.0);
-    let v = (1.0 - lat / (std::f32::consts::FRAC_PI_2)).clamp(0.0, 0.999);
+    let v = (0.5 - y.clamp(-1.0, 1.0).asin() / std::f32::consts::PI).clamp(0.0, 0.999);
     [u, v]
 }
 
@@ -3003,7 +3135,7 @@ fn paint_sky_strip(
                 cam_right[1] * cx + cam_up[1] * cy + cam_fwd[1],
                 cam_right[2] * cx + cam_up[2] * cy + cam_fwd[2],
             ];
-            let [u, v] = sky_strip_uv(dir);
+            let [u, v] = sky_uv(dir);
             let tx = ((u * tw as f32) as u32).min(tw - 1);
             let ty = ((v * th as f32) as u32).min(th - 1);
             fb[y * W + x] = tex.pixels[(ty * tw + tx) as usize];
@@ -3051,19 +3183,37 @@ fn load_world_sphere(level_path: &Path, name: &str) -> Option<DecodedTexture> {
     let export = crate::world_sphere_export(&catalog, name)?;
     let kf2 = read_ci(&roots, &export)
         .or_else(|| crate::kf2::load_bytes_from_ras(level_path, &[&export]))?;
-    let image = crate::first_image_name(&kf2)?;
+    let meshes = crate::kf2::parse_world_sphere(&kf2)?;
     let mut tex_dirs: Vec<std::path::PathBuf> = roots.iter().map(|r| r.join("textures")).collect();
     tex_dirs.extend(roots.iter().cloned());
-    let bytes = read_ci(&tex_dirs, &image)
-        .or_else(|| crate::kf2::load_bytes_from_ras(level_path, &[&image]))?;
-    let (width, height, pixels) = decode_texture_blob(&bytes)?;
-    Some(DecodedTexture {
-        path: image,
-        flag: 4,
-        width,
-        height,
-        pixels,
-    })
+    let bitmap = |image: &String| {
+        let bytes = read_ci(&tex_dirs, image)
+            .or_else(|| crate::kf2::load_bytes_from_ras(level_path, &[image]))?;
+        let (width, height, pixels) = decode_texture_blob(&bytes)?;
+        Some(DecodedTexture {
+            path: image.clone(),
+            flag: 4,
+            width,
+            height,
+            pixels,
+        })
+    };
+    let bitmaps: Vec<Vec<Option<DecodedTexture>>> = meshes
+        .iter()
+        .map(|mesh| mesh.textures.iter().map(&bitmap).collect())
+        .collect();
+    let layers: Vec<SkyLayer> = meshes
+        .iter()
+        .zip(&bitmaps)
+        .filter_map(|(mesh, images)| {
+            Some(SkyLayer {
+                mesh,
+                colour: images.first()?.as_ref()?,
+                opacity: images.get(1).and_then(Option::as_ref),
+            })
+        })
+        .collect();
+    Some(bake_sky(&layers, SKY_SIZE.0, SKY_SIZE.1))
 }
 
 fn draw_line(fb: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, col: u32) {
@@ -3822,29 +3972,111 @@ mod tests {
     }
 
     #[test]
-    fn sunset_strip_keeps_the_sun_on_the_horizon() {
-        let ahead = sky_strip_uv([0.0, 0.0, 1.0]);
-        assert!((ahead[0] - 0.5).abs() < 0.02);
-        assert!(
-            ahead[1] > 0.95,
-            "horizon sits on the bottom edge, got {}",
-            ahead[1]
+    fn the_baked_sky_covers_the_whole_sphere() {
+        assert_eq!(sky_uv([0.0, 0.0, 1.0]), [0.5, 0.5]);
+        assert_eq!(sky_uv([1.0, 0.0, 0.0]), [0.75, 0.5]);
+        assert_eq!(sky_uv([0.0, 1.0, 0.0])[1], 0.0);
+        assert_eq!(sky_uv([0.0, -1.0, 0.0])[1], 0.999);
+    }
+
+    fn flat_texture(pixels: Vec<u32>) -> DecodedTexture {
+        DecodedTexture {
+            path: "t.tga".into(),
+            flag: 0,
+            width: pixels.len() as u32,
+            height: 1,
+            pixels,
+        }
+    }
+
+    /// A triangle around `+z` with every corner on `uv`.
+    fn sky_triangle(uv: [f32; 2]) -> crate::kf2::SkyMesh {
+        crate::kf2::SkyMesh {
+            vertices: vec![[-50.0, -50.0, 50.0], [50.0, -50.0, 50.0], [0.0, 60.0, 50.0]],
+            uvs: vec![uv; 3],
+            indices: vec![0, 1, 2],
+            textures: Vec::new(),
+        }
+    }
+
+    fn baked_at(sky: &DecodedTexture, dir: [f32; 3]) -> u32 {
+        let [u, v] = sky_uv(dir);
+        let (x, y) = (
+            (u * sky.width as f32) as u32,
+            (v * sky.height as f32) as u32,
         );
-        let up = sky_strip_uv([0.0, 1.0, 0.0]);
-        assert!(up[1] < 0.05, "zenith sits on the top edge, got {}", up[1]);
-        let right = sky_strip_uv([1.0, 0.0, 0.0]);
-        assert!((right[0] - 0.75).abs() < 0.02);
+        sky.pixels[(y * sky.width + x) as usize]
     }
 
     #[test]
-    fn house_sunset_strip_loads_when_the_catalog_is_present() {
+    fn a_sky_triangle_paints_only_the_directions_it_covers() {
+        let mesh = sky_triangle([0.0, 0.0]);
+        let colour = flat_texture(vec![0x00ff_0000]);
+        let layer = SkyLayer {
+            mesh: &mesh,
+            colour: &colour,
+            opacity: None,
+        };
+        let sky = bake_sky(&[layer], 256, 128);
+        assert_eq!(baked_at(&sky, [0.0, 0.0, 1.0]), 0x00ff_0000);
+        assert_eq!(baked_at(&sky, [0.0, 0.0, -1.0]), 0);
+        assert_eq!(baked_at(&sky, [1.0, 0.0, 0.0]), 0);
+    }
+
+    #[test]
+    fn sky_texture_coordinates_wrap_around_negative_v() {
+        // World spheres store v from -1 at the zenith up to 0.
+        let mesh = sky_triangle([0.75, -0.25]);
+        let colour = DecodedTexture {
+            path: "t.tga".into(),
+            flag: 0,
+            width: 2,
+            height: 2,
+            pixels: vec![1, 2, 3, 4],
+        };
+        let layer = SkyLayer {
+            mesh: &mesh,
+            colour: &colour,
+            opacity: None,
+        };
+        let sky = bake_sky(&[layer], 256, 128);
+        assert_eq!(baked_at(&sky, [0.0, 0.0, 1.0]), 4);
+    }
+
+    #[test]
+    fn a_sky_layer_with_an_opacity_map_blends_over_the_one_before() {
+        let (behind, front) = (sky_triangle([0.0, 0.0]), sky_triangle([0.0, 0.0]));
+        let red = flat_texture(vec![0x00ff_0000]);
+        let blue = flat_texture(vec![0x0000_00ff]);
+        let half = flat_texture(vec![0x0080_8080]);
+        let sky = bake_sky(
+            &[
+                SkyLayer {
+                    mesh: &behind,
+                    colour: &red,
+                    opacity: None,
+                },
+                SkyLayer {
+                    mesh: &front,
+                    colour: &blue,
+                    opacity: Some(&half),
+                },
+            ],
+            256,
+            128,
+        );
+        assert_eq!(baked_at(&sky, [0.0, 0.0, 1.0]), 0x007f_0080);
+    }
+
+    #[test]
+    fn house_sunset_sky_bakes_when_the_catalog_is_present() {
         let catalog = Path::new("/tmp/omp-xdata-ref/data/database/worldspheres/worldspheres.txt");
         if !catalog.is_file() {
             return;
         }
         let tex = load_world_sphere(Path::new("/tmp/omp-xdata-ref"), "sunset").expect("sunset");
-        assert_eq!(tex.width, 1024);
-        assert_eq!(tex.height, 256);
+        assert_eq!((tex.width, tex.height), SKY_SIZE);
+        assert!(tex.pixels.iter().any(|px| *px != 0));
     }
 
     pub(super) fn empty_scene() -> LdbScene {
