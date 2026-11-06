@@ -711,7 +711,7 @@ fn play_level(
     let player_skin = entry.as_ref().and_then(|entry| entry.player_skin.clone());
     let world_sphere = entry.as_ref().and_then(|entry| entry.world_sphere.clone());
     let title = format!("Open Max Payne — {level_id}");
-    maxfx_engine::render3d::run_3d_walkthrough(
+    let end = maxfx_engine::render3d::run_3d_walkthrough(
         screen,
         scene,
         game_dir,
@@ -721,6 +721,9 @@ fn play_level(
         world_sphere.as_deref(),
         handoff.is_some(),
     )?;
+    if end == maxfx_engine::render3d::LevelEnd::Died {
+        return play_level(screen, music, game_dir, level_id, allow_handoff);
+    }
     if let Some(hand) = handoff {
         println!(
             "handoff {level_id} → {} → {}",

@@ -60,12 +60,14 @@ enum State {
     Roll,
     Dive,
     GetUp,
+    Dead,
 }
 
 /// Max's body from frame to frame.
 #[derive(Debug, Clone, Default)]
 pub struct PlayerMotion {
     state: State,
+    death_over: bool,
     index: Option<String>,
     /// Seconds into the clip; negative until its first frame has passed.
     time: f32,
@@ -96,6 +98,22 @@ impl PlayerMotion {
     /// In a dive, whose clips already aim the arms.
     pub fn diving(&self) -> bool {
         self.state == State::Dive
+    }
+
+    /// Falls down dead along `CHARANIM_RANDOMDEATH1`, the clip every Max death reverts to.
+    pub fn die(&mut self, clips: &CharacterClips, yaw: f32) {
+        if self.state == State::Dead {
+            return;
+        }
+        let index = "CHARANIM_RANDOMDEATH1".to_string();
+        self.path = clips.table.get(&index).cloned().unwrap_or_default();
+        self.heading = yaw;
+        self.begin(State::Dead, index);
+    }
+
+    /// The death clip has played to its end.
+    pub fn death_over(&self) -> bool {
+        self.death_over
     }
 
     /// Crouching, for the camera's lower point.
@@ -200,7 +218,7 @@ impl PlayerMotion {
                 }
             }
             State::Fall if c.grounded => self.land(c),
-            State::Fall | State::Roll | State::Dive | State::GetUp => {}
+            State::Fall | State::Roll | State::Dive | State::GetUp | State::Dead => {}
         }
     }
 
@@ -258,7 +276,7 @@ impl PlayerMotion {
                 [x + air[0], z + air[1]]
             }
             State::Fall => air,
-            State::Roll | State::Dive => turn(
+            State::Roll | State::Dive | State::Dead => turn(
                 path_velocity(&self.path, seconds, self.time()),
                 self.heading,
             ),
@@ -297,6 +315,10 @@ impl PlayerMotion {
                     messages.extend(due(script, rate, -1.0, self.time));
                 }
                 State::Crouch | State::Fall | State::Dive => self.time = length * 0.999,
+                State::Dead => {
+                    self.time = length * 0.999;
+                    self.death_over = true;
+                }
                 _ => {}
             }
             self.finish(c);
@@ -471,6 +493,8 @@ mod tests {
         [Movement] EndPosition = (0,0,1);\n\
         [Animation] Index = CHARANIM_FALL; Filename = fall;\n\
         [Animation] Index = CHARANIM_LAND; Filename = land;\n\
+        [Animation] Index = CHARANIM_RANDOMDEATH1; Filename = land;\n\
+        [Movement] EndPosition = (0,0,-1);\n\
         [Animation] Index = CHARANIM_DODGEFORWARD; Filename = jump;\n\
         [Movement] EndPosition = (0,0,2);\n\
         [Animation] Index = CHARANIM_SHOOTDODGEFORWARD; Filename = dive;\n\
@@ -794,6 +818,25 @@ mod tests {
             motion.step(&clips(), &c, 0.01);
             assert!(matches!(motion.state, State::Jump { .. }));
         }
+    }
+
+    #[test]
+    fn max_falls_along_his_death_clip_and_stays_down() {
+        let clips = clips();
+        let mut motion = PlayerMotion::default();
+        motion.die(&clips, 0.0);
+        let step = motion.step(&clips, &grounded(), 0.05);
+        assert!(step.clip.is_some());
+        assert!(!motion.death_over());
+        let jump = Controls {
+            jump: true,
+            ..grounded()
+        };
+        motion.step(&clips, &jump, 1.0);
+        assert!(motion.death_over());
+        assert_eq!(motion.state, State::Dead);
+        motion.die(&clips, 0.0);
+        assert!(motion.death_over(), "a second death changes nothing");
     }
 
     #[test]

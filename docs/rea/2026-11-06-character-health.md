@@ -46,3 +46,11 @@ points that makes 5 m safe and 10 m lethal, as the comment in `globalconfig.txt`
 
 **HYPOTHESIS:** `DamageFallingThreshold` gates it, and the speed is the fall alone. The test before `0x68dc98` is
 unread. The red flash is linear between the `DamageFlash*` ends; its code is unread.
+
+## Death
+
+**VERIFIED (`max_payne.txt`):** every Max death reverts to `CHARANIM_RANDOMDEATH1`, `death_backward.kf2`. The engine
+plays it with its sounds and blood, takes the controls away, and restarts the level when it ends. Retail reloads a
+save instead, the spec's decision 2.
+
+**Not done:** the `player_death_01` camera, the dropped weapons and the music change the clip asks for.
