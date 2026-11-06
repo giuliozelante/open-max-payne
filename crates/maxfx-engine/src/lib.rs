@@ -2166,7 +2166,7 @@ pub fn startup_video_name(text: &str) -> Option<String> {
     None
 }
 
-/// Loose `data/` (or parked `data.disabled-hires/`), then `x_data.ras`, then other `*.ras`.
+/// Loose `data/`, then `x_data.ras`, then other `*.ras`.
 pub fn resolve_startup(game_dir: &Path) -> Result<StartupPlan, EngineError> {
     let mut src = GameSource::open(game_dir);
     let config = src.read(r"\data\globalconfig.txt").unwrap_or_default();
@@ -3497,16 +3497,7 @@ impl GameSource {
 fn loose_bytes(game_dir: &Path, win_path: &str) -> Option<Vec<u8>> {
     let rel = win_to_rel(win_path);
     let loose = game_dir.join(&rel);
-    if loose.is_file() {
-        return fs::read(loose).ok();
-    }
-    if let Ok(rest) = rel.strip_prefix("data") {
-        let parked = game_dir.join("data.disabled-hires").join(rest);
-        if parked.is_file() {
-            return fs::read(parked).ok();
-        }
-    }
-    None
+    loose.is_file().then(|| fs::read(loose).ok())?
 }
 
 fn win_to_rel(win_path: &str) -> PathBuf {
@@ -4830,6 +4821,18 @@ mod tests {
         assert_eq!(entries[0].ambient, Some([140.0, 135.0, 110.0]));
         assert_eq!(entries[1].ambient, Some([32.0, 33.0, 34.0]));
         assert_eq!(entries[2].ambient, None);
+    }
+
+    #[test]
+    fn parked_data_is_not_game_data() {
+        // Localized games park the FixPack's `data/`, and retail then plays from the archives.
+        let game = std::env::temp_dir().join(format!("omp-parked-{}", std::process::id()));
+        let parked = game.join("data.disabled-hires");
+        fs::create_dir_all(&parked).unwrap();
+        fs::write(parked.join("globalconfig.txt"), "hi-res").unwrap();
+        let found = loose_bytes(&game, r"\data\globalconfig.txt");
+        fs::remove_dir_all(&game).unwrap();
+        assert_eq!(found, None);
     }
 
     #[test]
