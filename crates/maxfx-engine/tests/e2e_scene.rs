@@ -318,8 +318,8 @@ fn e2e_byod_retail_levels_decode_to_eof_when_present() {
             let alley2 = scene.rooms.iter().find(|r| r.name == "::Alley2").unwrap();
             assert_eq!(alley2.world_origin, [33.0, 3.0, -32.5]);
             assert!(
-                scene.characters.iter().all(|c| c.room_id != 0),
-                "Tutorial enemies should be C_Teleport-resolved out of room 0"
+                scene.characters.iter().all(|c| c.room_id == 0),
+                "Tutorial enemies wait in ::Teleport until a script sends them"
             );
             let (max_mesh, johnny_mesh) = maxfx_engine::kf2::load_character_meshes(path);
             let max_m = max_mesh.expect("Payne_Max_L0.KFS should load");

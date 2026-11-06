@@ -721,6 +721,8 @@ pub struct LdbScene {
     pub slow_motion_level: Option<f32>,
     /// `C_Teleport` and `C_SetHealth` for the character named first.
     pub character_orders: Vec<(String, CharacterOrder)>,
+    /// Exits `GM_EnableExit` closed, lowercased.
+    pub closed_exits: std::collections::BTreeSet<String>,
     /// The running `MPHM_FlashToColor`.
     pub screen_flash: Option<ScreenFlash>,
     /// The player's weapons, as the `C_PickupWeapon` family of messages leaves them.
@@ -922,6 +924,17 @@ impl LdbScene {
     /// `room` and every room reachable from it through exits (portals). HYPOTHESIS: retail draws
     /// what portal traversal reaches from the camera's room; this is its upper bound, without
     /// clipping each portal against the view.
+    /// Every exit of `room` is closed or absent, as `::Teleport` is while characters wait in it.
+    pub fn room_sealed(&self, room: i32) -> bool {
+        let closed = |exit: &String| self.closed_exits.contains(&exit.to_ascii_lowercase());
+        self.rooms.len() > 1
+            && self
+                .rooms
+                .iter()
+                .find(|r| r.id == room)
+                .is_some_and(|r| r.exits.iter().all(closed))
+    }
+
     pub fn room_group(&self, room: i32) -> std::collections::BTreeSet<i32> {
         let mut group = std::collections::BTreeSet::from([room]);
         let mut queue = VecDeque::from([room]);
@@ -929,7 +942,8 @@ impl LdbScene {
             let Some(r) = self.rooms.iter().find(|r| r.id == id) else {
                 continue;
             };
-            for name in &r.exits {
+            let open = |name: &&String| !self.closed_exits.contains(&name.to_ascii_lowercase());
+            for name in r.exits.iter().filter(open) {
                 let targets = self.exits.iter().filter(|e| &e.name == name);
                 for target in targets.map(|e| e.target_room_id) {
                     if group.insert(target) {
@@ -1165,6 +1179,18 @@ impl LdbScene {
                     return false;
                 };
                 self.mode_switch = Some(mode.to_ascii_lowercase());
+                true
+            }
+            "gm_enableexit" => {
+                let [exit, on] = msg.args[..] else {
+                    return false;
+                };
+                let exit = exit.trim().to_ascii_lowercase();
+                if on.trim().eq_ignore_ascii_case("false") {
+                    self.closed_exits.insert(exit);
+                } else {
+                    self.closed_exits.remove(&exit);
+                }
                 true
             }
             "gm_changefog" => {
@@ -1723,7 +1749,8 @@ impl LdbScene {
             .flat_map(|fsm| {
                 fsm.startup_actions.iter().filter_map(|act| {
                     let verb = Message::parse(act)?.verb.to_ascii_lowercase();
-                    (verb == "t_enable").then(|| (fsm.name.clone(), act.clone()))
+                    let wanted = verb == "t_enable" || verb == "gm_enableexit";
+                    wanted.then(|| (fsm.name.clone(), act.clone()))
                 })
             })
             .collect();
@@ -3253,17 +3280,9 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         }
     }
 
-    // Apply FSM `C_Teleport("::Room::Jumppoint")` scripts to characters starting in `::Teleport`
+    // A startup `C_Teleport("::Room::Jumppoint")` places a character. One in a hook waits for it.
     for fsm in &fsms {
-        let all_acts =
-            fsm.startup_actions
-                .iter()
-                .chain(fsm.states.iter())
-                .chain(fsm.hooks.iter().flat_map(|(_, h, states)| {
-                    h.iter()
-                        .chain(states.iter().flat_map(|(_, acts)| acts.iter()))
-                }));
-        for act in all_acts {
+        for act in &fsm.startup_actions {
             let lower = act.to_ascii_lowercase();
             if let Some(arrow_pos) = lower.find("->c_teleport(") {
                 let actor = &act[..arrow_pos].trim();
@@ -3325,6 +3344,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         global_speed: Ramp::at(1.0),
         slow_motion_level: None,
         character_orders: Vec::new(),
+        closed_exits: Default::default(),
         screen_flash: None,
         inventory: Default::default(),
         hud_prints: Vec::new(),
@@ -3558,6 +3578,7 @@ mod tests {
             global_speed: Ramp::at(1.0),
             slow_motion_level: None,
             character_orders: Vec::new(),
+            closed_exits: Default::default(),
             screen_flash: None,
             inventory: Default::default(),
             hud_prints: Vec::new(),
@@ -3809,6 +3830,57 @@ mod tests {
         scene.apply_startup_effects();
         assert_eq!(scene.effect_queue.len(), 1);
         assert_eq!(scene.effect_queue[0].effect, "medium_snowfall_7m_loop");
+    }
+
+    #[test]
+    fn closing_both_sides_of_an_exit_seals_a_room_until_it_opens() {
+        let mut scene = bare_scene(vec![room(0, &["a0"]), room(1, &["a1"])], Vec::new());
+        scene.exits = vec![exit("a0", 1), exit("a1", 0)];
+        assert!(!scene.room_sealed(1));
+        for name in ["a0", "A1"] {
+            let message = format!("MaxPayne_GameMode->GM_EnableExit( {name}, false );");
+            assert!(scene.dispatch_message("", &message));
+        }
+        assert!(scene.room_sealed(1));
+        assert_eq!(scene.room_group(0).len(), 1);
+        assert!(scene.dispatch_message("", "MaxPayne_GameMode->GM_EnableExit( a1, true );"));
+        assert!(!scene.room_sealed(1));
+    }
+
+    #[test]
+    fn retail_tutorial_enemies_wait_in_a_sealed_room_for_their_scripts() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        let path = r"\data\database\levels\front_end\Tutorial.ldb";
+        let Some(level) = crate::read_game_bytes(&game, path) else {
+            return;
+        };
+        let mut scene = parse_ldb_scene(&level).expect("Tutorial");
+        scene.apply_startup_enables();
+        assert!(scene.characters.iter().all(|c| c.room_id == 0));
+        assert!(scene.room_sealed(0), "::Teleport::Exit_Disable closes it");
+        let dispenser = "::Street::T_Dispenser";
+        let enabled = |scene: &LdbScene| {
+            let name = format!("{dispenser}.TRIGGER");
+            let found = scene.triggers.iter().find(|t| t.name == name);
+            found.expect("dispenser trigger").enabled
+        };
+        assert!(!enabled(&scene), "the phone call comes first");
+        assert!(scene.dispatch_hook("::Street::Use_04", "T_Activate"));
+        assert!(enabled(&scene));
+        assert!(scene.dispatch_hook(dispenser, "T_Activate"));
+        assert!(scene.character_orders.contains(&(
+            "::Teleport::E01".to_string(),
+            CharacterOrder::Teleport("::Subway::Tele_01".to_string())
+        )));
+        assert!(scene.fsm_switch("::Street::T_01", "2"));
+        assert!(scene.dispatch_hook("::Street::T_01", "T_Activate"));
+        assert!(scene.character_orders.contains(&(
+            "::Teleport::E04".to_string(),
+            CharacterOrder::Teleport("::Street::W03".to_string())
+        )));
     }
 
     #[test]
