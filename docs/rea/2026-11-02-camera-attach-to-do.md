@@ -105,3 +105,17 @@ shake.
 - `::street02::camera1` and P3L6 `altitude::camera1` along +z once their tracks run.
 - Blend between weights (does 50 mix the views?), arg 1, field of view (`GM_ChangeFOV`).
 - Camera path fades, `Abortable`, the `[Exit]` lists and the slow motion during death cams.
+
+## `GM_EnableWidescreen` and `gm_changeFOV` (2026-11-03)
+
+- **Signatures, VERIFIED (`MaxEDInit.txt`):** `GM_EnableWidescreen(true/false, fade_time)` and
+  `gm_changeFOV(FOV multiplier, time)`. The `messages.htm` list has `GM_EnableWideScreen(%d, %f)` and
+  `GM_ChangeFOV(%f, %f)`.
+- **Bar size, VERIFIED (measured):** in the owner's retail 1920x1080 cutscene frames
+  (`~/Pictures/omp-compare/original`, 0045, 0053, 0087), rows 0..135 and 945..1080 are pure black, an
+  eighth of the height each.
+- **Engine:** `LdbScene::widescreen` and `fov_multiplier` are `Ramp`s that move linearly over the given
+  time and are stepped each frame. The bars are painted black over the frame (HUD layer on the GPU)
+  under the screen fade.
+- **HYPOTHESIS:** the bars cover the 3D view rather than shrinking it. The FOV multiplier scales the
+  horizontal view angle (`render3d::fov_scale`). The bars slide in linearly over `fade_time`.

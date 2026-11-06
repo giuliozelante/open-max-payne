@@ -578,6 +578,7 @@ pub fn run_3d_walkthrough(
         scene.step_dynamic_anims(base_dt);
         scene.step_screen_fade(base_dt);
         scene.step_fog(base_dt);
+        scene.step_presentation(base_dt);
         // Scripted sounds (sirens, the chopper) start and stop with the scripts.
         play_queued_sounds(
             &mut scene,
@@ -643,7 +644,7 @@ pub fn run_3d_walkthrough(
         }
         listener = cam_pos;
 
-        let fov_scale = (H as f32) * 0.85;
+        let fov_scale = fov_scale(scene.fov_multiplier.value);
         // World sphere (house = sunset) or the flat ceiling when the level names none.
         // The hardware renderer draws the sky itself unless it shows the CPU frame (wireframe).
         let cpu_frame = gpu.is_none() || wireframe;
@@ -832,6 +833,7 @@ pub fn run_3d_walkthrough(
             background.copy_from_slice(&fb);
             fb.fill(crate::gpu::HUD_CLEAR);
         }
+        draw_letterbox(&mut fb, scene.widescreen.value);
 
         // 5. Render muzzle flash / bullet tracer when firing
         if shot_timer > 0.10 {
@@ -879,6 +881,30 @@ pub fn run_3d_walkthrough(
     }
     screen.put_gpu(gpu);
     Ok(())
+}
+
+/// Rows of each widescreen bar: an eighth of the frame height when fully in (retail 1920x1080
+/// cutscene frames are black on rows 0..135 and 945..1080), scaled while it slides in.
+fn letterbox_rows(fraction: f32) -> usize {
+    ((H / 8) as f32 * fraction.clamp(0.0, 1.0)).round() as usize
+}
+
+/// Black widescreen bars over the top and bottom of the frame (`GM_EnableWidescreen`).
+fn draw_letterbox(fb: &mut [u32], fraction: f32) {
+    let rows = letterbox_rows(fraction);
+    fb[..rows * W].fill(0);
+    fb[(H - rows) * W..].fill(0);
+}
+
+/// Projection scale for a `gm_changeFOV` multiplier. HYPOTHESIS: the multiplier scales the
+/// horizontal view angle; 1 (or an unset, non-positive value) keeps the default `H * 0.85`.
+pub(crate) fn fov_scale(multiplier: f32) -> f32 {
+    let base = H as f32 * 0.85;
+    if multiplier <= 0.0 || multiplier == 1.0 {
+        return base;
+    }
+    let half = (W as f32 * 0.5 / base).atan() * multiplier;
+    W as f32 * 0.5 / half.min(1.5).tan()
 }
 
 /// Longest step one frame may take (a loading stall or a window drag).
@@ -3526,6 +3552,29 @@ mod tests {
     }
 
     #[test]
+    fn widescreen_bars_cover_an_eighth_of_the_height_each() {
+        // Retail 1920x1080 cutscene frames: rows 0..135 and 945..1080 are black (1/8 each).
+        assert_eq!(letterbox_rows(1.0), H / 8);
+        assert_eq!(letterbox_rows(0.0), 0);
+        assert_eq!(letterbox_rows(0.5), (H as f32 / 16.0).round() as usize);
+        let mut fb = vec![0x00ff_ffffu32; W * H];
+        draw_letterbox(&mut fb, 1.0);
+        let bar = H / 8;
+        assert_eq!(fb[(bar - 1) * W], 0);
+        assert_eq!(fb[bar * W], 0x00ff_ffff);
+        assert_eq!(fb[(H - bar) * W + W - 1], 0);
+        assert_eq!(fb[(H - bar - 1) * W + W - 1], 0x00ff_ffff);
+    }
+
+    #[test]
+    fn the_fov_multiplier_widens_the_horizontal_angle() {
+        // HYPOTHESIS: gm_changefov scales the view angle (house cutscenes use 1.1).
+        assert_eq!(fov_scale(1.0), H as f32 * 0.85);
+        let half = |scale: f32| (W as f32 * 0.5 / scale).atan();
+        assert!((half(fov_scale(1.1)) - 1.1 * half(fov_scale(1.0))).abs() < 1e-5);
+    }
+
+    #[test]
     fn chase_eye_sits_behind_and_above_the_player() {
         let eye = chase_eye([0.0, 1.6, 0.0], [0.0, 0.0, 1.0], CHASE_BACK);
         assert!(eye[0].abs() < 1e-4);
@@ -3590,6 +3639,8 @@ mod tests {
             mode_switch: None,
             fog: None,
             fog_fade: None,
+            widescreen: crate::scene::Ramp::at(0.0),
+            fov_multiplier: crate::scene::Ramp::at(1.0),
         }
     }
 

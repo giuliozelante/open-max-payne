@@ -666,6 +666,49 @@ pub struct LdbScene {
     pub fog: Option<LevelFog>,
     /// `GM_ChangeFog` with a fade time: `(from, to, seconds, elapsed)`.
     pub fog_fade: Option<(LevelFog, LevelFog, f32, f32)>,
+    /// `GM_EnableWidescreen(bool, fade_time)`: how far the letterbox bars are in (0..1).
+    pub widescreen: Ramp,
+    /// `gm_changeFOV(multiplier, time)`: multiplier on the view angle (1 = default; 0 in a
+    /// `Default` scene, which `render3d::fov_scale` also treats as the default).
+    pub fov_multiplier: Ramp,
+}
+
+/// A value moving linearly to its target (script verbs with a fade time).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Ramp {
+    pub value: f32,
+    pub target: f32,
+    pub per_second: f32,
+}
+
+impl Ramp {
+    pub fn at(value: f32) -> Self {
+        Self {
+            value,
+            target: value,
+            per_second: 0.0,
+        }
+    }
+
+    /// Move to `target` over `seconds`, or at once when `seconds` is not positive.
+    pub fn set(&mut self, target: f32, seconds: f32) {
+        self.target = target;
+        if seconds > 0.0 {
+            self.per_second = (target - self.value).abs() / seconds;
+        } else {
+            self.value = target;
+        }
+    }
+
+    pub fn step(&mut self, dt: f32) {
+        let gap = self.target - self.value;
+        let move_by = self.per_second * dt;
+        self.value = if gap.abs() <= move_by {
+            self.target
+        } else {
+            self.value + move_by.copysign(gap)
+        };
+    }
 }
 
 /// Linear distance fog: `levels.txt` `FogColor` / `FogStart` / `FogEnd` (when `Fogging` is on)
@@ -1060,6 +1103,24 @@ impl LdbScene {
                 }
                 true
             }
+            "gm_enablewidescreen" => {
+                let Some(on) = script_bool(msg.args.first().copied()) else {
+                    return false;
+                };
+                let seconds = msg.args.get(1).and_then(|a| a.trim().parse::<f32>().ok());
+                self.widescreen
+                    .set(if on { 1.0 } else { 0.0 }, seconds.unwrap_or(0.0));
+                true
+            }
+            "gm_changefov" => {
+                let number = |i: usize| msg.args.get(i).and_then(|a| a.trim().parse::<f32>().ok());
+                let Some(multiplier) = number(0).filter(|m| *m > 0.0) else {
+                    return false;
+                };
+                self.fov_multiplier
+                    .set(multiplier, number(1).unwrap_or(0.0));
+                true
+            }
             "gm_setplayercontrols" => {
                 let Some(controls) = script_bool(msg.args.first().copied()) else {
                     return false;
@@ -1283,6 +1344,12 @@ impl LdbScene {
         if fade.elapsed >= fade.duration && fade.to[3] == 0 {
             self.screen_fade = None;
         }
+    }
+
+    /// Advance the letterbox bars and the FOV multiplier toward their script targets.
+    pub fn step_presentation(&mut self, dt: f32) {
+        self.widescreen.step(dt);
+        self.fov_multiplier.step(dt);
     }
 
     /// Advance a `GM_ChangeFog` fade: every fog value moves linearly from the old fog to the new.
@@ -2832,6 +2899,8 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         mode_switch: None,
         fog: None,
         fog_fade: None,
+        widescreen: Ramp::at(0.0),
+        fov_multiplier: Ramp::at(1.0),
     })
 }
 
@@ -2943,6 +3012,8 @@ mod tests {
             mode_switch: None,
             fog: None,
             fog_fade: None,
+            widescreen: Ramp::at(0.0),
+            fov_multiplier: Ramp::at(1.0),
         }
     }
 
@@ -4069,6 +4140,29 @@ mod tests {
         assert!(scene.dispatch_message("", "::startroom::door->FSM_Randomize();"));
         assert_eq!(scene.fsms[0].state, "open");
         assert!(scene.dynamic_meshes[0].hidden, "the open state script ran");
+    }
+
+    #[test]
+    fn widescreen_and_fov_follow_their_script_verbs_and_fade_times() {
+        // MaxEDInit.txt: GM_EnableWidescreen(true/false, fade_time), gm_changeFOV(FOV multiplier,
+        // time). Startup intro: `GM_EnableWidescreen(true, 0)`; house: `gm_changefov(1.1, 0)`.
+        let mut scene = bare_scene(Vec::new(), Vec::new());
+        assert_eq!(scene.widescreen.value, 0.0);
+        assert_eq!(scene.fov_multiplier.value, 1.0);
+        assert!(scene.dispatch_message("", "MaxPayne_GameMode->GM_EnableWidescreen(true, 0);"));
+        assert_eq!(scene.widescreen.value, 1.0);
+        assert!(scene.dispatch_message("", "maxpayne_gamemode->gm_changefov(1.1, 0);"));
+        assert_eq!(scene.fov_multiplier.value, 1.1);
+        // With a time, both move linearly: half way after half the time.
+        assert!(scene.dispatch_message("", "MaxPayne_GameMode->GM_EnableWidescreen(false, 2);"));
+        assert!(scene.dispatch_message("", "maxpayne_gamemode->gm_changefov(1.5, 2);"));
+        scene.step_presentation(1.0);
+        assert!((scene.widescreen.value - 0.5).abs() < 1e-6);
+        assert!((scene.fov_multiplier.value - 1.3).abs() < 1e-6);
+        scene.step_presentation(5.0);
+        assert_eq!(scene.widescreen.value, 0.0);
+        assert_eq!(scene.fov_multiplier.value, 1.5);
+        assert!(!scene.dispatch_message("", "MaxPayne_GameMode->GM_EnableWidescreen(maybe, 0);"));
     }
 
     #[test]
