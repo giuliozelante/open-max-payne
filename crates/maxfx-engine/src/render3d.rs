@@ -505,9 +505,10 @@ pub fn run_3d_walkthrough(
         if window.is_key_down(Key::Down) {
             pitch = (pitch - turn_speed).max(-1.25);
         }
-        if let Some(motion) = window.mouse_motion() {
+        let hard_mouse = window.mouse_motion();
+        if let Some(motion) = look_motion(hard_mouse, scene.player_controls) {
             (yaw, pitch) = mouse_look(yaw, pitch, motion);
-        } else if window.get_mouse_down(MouseButton::Left) {
+        } else if hard_mouse.is_none() && window.get_mouse_down(MouseButton::Left) {
             if let Some((mx, my)) = window.get_mouse_pos(MouseMode::Pass) {
                 if let Some((lx, ly)) = last_mouse {
                     yaw += (mx - lx) * 0.006;
@@ -1802,6 +1803,12 @@ pub(crate) fn fov_scale(multiplier: f32) -> f32 {
 
 /// Radians per mouse count of free look.
 const MOUSE_LOOK: f32 = 0.003;
+
+/// The mouse's move this frame, when the player has the controls. `GM_SetPlayerControls` takes them
+/// away for cinematics, and a mouse moved then must not turn Max.
+fn look_motion(motion: Option<(f32, f32)>, controls: bool) -> Option<(f32, f32)> {
+    motion.filter(|_| controls)
+}
 
 /// `(yaw, pitch)` after a mouse move: right turns right, up looks up.
 fn mouse_look(yaw: f32, pitch: f32, (dx, dy): (f32, f32)) -> (f32, f32) {
@@ -5410,6 +5417,13 @@ mod tests {
         let health = crate::scene::CharacterOrder::SetHealth(1);
         obey(&mut en, &health, &scene, &rooms);
         assert_eq!(en.health, 1);
+    }
+
+    #[test]
+    fn the_mouse_looks_only_while_the_player_has_the_controls() {
+        assert_eq!(look_motion(Some((3.0, 4.0)), true), Some((3.0, 4.0)));
+        assert_eq!(look_motion(Some((3.0, 4.0)), false), None);
+        assert_eq!(look_motion(None, true), None);
     }
 
     #[test]
