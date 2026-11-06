@@ -132,3 +132,15 @@ shake.
 - **Capture note:** the `original/` frames look about 1.33 times squashed vertically against the engine. That is
   the ratio of 16:9 to 4:3, so those captures are a 4:3 image stretched across a 16:9 frame. Measure them
   horizontally.
+
+## Player chase camera (2026-11-04)
+
+- **VERIFIED (data):** `default_skeleton.txt` `DefaultCameraPointOffset = (0.12, 1.75, -0.12)` from the feet. `globalconfig.txt`
+  `[camera]`: `UpFollowDistance (0.06, 0.40, -0.40)`, `MiddleFollowDistance (0.06, 0.5, -4.00)`, `DownFollowDistance
+  (0.06, 0.80, -1.00)`. The comments say the camera is cast from its startpoint toward each, when it is above, behind or
+  below the player. Crouching and shoot-dodging have their own camera points, not used yet.
+- **Engine:** casts from the camera point toward the follow position. It had used 2.2 m back and 0.4 m up from the eye.
+- **HYPOTHESIS:** the three distances blend linearly with the pitch. Two static passes over `MaxPayne_PlayerCamera::update`
+  (ends near `0x504cd1`) did not find the blend, so it is to be tested against play or read with a debugger. The
+  backward speed and acceleration (`InitialBackwardsSpeed`, `BackwardsAcceleration`) and the prediction sphere are not
+  used yet, so the engine's camera jumps where retail's eases.
