@@ -141,13 +141,23 @@ impl ParticleField {
 
                 let emission = &emitter.emission;
                 let cycle = emission.cycle_length.max(1e-3);
-                let in_cycle = run.looping || run.time <= cycle;
+                // A burst shorter than a few frames still gets all of its cycle.
+                let emitting_for = if run.looping {
+                    dt
+                } else {
+                    (cycle - (run.time - dt)).clamp(0.0, dt)
+                };
+                let in_cycle = emitting_for > 0.0;
                 let Some((origin, rot)) = frame.filter(|_| run.emitting && in_cycle) else {
                     continue;
                 };
-                let u = (run.time % cycle) / cycle;
+                let u = if run.looping {
+                    (run.time % cycle) / cycle
+                } else {
+                    (run.time / cycle).min(1.0)
+                };
                 let rate = between(&emission.rate.at(u), &mut seed);
-                run.owed[k] += rate * dt;
+                run.owed[k] += rate * emitting_for;
                 while run.owed[k] >= 1.0 - 1e-4 {
                     run.owed[k] -= 1.0;
                     if live >= run.effect.max_particles as usize {
@@ -456,6 +466,49 @@ mod tests {
             frame_texture(&additive).unwrap().pixels,
             [0xffff_0000, 0xff00_00ff]
         );
+    }
+
+    #[test]
+    fn a_looping_emitter_follows_its_rate_curve_round_every_cycle() {
+        let mut pulse = effect(0.0, 0.05, 0.0);
+        pulse.emitters[0].emission.rate = Graph {
+            channels: 2,
+            samples: vec![1000.0, 1000.0, 0.0, 0.0],
+        };
+        let mut field = ParticleField::default();
+        field.start(
+            "gun".to_string(),
+            "pulse".to_string(),
+            Arc::new(pulse),
+            true,
+        );
+        // Two and a quarter cycles in the rate is high again; at the end of one it is not.
+        for _ in 0..225 {
+            field.step(0.01, at_origin);
+        }
+        let early = field.sprites().len();
+        for _ in 0..70 {
+            field.step(0.01, at_origin);
+        }
+        assert!(early > field.sprites().len(), "{early}");
+    }
+
+    #[test]
+    fn a_short_burst_emits_its_whole_cycle_at_any_frame_rate() {
+        let spawned = |fps: f32| {
+            let mut burst = effect(100.0, 5.0, 0.0);
+            burst.emitters[0].emission.cycle_length = 0.1;
+            burst.max_particles = 1000;
+            let mut field = ParticleField::default();
+            let at = ([0.0; 3], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+            field.start_at(at, "burst".to_string(), Arc::new(burst));
+            for _ in 0..fps as usize {
+                field.step(1.0 / fps, |_| None);
+            }
+            field.sprites().len()
+        };
+        assert_eq!(spawned(24.0), 10);
+        assert_eq!(spawned(200.0), 10);
     }
 
     #[test]
