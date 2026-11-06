@@ -632,15 +632,12 @@ pub fn run_3d_walkthrough(
                     rig.action = def.fire_clip.clone();
                     action_time = 0.0;
                     rig.action_time = 0.0;
-                    let time = if player_moving { walk_phase } else { 0.0 };
-                    let right = rig.gun_bones[0].clone();
-                    let frame =
-                        character_locals(rig, player_moving, time).and_then(|(clip, locals)| {
-                            bone_frame(clip, &locals, &right, feet, player_mesh_yaw(yaw))
-                        });
-                    if let Some((frame, muzzle)) = frame.zip(def.muzzle.as_deref()) {
-                        hit_effects.start_muzzle(&mut particle_sprites, muzzle, frame);
-                    }
+                }
+                if let Some(muzzle) = &def.muzzle {
+                    scene.effect_queue.push(crate::scene::QueuedEffect {
+                        effect: muzzle.clone(),
+                        emitter: crate::scene::GUN_EMITTERS[0].to_string(),
+                    });
                 }
             } else {
                 // Starts the reload, or takes the best loaded weapon.
@@ -668,20 +665,11 @@ pub fn run_3d_walkthrough(
             let muzzle = def
                 .and_then(|def| def.muzzle.clone())
                 .filter(|_| round.left);
-            if let (Some(rig), Some(muzzle)) = (player_rig.as_ref(), muzzle) {
-                let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
-                let time = if player_moving {
-                    walk_phase
-                } else {
-                    action_time
-                };
-                let frame =
-                    character_locals(rig, player_moving, time).and_then(|(clip, locals)| {
-                        bone_frame(clip, &locals, &rig.gun_bones[1], feet, player_mesh_yaw(yaw))
-                    });
-                if let Some(frame) = frame {
-                    hit_effects.start_muzzle(&mut particle_sprites, &muzzle, frame);
-                }
+            if let Some(muzzle) = muzzle {
+                scene.effect_queue.push(crate::scene::QueuedEffect {
+                    effect: muzzle,
+                    emitter: crate::scene::GUN_EMITTERS[1].to_string(),
+                });
             }
             let reach = melee;
             let aim_dir = [sy * cp, sp, cy * cp];
@@ -901,6 +889,17 @@ pub fn run_3d_walkthrough(
             &room_origins,
             listener,
         );
+        if let Some(rig) = player_rig.as_ref() {
+            let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+            let time = player_clip_time(rig, player_moving, walk_phase, anim_clock, action_time);
+            let pose = character_locals(rig, player_moving, time);
+            scene.held_guns = [0, 1].map(|hand| {
+                let (clip, locals) = pose.as_ref()?;
+                let bone = &rig.gun_bones[hand];
+                let (pos, rot) = bone_frame(clip, locals, bone, feet, player_mesh_yaw(yaw))?;
+                Some((rot, pos))
+            });
+        }
         start_queued_effects(
             &mut scene,
             &game_root,
@@ -2274,20 +2273,6 @@ struct HitEffects<'a> {
 }
 
 impl HitEffects<'_> {
-    /// A weapon's `PS_StartEffect` at the gun.
-    fn start_muzzle(
-        &self,
-        sprites: &mut ParticleSprites,
-        effect: &str,
-        frame: crate::particles::Frame,
-    ) {
-        let file = crate::particle_effect_file(self.particles_txt, effect);
-        let effect = file.and_then(|(win_path, _)| sprites.effect(self.game_dir, &win_path));
-        if let Some((key, effect)) = effect {
-            sprites.field.start_at(frame, key, effect);
-        }
-    }
-
     fn start(
         &self,
         scene: &mut LdbScene,
@@ -2487,6 +2472,10 @@ impl ParticleLights {
 
 /// Room of the mesh, trigger or FSM named `emitter` (0 when none matches).
 fn emitter_room(scene: &LdbScene, emitter: &str) -> i32 {
+    // Held guns are already in the world.
+    if crate::scene::GUN_EMITTERS.contains(&emitter) {
+        return -1;
+    }
     scene
         .dynamic_meshes
         .iter()
@@ -4499,6 +4488,24 @@ mod tests {
     }
 
     #[test]
+    fn a_gun_emitter_follows_the_gun_in_world_space() {
+        let mut scene = LdbScene::default();
+        let rot = [0.0, 0.0, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0];
+        scene.held_guns[1] = Some((rot, [1.0, 2.0, 3.0]));
+        // Room 0 must not shift a position already in the world.
+        let rooms = BTreeMap::from([(0, [100.0, 0.0, 0.0])]);
+        let emitter = crate::scene::GUN_EMITTERS[1];
+        assert_eq!(
+            emitter_frame(&scene, &rooms, emitter),
+            Some(([1.0, 2.0, 3.0], rot))
+        );
+        assert_eq!(
+            emitter_frame(&scene, &rooms, crate::scene::GUN_EMITTERS[0]),
+            None
+        );
+    }
+
+    #[test]
     fn a_two_handed_weapon_uses_the_two_handed_clips() {
         let mesh = crate::kf2::KfsMesh {
             name: String::new(),
@@ -5591,6 +5598,7 @@ mod tests {
             camera_shakes: Vec::new(),
             death_cams: Vec::new(),
             effect_queue: Vec::new(),
+            held_guns: [None, None],
             effect_stops: Vec::new(),
             attached_camera: None,
             player_controls: true,
