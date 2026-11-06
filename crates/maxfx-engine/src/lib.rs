@@ -2576,7 +2576,17 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
     let Some(shooting) = source.read(r"\data\database\shooting.h") else {
         return BTreeMap::new();
     };
-    let shooting = String::from_utf8_lossy(&shooting).into_owned();
+    let mut shooting = String::from_utf8_lossy(&shooting).into_owned();
+    // Weapons share ammo by number: both shotguns are inventory 5 under different names.
+    let ids = source
+        .read(r"\data\database\weaponid.h")
+        .unwrap_or_default();
+    for line in String::from_utf8_lossy(&ids).lines() {
+        if line.contains("INVENTORYID_") {
+            shooting.push('\n');
+            shooting.push_str(line);
+        }
+    }
     let mut names = Vec::new();
     for path in ras_candidates(game_dir) {
         let Ok(index) = openras::archive::RasIndex::open(&path) else {
@@ -4797,6 +4807,28 @@ mod tests {
         assert_eq!(entries[0].ambient, Some([140.0, 135.0, 110.0]));
         assert_eq!(entries[1].ambient, Some([32.0, 33.0, 34.0]));
         assert_eq!(entries[2].ambient, None);
+    }
+
+    #[test]
+    fn retail_van_boxes_load_the_pump_shotgun_they_name_as_sawed() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        if !game.is_dir() {
+            return;
+        }
+        let mut player = hud::PlayerInventory {
+            defs: load_weapon_defs(&game),
+            ..Default::default()
+        };
+        // `level_items/ammo_shotgun.txt` twice, then `level_items/pumpshotgun.txt`.
+        player.pickup_ammo("sawedshotgun", 10);
+        player.pickup_ammo("sawedshotgun", 10);
+        player.pickup_weapon("pumpshotgun");
+        player.pickup_ammo("pumpshotgun", 5);
+        let stock = player.stock("pumpshotgun").expect("shells");
+        assert_eq!((stock.clip, stock.pocket), (7, 18));
     }
 
     #[test]
