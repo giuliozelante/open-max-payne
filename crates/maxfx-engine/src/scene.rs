@@ -1299,27 +1299,34 @@ impl LdbScene {
 
     /// Current world position of an emitter named by `sound_emitter`, room origin not added.
     pub fn emitter_world_pos(&self, emitter: &str) -> Option<[f32; 3]> {
+        self.emitter_world_pose(emitter).map(|(_, pos)| pos)
+    }
+
+    /// Rotation (columns) and position of an emitter: a mesh's pose, an FSM carried by its parent
+    /// mesh (rotation included), or a trigger's or character's position with no rotation.
+    pub fn emitter_world_pose(&self, emitter: &str) -> Option<([f32; 9], [f32; 3])> {
+        const IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
         let find_mesh = |name: &str| {
             self.dynamic_meshes
                 .iter()
                 .position(|mesh| mesh.name.eq_ignore_ascii_case(name))
         };
         if let Some(index) = find_mesh(emitter) {
-            return Some(self.dynamic_world_pose(index).1);
+            return Some(self.dynamic_world_pose(index));
         }
         if let Some(trigger) = self
             .triggers
             .iter()
             .find(|trigger| trigger.name.eq_ignore_ascii_case(emitter))
         {
-            return Some(trigger.pos);
+            return Some((IDENTITY, trigger.pos));
         }
         if let Some(character) = self
             .characters
             .iter()
             .find(|c| c.name.eq_ignore_ascii_case(emitter))
         {
-            return Some(character.pos);
+            return Some((IDENTITY, character.pos));
         }
         let fsm = self
             .fsms
@@ -1327,12 +1334,14 @@ impl LdbScene {
             .find(|fsm| fsm.name.eq_ignore_ascii_case(emitter))?;
         // FSM positions are world positions at load; carry them with the parent mesh like a child DO.
         let Some(parent) = parent_name(&fsm.name).and_then(|name| find_mesh(&name)) else {
-            return Some(fsm.pos);
+            return Some((IDENTITY, fsm.pos));
         };
         let mesh = &self.dynamic_meshes[parent];
-        let own = ([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], fsm.pos);
         let rest = invert_pose((mesh.world_mat, mesh.world_pos));
-        Some(compose_pose(compose_pose(own, rest), self.dynamic_world_pose(parent)).1)
+        Some(compose_pose(
+            compose_pose((IDENTITY, fsm.pos), rest),
+            self.dynamic_world_pose(parent),
+        ))
     }
 
     /// Advance the screen fade; a finished fade to a transparent colour goes away.
@@ -3897,6 +3906,26 @@ mod tests {
             }]
         );
         assert_eq!(scene.effect_stops, [fsm.to_string()]);
+    }
+
+    #[test]
+    fn a_floating_fsm_emitter_turns_with_its_parent_mesh() {
+        // Particle emitters (`::startroom::cam_mover::camera1::snow`) are FSMs under a moving DO;
+        // their emission box and direction turn with it.
+        let yaw90 = [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0];
+        let mut scene = door_fsm_scene();
+        let mut open = track("open", [0.0, 0.0, 3.0]);
+        open.end_mat = yaw90;
+        scene.dynamic_meshes[0] = door_mesh(vec![open]);
+        scene.fsms[0].name = "::startroom::door::siren".into();
+        scene.fsms[0].pos = [1.0, 1.0, 2.0];
+        scene.dynamic_meshes[0].toggled = true;
+        let (rot, _) = scene
+            .emitter_world_pose("::startroom::door::siren")
+            .expect("pose");
+        for (got, want) in rot.iter().zip(yaw90) {
+            assert!((got - want).abs() < 1e-6, "{rot:?}");
+        }
     }
 
     #[test]

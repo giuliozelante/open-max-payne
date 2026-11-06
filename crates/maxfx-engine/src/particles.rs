@@ -144,9 +144,10 @@ impl ParticleField {
                         direction.get(c).copied().unwrap_or(0.0)
                             + emission.spread[c] * (random(&mut seed) * 2.0 - 1.0)
                     });
-                    let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+                    // HYPOTHESIS: the direction is not normalised; its length scales the
+                    // velocity (snowstorm_60m: direction (0, -3, 30) x 0.25..0.5 m/s).
                     let speed = between(&emission.velocity.at(u), &mut seed);
-                    let local_vel = dir.map(|d| if len > 1e-6 { d / len * speed } else { 0.0 });
+                    let local_vel = dir.map(|d| d * speed);
                     let sequences = emitter.particle.sequences.len().max(1);
                     list.push(Particle {
                         pos: transform(rot, origin, local),
@@ -466,6 +467,23 @@ mod tests {
             (y - expected).abs() < 0.6,
             "y = {y}, expected about {expected}"
         );
+    }
+
+    #[test]
+    fn the_direction_graph_scales_the_velocity() {
+        // snowstorm_60m: Emission Direction (0, -3, 30) with Velocity 0.25..0.5 is a sideways storm,
+        // not flakes drifting at half a metre per second.
+        let mut def = effect(10.0, 5.0, 0.0);
+        def.emitters[0].emission.direction = flat(3, &[0.0, -3.0, 30.0]);
+        def.emitters[0].emission.velocity = flat(2, &[0.5, 0.5]);
+        let mut field = ParticleField::default();
+        field.start("e".into(), "k".into(), std::sync::Arc::new(def), false);
+        field.step(0.1, at_origin);
+        field.stop("e");
+        field.step(1.0, at_origin);
+        let p = field.sprites()[0].pos;
+        assert!((p[2] - 15.0).abs() < 1e-3, "{p:?}");
+        assert!((p[1] - (10.0 - 1.5)).abs() < 1e-3, "{p:?}");
     }
 
     #[test]
