@@ -114,3 +114,9 @@ direction, random rotation from/to, mirroring flags. Snow: gravity 0.8, 20 fps, 
   `::startroom::cam_mover::camera1::snow` under `camera1.DO` and `::start::…::C1_PAN::f1` under `C1_PAN.DO`.
   These emitters already followed their parent's position; they now take its rotation too
   (`LdbScene::emitter_world_pose`), so the spawn box and the wind turn with the camera rig.
+- **Axis (HYPOTHESIS, measured):** ParticleFX's local z runs opposite to the level's. The intro's
+  water-shot camera `C1_PAN::C3` looks along world −z. Its snow emitter `C1_PAN::f1` puts its box at
+  local `(0, −3, 12)` and blows along `(0, −3, 30)`. After 2 s of simulation, a headless probe counted
+  18 flakes in the camera's view unmirrored and 343 mirrored (126 from `snowstorm_20m`, 217 from
+  `snowstorm_60m`). The retail frame is full of snow. The box and the wind are symmetric in x, so this
+  case cannot tell a z mirror from a 180° turn about y. `particles::particle_to_level` applies the mirror.

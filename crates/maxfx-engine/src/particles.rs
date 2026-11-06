@@ -154,8 +154,8 @@ impl ParticleField {
                     let local_vel = dir.map(|d| d * speed);
                     let sequences = emitter.particle.sequences.len().max(1);
                     list.push(Particle {
-                        pos: transform(rot, origin, local),
-                        vel: transform(rot, [0.0; 3], local_vel),
+                        pos: transform(rot, origin, particle_to_level(local)),
+                        vel: transform(rot, [0.0; 3], particle_to_level(local_vel)),
                         age: 0.0,
                         life: between(&emission.lifetime.at(u), &mut seed).max(1e-3),
                         size_multiplier: between(&emission.size_multiplier.at(u), &mut seed),
@@ -303,6 +303,13 @@ fn random(seed: &mut u32) -> f32 {
     *seed ^= *seed >> 17;
     *seed ^= *seed << 5;
     (*seed >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// ParticleFX local axes to the level's: z is mirrored. HYPOTHESIS from the intro: the startup
+/// snow (`C1_PAN::f1`, box offset `(0, -3, 12)`, wind `(0, -3, 30)`) put 18 flakes in the `C3`
+/// camera's view unmirrored and 343 mirrored; the retail frame is full of snow.
+fn particle_to_level(v: [f32; 3]) -> [f32; 3] {
+    [v[0], v[1], -v[2]]
 }
 
 /// `rot` (columns) times `v`, plus `origin`.
@@ -505,7 +512,8 @@ mod tests {
         field.stop("e");
         field.step(1.0, at_origin);
         let p = field.sprites()[0].pos;
-        assert!((p[2] - 15.0).abs() < 1e-3, "{p:?}");
+        // ParticleFX z runs opposite to the level's (see `particle_to_level`).
+        assert!((p[2] + 15.0).abs() < 1e-3, "{p:?}");
         assert!((p[1] - (10.0 - 1.5)).abs() < 1e-3, "{p:?}");
     }
 
