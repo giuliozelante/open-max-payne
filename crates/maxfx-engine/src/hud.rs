@@ -121,6 +121,133 @@ pub fn wrap_text(font: &HudFont, text: &str, width: f32) -> Vec<String> {
     lines
 }
 
+/// A part of `[WeaponInventory]`'s `CombinationMap`, in 640x480 space.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct StripSprite {
+    pub reference: ReferencePoint,
+    pub position: [f32; 2],
+    pub size: [f32; 2],
+    /// Left, top, right, bottom.
+    pub uv: [f32; 4],
+}
+
+/// `[Slot]`: its number and its `[SlotWeapon]`s, by `WeaponID`, in file order.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StripSlot {
+    pub number: StripSprite,
+    pub weapons: Vec<(String, StripSprite)>,
+}
+
+/// `[WeaponInventory]`, the row of weapons shown for a moment when the weapon changes.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WeaponStrip {
+    /// `CombinationMap`, as a sprite so it loads like the others.
+    pub sheet: HudSprite,
+    pub slots: Vec<StripSlot>,
+    /// `OffsetInsideSlot`, between weapons of one slot.
+    offset: [f32; 2],
+    selected: [u8; 4],
+    normal: [u8; 4],
+    out_of_ammo: [u8; 4],
+    duration: f32,
+    fade_in: f32,
+    fade_out: f32,
+}
+
+impl WeaponStrip {
+    fn parse(sections: &[Section]) -> Self {
+        let mut strip = Self::default();
+        let mut weapon = None;
+        for section in sections {
+            match section
+                .path
+                .strip_prefix("weaponinventory/")
+                .unwrap_or_default()
+            {
+                "visibility" => {
+                    strip.duration = section.number("duration").unwrap_or_default();
+                    strip.fade_in = section.number("fadeintime").unwrap_or_default();
+                    strip.fade_out = section.number("fadeouttime").unwrap_or_default();
+                }
+                "properties" => {
+                    strip.offset = section.pair("offsetinsideslot").unwrap_or_default();
+                    strip.selected = section.color("colorselected");
+                    strip.normal = section.color("colornormal");
+                    strip.out_of_ammo = section.color("coloroutofammo");
+                    strip.sheet.file = section.file("combinationmap").unwrap_or_default();
+                    strip.sheet.alpha_file =
+                        section.file("combinationmapalpha").unwrap_or_default();
+                }
+                "slot" => strip.slots.push(StripSlot::default()),
+                "slot/slotnumberspritewindow" => {
+                    if let (Some(slot), Some(sprite)) = (strip.slots.last_mut(), section.strip()) {
+                        slot.number = sprite;
+                    }
+                }
+                "slot/slotweapon/weaponspecific" => {
+                    weapon = section.text("id").map(str::to_string);
+                }
+                "slot/slotweapon/spritewindow" => {
+                    if let (Some(slot), Some(id), Some(sprite)) =
+                        (strip.slots.last_mut(), weapon.take(), section.strip())
+                    {
+                        slot.weapons.push((id, sprite));
+                    }
+                }
+                _ => {}
+            }
+        }
+        strip
+    }
+
+    /// How much of the row shows `age` seconds after the weapon changed.
+    pub fn visibility(&self, age: f32) -> f32 {
+        let fading = (age - self.duration) / self.fade_out.max(1e-3);
+        (age / self.fade_in.max(1e-3))
+            .min(1.0 - fading)
+            .clamp(0.0, 1.0)
+    }
+
+    /// What to draw for `inventory`, with colours.
+    pub fn rows(&self, inventory: &PlayerInventory) -> Vec<(StripSprite, [u8; 4])> {
+        let held = inventory.weapon_id();
+        let mut rows = Vec::new();
+        for slot in &self.slots {
+            let carried: Vec<_> = slot
+                .weapons
+                .iter()
+                .filter_map(|(id, sprite)| Some((id, sprite, inventory.has_rounds(id)?)))
+                .collect();
+            let selected = carried.iter().any(|(id, ..)| Some(id.as_str()) == held);
+            let number = if selected {
+                self.selected
+            } else if carried.iter().any(|(.., rounds)| *rounds) {
+                self.normal
+            } else {
+                self.out_of_ammo
+            };
+            rows.push((slot.number, number));
+            for (row, (id, sprite, rounds)) in carried.into_iter().enumerate() {
+                let color = match (Some(id.as_str()) == held, rounds) {
+                    (true, _) => self.selected,
+                    (_, true) => self.normal,
+                    _ => self.out_of_ammo,
+                };
+                let down = row as f32;
+                let position = [0, 1].map(|c| sprite.position[c] + self.offset[c] * down);
+                rows.push((
+                    StripSprite {
+                        position,
+                        ..*sprite
+                    },
+                    color,
+                ));
+            }
+        }
+        rows
+    }
+}
+
 /// The parts of `hud.txt` the engine draws.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct HudLayout {
@@ -130,6 +257,7 @@ pub struct HudLayout {
     pub hourglass: HudSprite,
     pub painkiller_icon: HudSprite,
     pub painkiller_count: HudText,
+    pub weapon_strip: WeaponStrip,
     pub ammo_in_clip: HudText,
     pub ammo_in_pocket: HudText,
     /// `[ActiveWeapon]` sprites by `id`, such as `WEAPONID_BERETTA`.
@@ -343,6 +471,25 @@ impl Section {
         })
     }
 
+    /// `( x, y, 0 )` under `key`.
+    fn pair(&self, key: &str) -> Option<[f32; 2]> {
+        let body = self.text(key)?.trim_matches(['(', ')', ' ']);
+        let mut parts = body.split(',').map(|part| part.trim().parse::<f32>());
+        Some([parts.next()?.ok()?, parts.next()?.ok()?])
+    }
+
+    /// A `[WeaponInventory]` window.
+    fn strip(&self) -> Option<StripSprite> {
+        let [left, top] = self.pair("uvupperleft")?;
+        let [right, bottom] = self.pair("uvlowerright")?;
+        Some(StripSprite {
+            reference: self.reference()?,
+            position: self.position()?,
+            size: [self.number("width")?, self.number("height")?],
+            uv: [left, top, right, bottom],
+        })
+    }
+
     /// `rrggbbaa`.
     fn color(&self, key: &str) -> [u8; 4] {
         let value = self
@@ -485,6 +632,7 @@ impl HudLayout {
             hourglass: sprite("slowmotion/sprite")?,
             painkiller_icon: sprite("weapons/painkiller/sprite")?,
             painkiller_count: anchor("weapons/painkiller/amounttext")?,
+            weapon_strip: WeaponStrip::parse(&sections),
             ammo_in_clip: anchor("weapons/ammoinclipstext")?,
             ammo_in_pocket: anchor("weapons/ammoinpockettext")?,
             weapons,
@@ -1013,6 +1161,13 @@ impl PlayerInventory {
         self.reloading.is_none() && stock.is_some_and(|stock| stock.infinite || stock.clip > 0)
     }
 
+    /// Whether the carried weapon of `WeaponID` `id` has rounds; `None` when it is not carried.
+    pub fn has_rounds(&self, id: &str) -> Option<bool> {
+        let name = self.carried.iter().find(|name| self.defs[*name].id == id)?;
+        let stock = self.stock(name);
+        Some(stock.is_some_and(|s| s.infinite || s.clip + s.pocket > 0))
+    }
+
     /// `WeaponID` of the weapon in hand.
     pub fn weapon_id(&self) -> Option<&str> {
         Some(&self.defs.get(self.current.as_ref()?)?.id)
@@ -1415,6 +1570,7 @@ impl HudAssets {
             &layout.hourglass_background,
             &layout.hourglass,
             &layout.painkiller_icon,
+            &layout.weapon_strip.sheet,
         ];
         let bitmaps = sprites
             .into_iter()
@@ -1435,6 +1591,8 @@ pub struct HudState<'a> {
     pub health: f32,
     pub slow_motion: &'a SlowMotion,
     pub inventory: &'a PlayerInventory,
+    /// `[WeaponInventory]`'s visibility, 0..1.
+    pub weapon_strip: f32,
 }
 
 /// A frame to draw on, `width` x `height`, showing the 640x480 HUD space.
@@ -1479,10 +1637,29 @@ impl HudTarget<'_> {
         );
     }
 
+    fn draw_weapon_strip(
+        &mut self,
+        strip: &WeaponStrip,
+        sheet: &crate::scene::DecodedTexture,
+        state: &HudState,
+    ) {
+        for (sprite, [r, g, b, a]) in strip.rows(state.inventory) {
+            let [x, y] = top_left(sprite.reference, sprite.position, sprite.size);
+            let area = [x, y, x + sprite.size[0], y + sprite.size[1]];
+            let alpha = (a as f32 * state.weapon_strip).round() as u8;
+            self.blit(area, sprite.uv, sheet, [r, g, b, alpha]);
+        }
+    }
+
     /// The whole HUD, as `0x4aee20` updates it.
     pub fn draw_hud(&mut self, assets: &HudAssets, state: &HudState) {
         let layout = &assets.layout;
         let bitmap = |sprite: &HudSprite| assets.bitmaps.get(&sprite.file);
+        if state.weapon_strip > 0.0 {
+            if let Some(sheet) = bitmap(&layout.weapon_strip.sheet) {
+                self.draw_weapon_strip(&layout.weapon_strip, sheet, state);
+            }
+        }
         if let Some(figure) = bitmap(&layout.health_background) {
             self.draw_sprite(&layout.health_background, figure, 1.0);
         }
@@ -2165,6 +2342,52 @@ mod tests {
         assert!(!player.take_painkiller());
     }
 
+    const STRIP: &str = "#define POS ( 170, 15, 0 )\n#define U1 0.25\n#define CENTER 8\n\
+        [WeaponInventory]\n{\n[Visibility]\nDuration = 1.0;\nFadeInTime = 0.05;\nFadeOutTime = 0.1;\n\
+        [Properties]\nOffsetInsideSlot = ( 0, 20, 0 );\nColorSelected = ffffffff;\n\
+        ColorNormal = a0a0a0b0;\nColorOutOfAmmo = 801008b0;\n\
+        CombinationMap = \"bitmaps\\WeaponHUD.pcx\";\nCombinationMapAlpha = \"bitmaps\\WeaponHUD_alpha.pcx\";\n\
+        [Slot]\n{\n[SlotNumberSpriteWindow]\nReferencePoint = CENTER;\nPosition = POS;\nWidth = 12;\nHeight = 12;\n\
+        UVUpperLeft = ( U1, 0.0, 0 );\nUVLowerRight = ( 0.5, 0.1, 0 );\n\
+        [SlotWeapon]\n{\n[WeaponSpecific]\nID = WEAPONID_INGRAM;\n[SpriteWindow]\nReferencePoint = CENTER;\n\
+        Position = ( 170, 40, 0 );\nWidth = 60;\nHeight = 20;\nUVUpperLeft = ( 0, 0, 0 );\nUVLowerRight = ( 1, 1, 0 );\n}\n\
+        [SlotWeapon]\n{\n[WeaponSpecific]\nID = WEAPONID_BERETTA;\n[SpriteWindow]\nReferencePoint = CENTER;\n\
+        Position = ( 170, 40, 0 );\nWidth = 60;\nHeight = 20;\nUVUpperLeft = ( 0, 0, 0 );\nUVLowerRight = ( 1, 1, 0 );\n}\n}\n\
+        [Slot]\n{\n[SlotNumberSpriteWindow]\nReferencePoint = CENTER;\nPosition = ( 230, 15, 0 );\nWidth = 12;\nHeight = 12;\n\
+        UVUpperLeft = ( 0, 0, 0 );\nUVLowerRight = ( 1, 1, 0 );\n}\n}\n";
+
+    #[test]
+    fn the_weapon_strip_reads_its_slots_and_fades() {
+        let strip = WeaponStrip::parse(&parse_sections(STRIP));
+        assert_eq!(strip.sheet.file, r"bitmaps\WeaponHUD.pcx");
+        assert_eq!(strip.slots.len(), 2);
+        assert_eq!(strip.slots[0].number.uv, [0.25, 0.0, 0.5, 0.1]);
+        assert_eq!(strip.slots[0].weapons[1].0, "WEAPONID_BERETTA");
+        assert_eq!(strip.visibility(0.025), 0.5);
+        assert_eq!(strip.visibility(0.5), 1.0);
+        assert!((strip.visibility(1.05) - 0.5).abs() < 1e-4);
+        assert_eq!(strip.visibility(2.0), 0.0);
+    }
+
+    #[test]
+    fn the_strip_shows_carried_weapons_stacked_and_colours_the_one_in_hand() {
+        let strip = WeaponStrip::parse(&parse_sections(STRIP));
+        let mut player = inventory();
+        player.pickup_weapon("beretta");
+        player.pickup_weapon("ingram");
+        player.pickup_ammo("ingram", 10);
+        player.hold("ingram".to_string());
+        let rows = strip.rows(&player);
+        // Slot 1's number and two weapons, then the empty slot's number alone.
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].1, [0xff; 4]);
+        assert_eq!(rows[1].1, [0xff; 4]);
+        assert_eq!(rows[1].0.position, [170.0, 40.0]);
+        assert_eq!(rows[2].0.position, [170.0, 60.0]);
+        assert_eq!(rows[2].1, [0xa0, 0xa0, 0xa0, 0xb0]);
+        assert_eq!(rows[3].1, [0x80, 0x10, 0x08, 0xb0]);
+    }
+
     #[test]
     fn an_empty_clip_reloads_over_time_and_cannot_fire_meanwhile() {
         let mut player = emptied_beretta(20);
@@ -2638,6 +2861,7 @@ mod tests {
             health,
             slow_motion: slow,
             inventory,
+            weapon_strip: 0.0,
         };
         target.draw_hud(&test_assets(), &state);
         pixels

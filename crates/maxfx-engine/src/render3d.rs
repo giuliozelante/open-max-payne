@@ -210,6 +210,10 @@ pub fn run_3d_walkthrough(
     let mut action_time: f32 = 0.0;
     // `(seconds into the clip, message)` of a pill or use clip, still to come.
     let mut action_messages: Vec<(f32, String)> = Vec::new();
+    let mut strip_weapon = scene.inventory.current.clone();
+    let mut strip_age = f32::MAX;
+    // `(seconds into the clip, message)` of the painkiller still to come.
+    let mut pill_messages: Vec<(f32, String)> = Vec::new();
     // The `CHARANIM_` index of `CharacterRig::action`.
     let mut action_index = String::new();
     let mut reload_seen = 0;
@@ -1707,12 +1711,19 @@ pub fn run_3d_walkthrough(
                 width: W,
                 height: H,
             };
+            if scene.inventory.current != strip_weapon {
+                strip_weapon = scene.inventory.current.clone();
+                strip_age = 0.0;
+            }
+            strip_age += base_dt;
+            let strip_visible = assets.layout.weapon_strip.visibility(strip_age);
             let state = crate::hud::HudState {
                 health: player_health
                     .as_ref()
                     .map_or(1.0, crate::health::PlayerHealth::fraction),
                 slow_motion: &slow_motion,
                 inventory: &scene.inventory,
+                weapon_strip: strip_visible,
             };
             target.draw_hud(assets, &state);
             target.draw_crosshair(&scene.inventory);
