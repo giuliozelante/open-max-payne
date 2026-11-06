@@ -3013,6 +3013,7 @@ pub fn load_level_items(
             name: item.name.clone(),
             kind,
             pos: [0, 1, 2].map(|c| item.pos[c] + origin[c]),
+            rot: item.rot,
             taken: false,
         });
     }
@@ -4687,6 +4688,9 @@ mod tests {
         let scene = scene::parse_ldb_scene(&bytes).expect("tutorial");
         let (level, models) = load_level_items(&game, &scene, &BTreeMap::new());
         assert_eq!(level.items.len(), scene.items.len());
+        let gun = level.items.iter().find(|item| item.kind == "pumpshotgun");
+        // The van's shotgun lies across the floor, turned 115 degrees from the model.
+        assert_eq!(gun.expect("van shotgun").rot[0], -0.42261827);
         for item in &level.items {
             assert!(level.defs.contains_key(&item.kind), "{}", item.kind);
             let model = models

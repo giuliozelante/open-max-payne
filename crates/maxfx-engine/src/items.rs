@@ -107,7 +107,17 @@ pub struct LiveItem {
     pub kind: String,
     /// World position.
     pub pos: [f32; 3],
+    /// Columns of the rotation the level gives it.
+    pub rot: [f32; 9],
     pub taken: bool,
+}
+
+impl LiveItem {
+    /// A point of the item's model in the world.
+    pub fn world_point(&self, v: [f32; 3]) -> [f32; 3] {
+        let m = &self.rot;
+        [0, 1, 2].map(|c| self.pos[c] + m[c] * v[0] + m[c + 3] * v[1] + m[c + 6] * v[2])
+    }
 }
 
 /// The level's items and what the player has done with them.
@@ -254,6 +264,7 @@ PickupIfAmmoNotFull = true;
                 name: format!("::Room::item{x}"),
                 kind: "beretta".to_string(),
                 pos: [x, 0.2, 0.0],
+                rot: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
                 taken: false,
             });
         }
@@ -286,6 +297,19 @@ PickupIfAmmoNotFull = true;
     }
 
     #[test]
+    fn an_item_model_turns_with_the_level_rotation() {
+        let item = LiveItem {
+            name: String::new(),
+            kind: String::new(),
+            pos: [10.0, 0.0, 20.0],
+            // A quarter turn about y: model +x goes to world -z.
+            rot: [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+            taken: false,
+        };
+        assert_eq!(item.world_point([1.0, 2.0, 0.0]), [10.0, 2.0, 19.0]);
+    }
+
+    #[test]
     fn an_inactive_item_waits_for_the_message_that_activates_it() {
         let (mut items, mut scene) = level(0);
         scene.items.push(crate::scene::SceneItem {
@@ -293,6 +317,7 @@ PickupIfAmmoNotFull = true;
             item_type: "beretta".to_string(),
             room_id: 0,
             pos: [0.0; 3],
+            rot: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             active: true,
         });
         scene.fsms.push(crate::scene::SceneFsm {
