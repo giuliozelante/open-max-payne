@@ -294,6 +294,11 @@ pub fn run_3d_walkthrough(
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
     let mut player_health = crate::load_player_health(&game_root);
+    let mut last_health = player_health.as_ref().map_or(0.0, |max| max.health);
+    let config = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt").unwrap_or_default();
+    let config = String::from_utf8_lossy(&config);
+    let falling = crate::health::Falling::parse(&config);
+    let damage_flash = crate::health::DamageFlash::parse(&config);
     let death_clips = crate::load_death_clips(&game_root);
     let player_clips = crate::load_character_clips(&game_root, player_skin.unwrap_or("max_payne"));
     let mut motion = crate::player::PlayerMotion::default();
@@ -719,6 +724,10 @@ pub fn run_3d_walkthrough(
             {
                 if player_pos[1] <= floor_y + EYE_HEIGHT {
                     player_pos[1] = floor_y + EYE_HEIGHT;
+                    // 0x68dd1d. HYPOTHESIS: only the fall counts, not the speed along the ground.
+                    if let (Some(max), Some(falling)) = (player_health.as_mut(), &falling) {
+                        max.damage(falling.damage(-vel_y, max.max));
+                    }
                     vel_y = 0.0;
                 }
                 grounded = vel_y <= 0.0 && player_pos[1] - EYE_HEIGHT - floor_y < STEP_UP;
@@ -1187,6 +1196,10 @@ pub fn run_3d_walkthrough(
 
         if let Some(max) = player_health.as_mut() {
             max.step(world_dt);
+            if let Some(flash) = damage_flash.and_then(|flash| flash.of(last_health - max.health)) {
+                scene.screen_flash = Some(flash);
+            }
+            last_health = max.health;
         }
 
         // Update Enemy AI (turn toward Max Payne and advance along floor when within 24m)

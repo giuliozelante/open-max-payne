@@ -38,6 +38,15 @@ and has not been read. The floor applies only to the living: `0x6d6eb0` guards i
 
 **UNKNOWN:** the flash, sound and death side effects in `0x695b10` and `0x695fb0`.
 
+## Falling
+
+**VERIFIED (`0x68dd1d`-`0x68dd52`):** damage is `pow(speed - DamageFallingSpeedDeduct, FallingDamageExponent)` times
+maximum health (`0x691bd0`) times `RelativeFallingDamage`, sent to `0x695b10` with kind 3. With gravity -20 and 60
+points that makes 5 m safe and 10 m lethal, as the comment in `globalconfig.txt` says.
+
+**HYPOTHESIS:** `DamageFallingThreshold` gates it, and the speed is the fall alone. The test before `0x68dc98` is
+unread. The red flash is linear between the `DamageFlash*` ends; its code is unread.
+
 ## Auto-aim
 
 **VERIFIED (`0x6d8ca2`-`0x6d8d10`, `0x6770a0`):** a projectile test grows the target's capsule. Radius takes
