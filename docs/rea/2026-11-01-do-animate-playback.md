@@ -366,3 +366,28 @@ the update. **Engine:** no change. `render3d` recomputes every DO pose each fram
 - Curve tag `0x71`; runtime channel counts.
 - Matrix IO thunk ↔ `M_Matrix4x3Template` at runtime.
 - KF2: who vcalls VA `+0x48` — see KF2 note (static exhausted → dynamic).
+
+## Mesh record parent (2026-11-04)
+
+**STRONGLY SUPPORTED (measured on 13 retail levels: `Startup_level`, `Tutorial`, `end_combat`, Part 0 and Part 1):**
+a dynamic mesh's parent is the string just before the record's track count, not its name path. The first string
+after the point list is empty in every record checked, and the engine had been deriving the parent from the
+name. A path segment can be an FSM with no mesh: `::start::CHOPPER_CONTROLLER::Y::X::ALTITUDE.DO` hangs from
+`…::Y.DO`, and `X` exists only as an FSM.
+
+| Check, rest poses | Holds | Fails |
+|---|---|---|
+| Record parent set: `W0(parent) · L0 = W0` | 579 | 3 |
+| Record parent empty: `L0 = W0` | 2166 | 0 |
+| Record parent empty, a mesh on the name path: `W0(path parent) · L0 = W0` | 0 | 18 |
+
+Every non-empty parent resolves to a mesh. The 3 misfits (`::p2::service_train::door6.DO`,
+`::p2::service_train_off::door7.DO`, `::p2_tunnel::wooden_piece1::sign.DO`) are unexplained. That this string is
+what `0x6e23b0` looks up for `[+0x189]` is inferred from the data, not read from the bytes.
+
+With the record parent, the intro chopper rides the `Y` track from z −925 to a 5.3 m pass by `C3` at t = 20.5 s,
+which matches the retail frame. It had stayed 500 m away. The same chain break affected `cam_y::cam_z`,
+`cam_new_01::horiz::vert_rot::cam1` and the elevator door in `::shaft`.
+
+Ruled out on the way: a backwards `C3`. The chopper starts along −z from it, and the camera's yaw at t = 20 agrees
+with the retail frame, so this does not undercut the particle z mirror in `2026-11-03-particle-emitters.md`.
