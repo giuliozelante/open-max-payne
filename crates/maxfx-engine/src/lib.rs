@@ -2642,7 +2642,15 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
                     .read(&path)
                     .and_then(|bytes| kf2::parse_kf2_anim(&bytes));
             }
-            def.round_pattern = hud::parse_round_pattern(&skeleton, &body);
+            let fps = def
+                .fire_clip
+                .as_ref()
+                .and_then(|clip| Some(clip.bones.first()?.fps));
+            let fps = fps.filter(|fps| *fps > 0.0).unwrap_or(1.0);
+            def.rounds = hud::parse_rounds(&skeleton, &body);
+            for round in &mut def.rounds {
+                round.at /= fps;
+            }
             let blows = hud::parse_bone_projectiles(&skeleton, &body);
             if let Some((_, projectile)) = blows.first() {
                 let path = format!(r"\data\database\projectiles\{projectile}.txt");
@@ -2777,6 +2785,17 @@ pub fn load_upper_bones(game_dir: &Path) -> [Vec<String>; 2] {
         .unwrap_or_default();
     ["OneHandedUpperBodyBone", "TwoHandedUpperBodyBone"]
         .map(|tag| kf2::parse_body_bones(&skeleton, tag))
+}
+
+/// `RightHandGunBone` and `LeftHandGunBone` of the default skeleton.
+pub fn load_gun_bones(game_dir: &Path) -> [String; 2] {
+    let skeleton = read_game_bytes(game_dir, r"\data\database\skeletons\default_skeleton.txt")
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    ["RightHandGunBone", "LeftHandGunBone"].map(|tag| {
+        let bones = kf2::parse_body_bones(&skeleton, tag);
+        bones.into_iter().next().unwrap_or_default()
+    })
 }
 
 /// `CHARANIM_RANDOMDEATH1..4` of the default skeleton, with their sounds.
@@ -4368,8 +4387,14 @@ mod tests {
         assert_eq!(damage("deserteagle"), Some(10));
         assert_eq!(damage("sniper"), Some(70));
         assert_eq!(damage("leadpipe"), Some(9));
-        assert_eq!(defs["ingram"].round_pattern, [true, false, true, false]);
-        let quiet = defs["ingram"].round_projectiles(1)[0].decal.as_deref();
+        let ingram = &defs["ingram"];
+        let quiet: Vec<bool> = ingram.rounds.iter().map(|round| round.quiet).collect();
+        assert_eq!(quiet, [false, true, false, true]);
+        // All four fit one 1 / 8 s `DefaultShootingFrequency` cycle.
+        assert!(ingram.rounds[3].at < 1.0 / ingram.shots_per_second);
+        assert!(defs["berettadual"].dual && defs["berettadual"].rounds[1].left);
+        assert_eq!(load_gun_bones(&game), ["gun", "hand-l"]);
+        let quiet = defs["ingram"].round_projectiles(true)[0].decal.as_deref();
         assert_eq!(quiet, Some("bullethit_noeffects"));
         let shotgun = &defs["pumpshotgun"].projectiles;
         let plan: Vec<(u32, Option<&str>)> = shotgun

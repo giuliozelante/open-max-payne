@@ -140,6 +140,10 @@ pub struct CharacterRig {
     /// Lower-case `OneHandedUpperBodyBone` and `TwoHandedUpperBodyBone` names: what `action`
     /// moves while the legs run.
     pub upper_bones: [Vec<String>; 2],
+    /// The weapon in hand uses the `TwoHandedUpperBodyBone` set.
+    pub two_handed_bones: bool,
+    /// `RightHandGunBone` and `LeftHandGunBone`.
+    pub gun_bones: [String; 2],
 }
 
 fn read_i32(data: &[u8], i: &mut usize) -> Option<i32> {
@@ -1013,6 +1017,8 @@ fn rig_from_mesh(mesh: KfsMesh, skin: Option<SkdSkin>, path: &Path) -> Character
         max_health: 0,
         action_time: 0.0,
         upper_bones: [Vec::new(), Vec::new()],
+        two_handed_bones: false,
+        gun_bones: [String::new(), String::new()],
     }
 }
 

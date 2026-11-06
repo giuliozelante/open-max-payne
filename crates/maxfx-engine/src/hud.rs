@@ -490,8 +490,19 @@ impl ProjectileDef {
     }
 }
 
-/// Rounds of a `CHARANIM_SHOOT<WEAPON>` clip in order: `false` for `WEAPONANIM_SHOOT_NOEFFECTS`.
-pub fn parse_round_pattern(skeleton: &str, index: &str) -> Vec<bool> {
+/// One `WS_AnimateShooting` of a shoot clip.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ShotRound {
+    /// Frame, then seconds once the clip's rate is known.
+    pub at: f32,
+    /// `WEAPONANIM_SHOOT_NOEFFECTS`.
+    pub quiet: bool,
+    /// `LeftHandWeapon`.
+    pub left: bool,
+}
+
+/// The rounds of a `CHARANIM_SHOOT<WEAPON>` clip in order, `at` in frames.
+pub fn parse_rounds(skeleton: &str, index: &str) -> Vec<ShotRound> {
     let header = format!("Index = {index};");
     skeleton
         .lines()
@@ -499,7 +510,14 @@ pub fn parse_round_pattern(skeleton: &str, index: &str) -> Vec<bool> {
         .skip(1)
         .take_while(|line| !line.contains("[Animation]"))
         .filter(|line| line.contains("WS_AnimateShooting"))
-        .map(|line| !line.contains("WEAPONANIM_SHOOT_NOEFFECTS"))
+        .filter_map(|line| {
+            let frame = line.split_once("Frame =")?.1.split(';').next()?;
+            Some(ShotRound {
+                at: frame.trim().parse().ok()?,
+                quiet: line.contains("WEAPONANIM_SHOOT_NOEFFECTS"),
+                left: line.contains("LeftHandWeapon"),
+            })
+        })
         .collect()
 }
 
@@ -562,8 +580,12 @@ pub struct WeaponDef {
     pub projectiles: Vec<ProjectileDef>,
     /// What a `WEAPONANIM_SHOOT_NOEFFECTS` round creates.
     pub quiet_projectiles: Vec<ProjectileDef>,
-    /// `parse_round_pattern` of the weapon's shoot clip.
-    pub round_pattern: Vec<bool>,
+    /// `parse_rounds` of the weapon's shoot clip, `at` in seconds.
+    pub rounds: Vec<ShotRound>,
+    /// `UseMultipleGunBones`: a gun in each hand.
+    pub dual: bool,
+    /// `TwoHandedBones`: the upper-body bone set.
+    pub two_handed_bones: bool,
     /// Metres a melee weapon reaches; `None` for a gun.
     pub melee_reach: Option<f32>,
     /// Seconds into the shoot clip of each melee blow.
@@ -600,7 +622,10 @@ impl WeaponDef {
                 .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
             projectiles: Vec::new(),
             quiet_projectiles: Vec::new(),
-            round_pattern: Vec::new(),
+            rounds: Vec::new(),
+            dual: key("usemultiplegunbones").is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
+            two_handed_bones: key("twohandedbones")
+                .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
             melee_reach: None,
             melee_blows: Vec::new(),
             model: weapon_txt
@@ -662,10 +687,8 @@ pub fn parse_bone_projectiles(skeleton: &str, index: &str) -> Vec<(u32, String)>
 }
 
 impl WeaponDef {
-    /// What the `round`th shot creates, following the clip's pattern.
-    pub fn round_projectiles(&self, round: usize) -> &[ProjectileDef] {
-        let pattern = &self.round_pattern;
-        let quiet = !pattern.is_empty() && !pattern[round % pattern.len()];
+    /// What a round creates.
+    pub fn round_projectiles(&self, quiet: bool) -> &[ProjectileDef] {
         if quiet && !self.quiet_projectiles.is_empty() {
             &self.quiet_projectiles
         } else {
@@ -838,6 +861,12 @@ impl PlayerInventory {
     /// The rounds `name` uses.
     pub fn stock(&self, name: &str) -> Option<WeaponStock> {
         self.ammo.get(&self.defs.get(name)?.inventory_id).copied()
+    }
+
+    /// The weapon in hand has a round ready.
+    pub fn can_fire(&self) -> bool {
+        let stock = self.current.as_ref().and_then(|name| self.stock(name));
+        self.reloading.is_none() && stock.is_some_and(|stock| stock.infinite || stock.clip > 0)
     }
 
     /// `WeaponID` of the weapon in hand.
@@ -1512,16 +1541,53 @@ mod tests {
     }
 
     #[test]
-    fn a_clip_lists_its_rounds_with_and_without_effects() {
-        let text = "[Animation] Index = CHARANIM_SHOOTINGRAM; Filename = a.kf2;\n[Message] Frame = 0; String = \"RightHandWeapon->A_Play3DSound ( weapons, shoot_ingram );\";\n[Message] Frame = 2; String = \"RightHandWeapon->WS_AnimateShooting(\" WEAPONANIM_SHOOT \",\" WEAPONANIM_SHOOTEMPTY \");\";\n[Message] Frame = 5; String = \"RightHandWeapon->WS_AnimateShooting(\" WEAPONANIM_SHOOT_NOEFFECTS \",\" WEAPONANIM_SHOOTEMPTY \");\";\n[Animation] Index = CHARANIM_SHOOTLOWINGRAM; Filename = b.kf2;\n";
-        assert_eq!(
-            parse_round_pattern(text, "CHARANIM_SHOOTINGRAM"),
-            [true, false]
-        );
+    fn a_weapon_file_says_which_bones_and_guns_it_uses() {
+        let def = WeaponDef::parse(
+            "",
+            "[Attributes]\nTwoHandedBones \t= YES;\nUseMultipleGunBones = YES;\nInventoryID = I;\nWeaponID = W;\nClipsize = 1;\nPocketsize = 2;\nReloadAmount = -1;\n",
+        )
+        .expect("weapon");
+        assert!(def.dual && def.two_handed_bones && !def.two_handed);
     }
 
     #[test]
-    fn rounds_follow_the_pattern_and_fall_back_without_one() {
+    fn only_a_loaded_idle_weapon_can_fire() {
+        let mut inventory = PlayerInventory::default();
+        let beretta = WeaponDef {
+            inventory_id: "INV".into(),
+            ..Default::default()
+        };
+        inventory.defs.insert("beretta".to_string(), beretta);
+        inventory.current = Some("beretta".to_string());
+        assert!(!inventory.can_fire());
+        let stock = WeaponStock {
+            clip: 1,
+            ..Default::default()
+        };
+        inventory.ammo.insert("INV".to_string(), stock);
+        assert!(inventory.can_fire());
+        inventory.reloading = Some(1.0);
+        assert!(!inventory.can_fire());
+    }
+
+    #[test]
+    fn a_clip_lists_its_rounds_with_and_without_effects() {
+        let text = "[Animation] Index = CHARANIM_SHOOTINGRAM; Filename = a.kf2;\n[Message] Frame = 0; String = \"RightHandWeapon->A_Play3DSound ( weapons, shoot_ingram );\";\n[Message] Frame = 2; String = \"RightHandWeapon->WS_AnimateShooting(\" WEAPONANIM_SHOOT \",\" WEAPONANIM_SHOOTEMPTY \");\";\n[Message] Frame = 5; String = \"RightHandWeapon->WS_AnimateShooting(\" WEAPONANIM_SHOOT_NOEFFECTS \",\" WEAPONANIM_SHOOTEMPTY \");\";\n[Animation] Index = CHARANIM_SHOOTLOWINGRAM; Filename = b.kf2;\n";
+        let right = |at, quiet| ShotRound {
+            at,
+            quiet,
+            left: false,
+        };
+        assert_eq!(
+            parse_rounds(text, "CHARANIM_SHOOTINGRAM"),
+            [right(2.0, false), right(5.0, true)]
+        );
+        let dual = "[Animation] Index = CHARANIM_SHOOTBERETTADUAL; Filename = a.kf2;\n[Message] Frame = 3; String = \"LeftHandWeapon->WS_AnimateShooting(\" WEAPONANIM_SHOOT \",\" WEAPONANIM_SHOOTEMPTY \");\";\n";
+        assert!(parse_rounds(dual, "CHARANIM_SHOOTBERETTADUAL")[0].left);
+    }
+
+    #[test]
+    fn a_quiet_round_uses_its_own_projectiles_when_it_has_them() {
         let shot = |damage| ProjectileDef {
             count: 1,
             damage,
@@ -1530,16 +1596,12 @@ mod tests {
         let mut def = WeaponDef {
             projectiles: vec![shot(5)],
             quiet_projectiles: vec![shot(6)],
-            round_pattern: vec![true, false],
             ..Default::default()
         };
-        let damage = |def: &WeaponDef, round| def.round_projectiles(round)[0].damage;
-        assert_eq!(
-            [damage(&def, 0), damage(&def, 1), damage(&def, 2)],
-            [5, 6, 5]
-        );
-        def.round_pattern.clear();
-        assert_eq!(damage(&def, 1), 5);
+        let damage = |def: &WeaponDef, quiet| def.round_projectiles(quiet)[0].damage;
+        assert_eq!([damage(&def, false), damage(&def, true)], [5, 6]);
+        def.quiet_projectiles.clear();
+        assert_eq!(damage(&def, true), 5);
     }
 
     #[test]
