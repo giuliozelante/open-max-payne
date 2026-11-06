@@ -280,6 +280,17 @@ pub fn run_3d_walkthrough(
             .unwrap_or_default();
     let mut particle_lights = ParticleLights::default();
     let mut particle_sprites = ParticleSprites::default();
+    scene.inventory.defs = crate::load_weapon_defs(&game_root);
+    scene.inventory.best_weapons = crate::load_best_weapons(&game_root);
+    let hud_assets = crate::hud::HudAssets::load(&game_root);
+    let mut slow_motion = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt")
+        .and_then(|bytes| crate::hud::SlowMotion::parse(&String::from_utf8_lossy(&bytes)))
+        .unwrap_or(crate::hud::SlowMotion {
+            level: 1.0,
+            active: false,
+            seconds: 15.0,
+            threshold: 0.001,
+        });
 
     let mut fb = vec![0u32; W * H];
     let mut zb = vec![f32::INFINITY; W * H];
@@ -308,7 +319,11 @@ pub fn run_3d_walkthrough(
         if window.is_key_pressed(Key::B, KeyRepeat::No) {
             bullet_time = !bullet_time;
         }
-        let bullet_time_active = bullet_time || window.get_mouse_down(MouseButton::Right);
+        slow_motion.step(
+            bullet_time || window.get_mouse_down(MouseButton::Right),
+            base_dt,
+        );
+        let bullet_time_active = slow_motion.active;
         let world_dt = if bullet_time_active {
             base_dt * 0.30
         } else {
@@ -474,11 +489,13 @@ pub fn run_3d_walkthrough(
             }
         }
 
+        scene.inventory.step(world_dt);
+
         // Shoot (`F` or `LeftCtrl` / `RightCtrl`)
         let fire_pressed = window.is_key_pressed(Key::F, KeyRepeat::No)
             || window.is_key_pressed(Key::LeftCtrl, KeyRepeat::No)
             || window.is_key_pressed(Key::RightCtrl, KeyRepeat::No);
-        if fire_pressed && scene.player_controls && shot_timer <= 0.0 {
+        if fire_pressed && scene.player_controls && shot_timer <= 0.0 && scene.inventory.fire() {
             shot_timer = 0.18;
             let aim_dir = [sy * cp, sp, cy * cp];
             // Raycast against living enemies
@@ -863,17 +880,19 @@ pub fn run_3d_walkthrough(
             );
         }
 
-        // Draw crosshair (gold in Bullet-Time, white/amber normally)
-        let cross_col = if bullet_time_active {
-            0x00ffaa22
-        } else {
-            0x00ffdd66
-        };
-        let cx = W / 2;
-        let cy_scr = H / 2;
-        for d in (-4i32..=4).filter(|_| crosshair_visible(&scene)) {
-            fb[cy_scr * W + (cx as i32 + d) as usize] = cross_col;
-            fb[(cy_scr as i32 + d) as usize * W + cx] = cross_col;
+        if let Some(assets) = hud_assets.as_ref().filter(|_| crosshair_visible(&scene)) {
+            let mut target = crate::hud::HudTarget {
+                pixels: &mut fb,
+                width: W,
+                height: H,
+            };
+            let state = crate::hud::HudState {
+                health: 1.0,
+                slow_motion: &slow_motion,
+                inventory: &scene.inventory,
+            };
+            target.draw_hud(assets, &state);
+            target.draw_crosshair(&scene.inventory);
         }
 
         if let (Some((renderer, _)), Some(view)) = (gpu.as_mut(), scene_view) {
@@ -2211,7 +2230,7 @@ pub(crate) fn draw_sprites<'a>(
 /// Bilinear diffuse texel at `(u, v)` with repeat addressing, all four channels (alpha is
 /// filtered before the alpha test, as in D3D). Retail offers bilinear, trilinear and anisotropic
 /// filtering (`FilteringMode`); the software renderer has no mipmaps.
-fn sample_texture(t: &crate::scene::DecodedTexture, u: f32, v: f32) -> u32 {
+pub(crate) fn sample_texture(t: &crate::scene::DecodedTexture, u: f32, v: f32) -> u32 {
     let (w, h) = (t.width.max(1), t.height.max(1));
     let x = (u * w as f32 - 0.5).rem_euclid(w as f32);
     let y = (v * h as f32 - 0.5).rem_euclid(h as f32);
@@ -4170,6 +4189,7 @@ mod tests {
             fog_fade: None,
             widescreen: crate::scene::Ramp::at(0.0),
             fov_multiplier: crate::scene::Ramp::at(1.0),
+            inventory: Default::default(),
             gravity: None,
         }
     }

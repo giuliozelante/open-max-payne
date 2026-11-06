@@ -566,6 +566,11 @@ impl RasIndex {
     }
 
     /// The decoded bytes of `win_path` (`\dir\name`, any case), `None` when absent.
+    /// Member paths, as stored (`\\data\\...`).
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.members.iter().map(|member| member.win_path.as_str())
+    }
+
     pub fn read_member(&self, win_path: &str) -> Result<Option<Vec<u8>>, RasError> {
         use std::io::{Read, Seek, SeekFrom};
         let mut want = win_path.replace('/', "\\");

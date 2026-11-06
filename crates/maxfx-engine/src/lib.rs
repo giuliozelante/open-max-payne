@@ -2,6 +2,7 @@
 
 pub mod frontend;
 pub mod gpu;
+pub mod hud;
 pub mod kf2;
 pub mod menu_ui;
 pub mod particles;
@@ -2563,6 +2564,57 @@ pub fn read_game_bytes(game_dir: &Path, win_path: &str) -> Option<Vec<u8>> {
     GameSource::open(game_dir).read(win_path)
 }
 
+/// Every weapon in `database/weapons`, by lower-case file name, as the archives list them.
+pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
+    const DIR: &str = r"\data\database\weapons\";
+    let mut source = GameSource::open(game_dir);
+    let Some(shooting) = source.read(r"\data\database\shooting.h") else {
+        return BTreeMap::new();
+    };
+    let shooting = String::from_utf8_lossy(&shooting).into_owned();
+    let mut names = Vec::new();
+    for path in ras_candidates(game_dir) {
+        let Ok(index) = openras::archive::RasIndex::open(&path) else {
+            continue;
+        };
+        names.extend(index.paths().filter_map(|member| {
+            let lower = member.to_ascii_lowercase();
+            let name = lower.strip_prefix(DIR)?.strip_suffix(".txt")?;
+            (!name.contains('\\')).then(|| name.to_string())
+        }));
+    }
+    let skeleton = source
+        .read(r"\data\database\skeletons\default_skeleton.txt")
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    let reloads = hud::parse_reload_animations(&skeleton);
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let text = source.read(&format!("{DIR}{name}.txt"))?;
+            let mut def = hud::WeaponDef::parse(&shooting, &String::from_utf8_lossy(&text))?;
+            if let Some((file, frame)) = reloads.get(&name) {
+                let path = format!(r"\data\database\skeletons\default_skeleton\{file}");
+                let clip = source
+                    .read(&path)
+                    .and_then(|bytes| kf2::parse_kf2_anim(&bytes));
+                let fps = clip.and_then(|clip| Some(clip.bones.first()?.fps));
+                def.reload_seconds = fps
+                    .filter(|fps| *fps > 0.0)
+                    .map_or(0.0, |fps| *frame as f32 / fps);
+            }
+            Some((name, def))
+        })
+        .collect()
+}
+
+/// `weaponpriority.txt` `[BestWeapons]`, strongest first.
+pub fn load_best_weapons(game_dir: &Path) -> Vec<String> {
+    read_game_bytes(game_dir, r"\data\weaponpriority.txt")
+        .map(|bytes| hud::parse_best_weapons(&String::from_utf8_lossy(&bytes)))
+        .unwrap_or_default()
+}
+
 /// Raw SharedDB text for `breakable` and `dynamic`, from loose `data/` or `x_data.ras`.
 pub fn load_sound_catalogs(game_dir: &Path) -> BTreeMap<String, String> {
     ["breakable", "dynamic"]
@@ -4145,6 +4197,42 @@ mod tests {
         assert_eq!(entries[0].ambient, Some([140.0, 135.0, 110.0]));
         assert_eq!(entries[1].ambient, Some([32.0, 33.0, 34.0]));
         assert_eq!(entries[2].ambient, None);
+    }
+
+    #[test]
+    fn retail_weapon_files_give_their_clip_sizes() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let defs = load_weapon_defs(&std::path::PathBuf::from(home).join("Games/MaxPayne1"));
+        if defs.is_empty() {
+            return;
+        }
+        assert_eq!(defs.len(), 17, "{:?}", defs.keys());
+        assert_eq!(defs["beretta"].clip_size, 18);
+        assert_eq!(defs["beretta"].pocket_size, 162);
+        assert_eq!(defs["mp5"].id, "WEAPONID_MP5");
+        assert_eq!(defs["painkiller"].pocket_size, 8);
+        assert_eq!(
+            defs["beretta"].inventory_id,
+            defs["berettadual"].inventory_id
+        );
+        // `C_Reload` at frame 39 of a 30 fps clip, and at frame 59 of a 60 fps one.
+        assert!((defs["beretta"].reload_seconds - 1.3).abs() < 1e-3);
+        assert!((defs["ingram"].reload_seconds - 59.0 / 60.0).abs() < 1e-3);
+        // `[Revert]`: the sniper reloads as the MP5 does.
+        assert_eq!(defs["sniper"].reload_seconds, defs["mp5"].reload_seconds);
+        assert_eq!(defs["pumpshotgun"].reload_amount, 1);
+        assert_eq!(defs.values().filter(|def| def.shows_dot).count(), 13);
+        assert_eq!(defs["beretta"].reload_amount, -1);
+        let best = load_best_weapons(
+            &std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join("Games/MaxPayne1"),
+        );
+        assert_eq!(
+            best.first().map(String::as_str),
+            Some("WEAPONID_JACKHAMMER")
+        );
+        assert_eq!(best.len(), 11);
     }
 
     #[test]
