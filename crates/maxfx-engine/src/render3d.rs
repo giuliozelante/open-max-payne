@@ -478,6 +478,26 @@ pub fn run_3d_walkthrough(
         if scene.player_controls && window.is_key_pressed(Key::R, KeyRepeat::No) {
             scene.inventory.start_reload();
         }
+        if scene.player_controls {
+            // The Tutorial's tip names keys 1-6, and `SLOTID_*` runs 0 to 5.
+            let keys = [
+                Key::Key1,
+                Key::Key2,
+                Key::Key3,
+                Key::Key4,
+                Key::Key5,
+                Key::Key6,
+            ];
+            for (slot, key) in (0..).zip(keys) {
+                if window.is_key_pressed(key, KeyRepeat::No) {
+                    scene.inventory.select_slot(slot);
+                }
+            }
+            let wheel = window.scroll();
+            if wheel != 0.0 {
+                scene.inventory.step_weapon(wheel.signum() as i32);
+            }
+        }
         if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
             if let Some((name, gap)) = scene.nearest_action_trigger(&room_origins, feet) {

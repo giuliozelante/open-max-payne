@@ -2583,7 +2583,7 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
         .read(r"\data\database\weaponid.h")
         .unwrap_or_default();
     for line in String::from_utf8_lossy(&ids).lines() {
-        if line.contains("INVENTORYID_") {
+        if line.contains("INVENTORYID_") || line.contains("SLOTID_") {
             shooting.push('\n');
             shooting.push_str(line);
         }
@@ -4843,6 +4843,9 @@ mod tests {
         }
         let difficulty = load_difficulty(&game).expect("difficulty.txt");
         assert_eq!(difficulty.enemy_health, 0.8);
+        let weapons = load_weapon_defs(&game);
+        assert_eq!(weapons["beretta"].slot, Some(1));
+        assert_eq!(weapons["pumpshotgun"].slot, Some(2));
         assert_eq!(difficulty.player_health, 1.0);
         assert_eq!(difficulty.regenerate, 0.04);
         assert_eq!(difficulty.gained_immediately, 0.05);

@@ -649,6 +649,8 @@ pub struct WeaponDef {
     pub id: String,
     /// `InventoryID`. Weapons that share it share ammunition, like single and dual Berettas.
     pub inventory_id: String,
+    /// `SlotIndex`: the weapon key that reaches it, from 0.
+    pub slot: Option<u32>,
     pub clip_size: u32,
     pub pocket_size: u32,
     /// Time from the start of the reload animation to its `C_Reload` frame.
@@ -710,6 +712,7 @@ impl WeaponDef {
             flying: Vec::new(),
             id: key("weaponid")?.to_string(),
             inventory_id: key("inventoryid")?.to_string(),
+            slot: key("slotindex").and_then(|slot| slot.parse().ok()),
             clip_size: key("clipsize")?.parse().ok()?,
             pocket_size: key("pocketsize")?.parse().ok()?,
             reload_seconds: 0.0,
@@ -1150,6 +1153,65 @@ impl PlayerInventory {
         if let Some(name) = best {
             self.current = Some(name.clone());
         }
+    }
+
+    /// Carried weapons that can fire, by slot and weakest first in each. The painkiller has its
+    /// own key.
+    fn selectable(&self) -> Vec<String> {
+        let rank = |id: &str| self.best_weapons.iter().position(|best| best == id);
+        let mut names: Vec<_> = self
+            .carried
+            .iter()
+            .filter(|name| {
+                let def = &self.defs[*name];
+                let stock = self.ammo.get(&def.inventory_id);
+                def.id != "WEAPONID_PAINKILLER"
+                    && def.slot.is_some()
+                    && stock.is_some_and(|s| s.infinite || s.clip + s.pocket > 0)
+            })
+            .cloned()
+            .collect();
+        names.sort_by_key(|name| {
+            let def = &self.defs[name];
+            let rank = rank(&def.id).unwrap_or(usize::MAX);
+            (def.slot, std::cmp::Reverse(rank))
+        });
+        names
+    }
+
+    fn hold(&mut self, name: String) {
+        if self.current.as_ref() != Some(&name) {
+            self.current = Some(name);
+            self.reloading = None;
+            self.reload_clips = 0;
+        }
+    }
+
+    /// `#SELECTWEAPONSLOT<n>#`: the slot's best weapon, then the next one down on each press.
+    pub fn select_slot(&mut self, slot: u32) {
+        let mut names = self.selectable();
+        names.retain(|name| self.defs[name].slot == Some(slot));
+        names.reverse();
+        let held = names
+            .iter()
+            .position(|name| Some(name) == self.current.as_ref());
+        let next = held.map_or(0, |at| (at + 1) % names.len().max(1));
+        if let Some(name) = names.into_iter().nth(next) {
+            self.hold(name);
+        }
+    }
+
+    /// `#NEXTWEAPON#` for 1 and `#PREVIOUSWEAPON#` for -1, wrapping round.
+    pub fn step_weapon(&mut self, step: i32) {
+        let names = self.selectable();
+        let held = names
+            .iter()
+            .position(|name| Some(name) == self.current.as_ref());
+        let Some(held) = held else {
+            return;
+        };
+        let next = (held as i32 + step).rem_euclid(names.len() as i32) as usize;
+        self.hold(names[next].clone());
     }
 
     /// The reload key.
@@ -1860,6 +1922,92 @@ mod tests {
         .expect("weapon");
         assert_eq!(def.model.as_deref(), Some(r"beretta\beretta_Lod0.kf2"));
         assert!(def.shows_dot);
+    }
+
+    /// Beretta and deagle share slot 1, the pump shotgun has slot 2, and the deagle is empty.
+    fn armed() -> PlayerInventory {
+        let def = |id: &str, ammo: &str, slot| WeaponDef {
+            id: id.to_string(),
+            inventory_id: ammo.to_string(),
+            clip_size: 7,
+            slot: Some(slot),
+            ..WeaponDef::default()
+        };
+        let mut player = PlayerInventory {
+            defs: BTreeMap::from([
+                ("beretta".to_string(), def("WEAPONID_BERETTA", "3", 1)),
+                (
+                    "deserteagle".to_string(),
+                    def("WEAPONID_DESERTEAGLE", "4", 1),
+                ),
+                ("mp5".to_string(), def("WEAPONID_MP5", "8", 3)),
+                (
+                    "painkiller".to_string(),
+                    def("WEAPONID_PAINKILLER", "13", 10),
+                ),
+                (
+                    "pumpshotgun".to_string(),
+                    def("WEAPONID_PUMPSHOTGUN", "5", 2),
+                ),
+            ]),
+            best_weapons: [
+                "WEAPONID_PUMPSHOTGUN",
+                "WEAPONID_DESERTEAGLE",
+                "WEAPONID_BERETTA",
+            ]
+            .map(String::from)
+            .to_vec(),
+            ..PlayerInventory::default()
+        };
+        for name in ["beretta", "deserteagle", "painkiller", "pumpshotgun"] {
+            player.pickup_weapon(name);
+        }
+        player
+    }
+
+    #[test]
+    fn a_slot_key_takes_the_best_weapon_of_the_slot_then_cycles_it() {
+        let mut player = armed();
+        assert_eq!(player.current.as_deref(), Some("pumpshotgun"));
+        player.select_slot(1);
+        assert_eq!(player.current.as_deref(), Some("deserteagle"));
+        player.select_slot(1);
+        assert_eq!(player.current.as_deref(), Some("beretta"));
+        player.select_slot(1);
+        assert_eq!(player.current.as_deref(), Some("deserteagle"));
+    }
+
+    #[test]
+    fn a_slot_with_nothing_usable_changes_nothing() {
+        let mut player = armed();
+        player.select_slot(3);
+        assert_eq!(player.current.as_deref(), Some("pumpshotgun"));
+        player.ammo.get_mut("4").expect("deagle rounds").clip = 0;
+        player.select_slot(1);
+        assert_eq!(player.current.as_deref(), Some("beretta"));
+        player.select_slot(1);
+        assert_eq!(player.current.as_deref(), Some("beretta"));
+    }
+
+    #[test]
+    fn stepping_goes_through_the_slots_and_wraps_past_the_painkiller() {
+        let mut player = armed();
+        player.step_weapon(1);
+        assert_eq!(player.current.as_deref(), Some("beretta"));
+        player.step_weapon(1);
+        assert_eq!(player.current.as_deref(), Some("deserteagle"));
+        player.step_weapon(1);
+        assert_eq!(player.current.as_deref(), Some("pumpshotgun"));
+        player.step_weapon(-1);
+        assert_eq!(player.current.as_deref(), Some("deserteagle"));
+    }
+
+    #[test]
+    fn changing_weapon_drops_a_running_reload() {
+        let mut player = armed();
+        player.reloading = Some(1.0);
+        player.select_slot(1);
+        assert_eq!(player.reloading, None);
     }
 
     #[test]

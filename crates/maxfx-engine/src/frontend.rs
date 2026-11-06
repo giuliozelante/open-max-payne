@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, DeviceId, ElementState, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::platform::pump_events::EventLoopExtPumpEvents;
@@ -25,6 +25,8 @@ pub trait Frontend {
     fn mouse_motion(&self) -> Option<(f32, f32)> {
         None
     }
+    /// Mouse wheel movement this frame, positive when turned up.
+    fn scroll(&self) -> f32;
 }
 
 impl Frontend for Window {
@@ -42,6 +44,9 @@ impl Frontend for Window {
     }
     fn get_mouse_pos(&self, mode: MouseMode) -> Option<(f32, f32)> {
         Window::get_mouse_pos(self, mode)
+    }
+    fn scroll(&self) -> f32 {
+        self.get_scroll_wheel().map_or(0.0, |(_, y)| y)
     }
 }
 
@@ -62,6 +67,8 @@ struct InputState {
     size: (u32, u32),
     /// Relative mouse motion since the last pump.
     mouse_motion: (f64, f64),
+    /// Mouse wheel movement since the last pump.
+    scroll: f32,
     /// The window regained focus and its cursor grab must be taken again.
     refocused: bool,
 }
@@ -70,6 +77,10 @@ impl InputState {
     fn add_mouse_motion(&mut self, delta: (f64, f64)) {
         self.mouse_motion.0 += delta.0;
         self.mouse_motion.1 += delta.1;
+    }
+
+    fn add_scroll(&mut self, delta: f32) {
+        self.scroll += delta;
     }
 }
 
@@ -112,6 +123,10 @@ impl ApplicationHandler for InputState {
                     _ => {}
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => self.add_scroll(match delta {
+                MouseScrollDelta::LineDelta(_, y) => y,
+                MouseScrollDelta::PixelDelta(position) => position.y as f32,
+            }),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Some((position.x, position.y));
             }
@@ -170,6 +185,7 @@ impl WinitFrontend {
     pub fn pump(&mut self) {
         self.input.pressed.clear();
         self.input.mouse_motion = (0.0, 0.0);
+        self.input.scroll = 0.0;
         EVENT_LOOP.with(|cell| {
             if let Some(event_loop) = cell.borrow_mut().as_mut() {
                 event_loop.pump_app_events(Some(Duration::ZERO), &mut self.input);
@@ -229,6 +245,9 @@ impl Frontend for WinitFrontend {
     fn mouse_motion(&self) -> Option<(f32, f32)> {
         let (x, y) = self.input.mouse_motion;
         Some((x as f32, y as f32))
+    }
+    fn scroll(&self) -> f32 {
+        self.input.scroll
     }
 }
 
@@ -400,6 +419,12 @@ impl Frontend for Screen {
             Screen::Soft(_) => None,
         }
     }
+    fn scroll(&self) -> f32 {
+        match self {
+            Screen::Hard { front, .. } => front.scroll(),
+            Screen::Soft(window) => Frontend::scroll(window.as_ref()),
+        }
+    }
 }
 
 /// winit physical key → the minifb key the walkthrough checks.
@@ -427,6 +452,12 @@ pub(crate) fn minifb_key(code: KeyCode) -> Option<Key> {
         KeyCode::Tab => Key::Tab,
         KeyCode::Escape => Key::Escape,
         KeyCode::F1 => Key::F1,
+        KeyCode::Digit1 => Key::Key1,
+        KeyCode::Digit2 => Key::Key2,
+        KeyCode::Digit3 => Key::Key3,
+        KeyCode::Digit4 => Key::Key4,
+        KeyCode::Digit5 => Key::Key5,
+        KeyCode::Digit6 => Key::Key6,
         KeyCode::ShiftLeft => Key::LeftShift,
         KeyCode::ShiftRight => Key::RightShift,
         KeyCode::ControlLeft => Key::LeftCtrl,
@@ -445,6 +476,14 @@ mod tests {
         input.add_mouse_motion((3.0, -1.0));
         input.add_mouse_motion((2.0, -1.0));
         assert_eq!(input.mouse_motion, (5.0, -2.0));
+    }
+
+    #[test]
+    fn the_wheel_adds_up_within_a_frame() {
+        let mut input = InputState::default();
+        input.add_scroll(1.0);
+        input.add_scroll(1.0);
+        assert_eq!(input.scroll, 2.0);
     }
 
     #[test]
@@ -476,5 +515,7 @@ mod tests {
         assert_eq!(minifb_key(KeyCode::KeyW), Some(Key::W));
         assert_eq!(minifb_key(KeyCode::ControlRight), Some(Key::RightCtrl));
         assert_eq!(minifb_key(KeyCode::KeyZ), None);
+        assert_eq!(minifb_key(KeyCode::Digit1), Some(Key::Key1));
+        assert_eq!(minifb_key(KeyCode::Digit6), Some(Key::Key6));
     }
 }
