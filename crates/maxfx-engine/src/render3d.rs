@@ -758,6 +758,11 @@ pub fn run_3d_walkthrough(
         }
         if let Some(round) = fired {
             let def = scene.inventory.defs.get(&firing);
+            if let Some(rig) = player_rig.as_mut() {
+                rig.gun_clip = def
+                    .and_then(|def| def.gun_clip.clone())
+                    .map(|clip| (clip, 0.0));
+            }
             let shot = def.map_or(Vec::new(), |def| {
                 def.round_projectiles(round.quiet).to_vec()
             });
@@ -1062,6 +1067,12 @@ pub fn run_3d_walkthrough(
         if let Some(rig) = player_rig.as_mut() {
             rig.action_time = action_time;
             rig.aim_pitch = pitch;
+            if let Some((clip, time)) = rig.gun_clip.as_mut() {
+                *time += world_dt;
+                if *time >= clip_seconds(clip) {
+                    rig.gun_clip = None;
+                }
+            }
             if rig
                 .action
                 .as_ref()
@@ -3946,7 +3957,12 @@ pub(crate) fn held_weapon_verts(
     moving: bool,
 ) -> Option<Vec<[f32; 3]>> {
     let (anim, locals) = character_locals(rig, moving, anim_time)?;
-    let held = crate::kf2::bone_verts(&weapon.vertices, anim, &locals, bone)?;
+    let posed = rig
+        .gun_clip
+        .as_ref()
+        .map(|(clip, time)| crate::kf2::part_verts(weapon, clip, *time));
+    let rest = posed.as_ref().unwrap_or(&weapon.vertices);
+    let held = crate::kf2::bone_verts(rest, anim, &locals, bone)?;
     let (sy, cy) = yaw.sin_cos();
     let place = |[x, y, z]: [f32; 3]| {
         [
@@ -5136,6 +5152,7 @@ mod tests {
             vertices: Vec::new(),
             faces: Vec::new(),
             material_textures: Vec::new(),
+            parts: Vec::new(),
         };
         let rig = CharacterRig {
             mesh,
@@ -5146,6 +5163,7 @@ mod tests {
             action: Some(clip("shoot", [0.0; 3])),
             motion: None,
             fade: Default::default(),
+            gun_clip: None,
             aim: None,
             aim_pitch: 0.0,
             two_handed_idle: None,
@@ -5178,6 +5196,7 @@ mod tests {
                 vertices: Vec::new(),
                 faces: Vec::new(),
                 material_textures: Vec::new(),
+                parts: Vec::new(),
             },
             skin: None,
             idle: Some(clip("idle", [0.0; 3])),
@@ -5186,6 +5205,7 @@ mod tests {
             action: None,
             motion: Some(std::sync::Arc::new(clip("strafe", [0.0; 3]))),
             fade: Default::default(),
+            gun_clip: None,
             aim: None,
             aim_pitch: 0.0,
             two_handed_idle: None,
@@ -5252,6 +5272,7 @@ mod tests {
             vertices: Vec::new(),
             faces: Vec::new(),
             material_textures: Vec::new(),
+            parts: Vec::new(),
         };
         let mut rig = CharacterRig {
             mesh,
@@ -5262,6 +5283,7 @@ mod tests {
             action: Some(two_bones([8.0; 3], [9.0; 3])),
             motion: None,
             fade: Default::default(),
+            gun_clip: None,
             aim: None,
             aim_pitch: 0.0,
             two_handed_idle: None,
@@ -5307,6 +5329,7 @@ mod tests {
             vertices: Vec::new(),
             faces: Vec::new(),
             material_textures: Vec::new(),
+            parts: Vec::new(),
         };
         let mut rig = CharacterRig {
             mesh,
@@ -5317,6 +5340,7 @@ mod tests {
             action: None,
             motion: None,
             fade: Default::default(),
+            gun_clip: None,
             aim: None,
             aim_pitch: 0.0,
             two_handed_idle: Some(clip("2_idle", [0.0; 3])),
@@ -5348,6 +5372,7 @@ mod tests {
             vertices: Vec::new(),
             faces: Vec::new(),
             material_textures: Vec::new(),
+            parts: Vec::new(),
         };
         let aimed = |degrees: f32, y: f32| {
             let (sin, cos) = degrees.to_radians().sin_cos();
@@ -5365,6 +5390,7 @@ mod tests {
             action: Some(clip("gun", [0.0, 1.0, 0.0])),
             motion: None,
             fade: Default::default(),
+            gun_clip: None,
             aim: aim.map(std::sync::Arc::new),
             aim_pitch: -45_f32.to_radians(),
             two_handed_idle: None,
@@ -5392,6 +5418,7 @@ mod tests {
             vertices: Vec::new(),
             faces: Vec::new(),
             material_textures: Vec::new(),
+            parts: Vec::new(),
         };
         let mut rig = CharacterRig {
             mesh,
@@ -5402,6 +5429,7 @@ mod tests {
             action: None,
             motion: None,
             fade: Default::default(),
+            gun_clip: None,
             aim: None,
             aim_pitch: 0.0,
             two_handed_idle: None,
@@ -5749,6 +5777,7 @@ mod tests {
             vertices: vec![[0.0; 3]],
             faces: Vec::new(),
             material_textures: Vec::new(),
+            parts: Vec::new(),
         };
         let verts = vec![[0.0, 0.0, 0.0]];
         let dark = character_vertex_light(&rig, &verts, [0.0; 3], false, &[], [0.0; 3]);
@@ -6416,6 +6445,7 @@ mod tests {
             uvs: vec![uv; 3],
             indices: vec![0, 1, 2],
             textures: Vec::new(),
+            node: String::new(),
         }
     }
 

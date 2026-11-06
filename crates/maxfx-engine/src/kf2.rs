@@ -41,6 +41,8 @@ pub struct KfsMesh {
     pub vertices: Vec<[f32; 3]>,
     pub faces: Vec<KfsFace>,
     pub material_textures: Vec<Option<DecodedTexture>>,
+    /// The node each run of `vertices` hangs from, in a packed model.
+    pub parts: Vec<(String, std::ops::Range<usize>)>,
 }
 
 /// One SKD influence (`P_SkinMesh` allows at most two — `TooManyBonesPerVertex`).
@@ -134,6 +136,8 @@ pub struct CharacterRig {
     pub motion: Option<std::sync::Arc<Kf2Anim>>,
     /// The blend from the last clip to this one.
     pub fade: crate::clips::ClipFade,
+    /// The held weapon's own clip while it plays, and seconds into it.
+    pub gun_clip: Option<(std::sync::Arc<Kf2Anim>, f32)>,
     /// What turns a shot `action` toward `aim_pitch`.
     pub aim: Option<std::sync::Arc<crate::clips::AimClips>>,
     /// Radians the character aims above level.
@@ -426,6 +430,7 @@ where
         vertices,
         faces,
         material_textures,
+        parts: Vec::new(),
     })
 }
 
@@ -1023,6 +1028,7 @@ fn rig_from_mesh(mesh: KfsMesh, skin: Option<SkdSkin>, path: &Path) -> Character
         action: None,
         motion: None,
         fade: Default::default(),
+        gun_clip: None,
         aim: None,
         aim_pitch: 0.0,
         two_handed_idle: load_anim_named(path, &["2_stand.kf2"]),
@@ -1364,6 +1370,8 @@ pub struct SkyMesh {
     pub indices: Vec<usize>,
     /// The material's bitmaps: colour, then the opacity map when it has one.
     pub textures: Vec<String>,
+    /// The name of the node it hangs from.
+    pub node: String,
 }
 
 /// One mesh from the parts of a weapon's `.kf2`, a material per part.
@@ -1377,10 +1385,13 @@ pub fn mesh_from_parts(
         vertices: Vec::new(),
         faces: Vec::new(),
         material_textures: Vec::new(),
+        parts: Vec::new(),
     };
     for (mat_index, part) in parts.iter().enumerate() {
         let base = mesh.vertices.len();
         mesh.vertices.extend(&part.vertices);
+        let run = base..mesh.vertices.len();
+        mesh.parts.push((part.node.clone(), run));
         mesh.faces
             .extend(part.indices.as_chunks::<3>().0.iter().map(|tri| KfsFace {
                 indices: [base + tri[0], base + tri[1], base + tri[2]],
@@ -1391,6 +1402,25 @@ pub fn mesh_from_parts(
         mesh.material_textures.push(texture);
     }
     mesh
+}
+
+/// The vertices of `mesh` with each part moved as `clip` moves its node from frame 0 to `time_s`.
+pub fn part_verts(mesh: &KfsMesh, clip: &Kf2Anim, time_s: f32) -> Vec<[f32; 3]> {
+    let rest = compose_world(clip, &sample_locals(clip, 0.0));
+    let now = compose_world(clip, &sample_locals(clip, time_s));
+    let mut verts = mesh.vertices.clone();
+    for (node, run) in &mesh.parts {
+        let node = node.to_ascii_lowercase();
+        let (Some(&(rest_mat, rest_pos)), Some(&(mat, pos))) = (rest.get(&node), now.get(&node))
+        else {
+            continue;
+        };
+        let (back_mat, back_pos) = invert_rt(rest_mat, rest_pos);
+        for vert in &mut verts[run.clone()] {
+            *vert = xform(mat, pos, xform(back_mat, back_pos, *vert));
+        }
+    }
+    verts
 }
 
 /// `verts` carried by `bone` of `anim` at `time_s`, in character space.
@@ -1512,6 +1542,7 @@ fn split_groups(
             uvs: mesh.uvs.get(corners.clone()).unwrap_or_default().to_vec(),
             indices: mesh.indices.get(indices.clone())?.to_vec(),
             textures: bitmaps.get(group).cloned().unwrap_or_default(),
+            node: mesh.node.clone(),
         });
         (first_vertex, first_index) = (corners.end, indices.end);
     }
@@ -1584,6 +1615,7 @@ pub fn parse_world_sphere(data: &[u8]) -> Option<Vec<SkyMesh>> {
                     _ => {}
                 }
             }
+            mesh.node = node.0.clone();
             for part in split_groups(mesh, &vertex_groups, &triangle_groups, &bitmaps)? {
                 let corners = part.vertices.len().min(part.uvs.len());
                 if part.indices.iter().any(|&index| index >= corners) {
@@ -1716,6 +1748,46 @@ mod tests {
     }
 
     #[test]
+    fn a_weapon_clip_moves_only_the_part_it_names() {
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let bone = |name: &str, parent: Option<&str>, keys: Vec<(u32, [f32; 3])>| AnimBone {
+            name: name.to_string(),
+            parent: parent.map(str::to_string),
+            duration: 10,
+            fps: 10.0,
+            keys: keys
+                .into_iter()
+                .map(|(frame, pos)| AnimKeyframe {
+                    frame,
+                    mat: identity,
+                    pos,
+                })
+                .collect(),
+        };
+        let clip = Kf2Anim {
+            bones: vec![
+                bone("Gun", None, vec![(0, [0.0; 3])]),
+                bone(
+                    "Slide",
+                    Some("Gun"),
+                    vec![(0, [0.0, 0.0, 0.3]), (5, [0.0, 0.0, 0.1])],
+                ),
+            ],
+        };
+        let mesh = KfsMesh {
+            name: String::new(),
+            vertices: vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.3], [0.0, 0.1, 0.4]],
+            faces: Vec::new(),
+            material_textures: Vec::new(),
+            parts: vec![("Gun".to_string(), 0..1), ("slide".to_string(), 1..3)],
+        };
+        let posed = part_verts(&mesh, &clip, 0.5);
+        assert_eq!(posed[0], [0.0, 0.0, 0.0]);
+        assert!((posed[1][2] - 0.1).abs() < 1e-6, "{posed:?}");
+        assert!((posed[2][2] - 0.2).abs() < 1e-6, "{posed:?}");
+    }
+
+    #[test]
     fn a_material_group_indexes_its_own_vertices() {
         let material = |name: &str, bitmap: &str| {
             let mut body = text(name);
@@ -1770,6 +1842,7 @@ mod tests {
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
             indices: vec![0, 1, 2],
             textures: vec![texture.to_string()],
+            node: "part".to_string(),
         };
         let mesh = mesh_from_parts("gun", &[part(1.0, "a.jpg"), part(2.0, "b.jpg")], |file| {
             (file == "b.jpg").then(|| DecodedTexture {
