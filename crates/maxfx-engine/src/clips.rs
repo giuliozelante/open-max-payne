@@ -123,6 +123,16 @@ impl CharacterClips {
         let def = self.table.get(index)?;
         Some((def, self.anims.get(&def.file)?))
     }
+
+    /// `(seconds, message)` of the clip at `index`.
+    pub fn timed_messages(&self, index: &str) -> Vec<(f32, String)> {
+        let Some((def, clip)) = self.get(index) else {
+            return Vec::new();
+        };
+        let rate = clip.bones.first().map_or(1.0, |bone| bone.fps.max(1.0));
+        let timed = |(frame, text): &(u32, String)| (*frame as f32 / rate, text.clone());
+        def.messages.iter().map(timed).collect()
+    }
 }
 
 /// `Key = value;` of a line, the key in any case.
