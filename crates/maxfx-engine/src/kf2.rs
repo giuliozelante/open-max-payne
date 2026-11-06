@@ -83,6 +83,23 @@ pub struct Kf2Anim {
     pub bones: Vec<AnimBone>,
 }
 
+/// One `CHARANIM_RANDOMDEATH` clip and its `(seconds, catalog, cue)` sounds, in order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeathClip {
+    pub clip: Kf2Anim,
+    pub sounds: Vec<(f32, String, String)>,
+}
+
+/// Time of the clip's last key: `sample_locals` wraps at its duration, so a pose that must hold
+/// is sampled here.
+pub fn clip_end(clip: &Kf2Anim) -> f32 {
+    clip.bones
+        .iter()
+        .filter(|bone| bone.fps > 0.0)
+        .filter_map(|bone| Some(bone.keys.last()?.frame as f32 / bone.fps))
+        .fold(0.0, f32::max)
+}
+
 /// KFS + optional SKD weights + idle/walk clips for the walkthrough.
 #[derive(Debug, Clone)]
 pub struct CharacterRig {
@@ -1582,6 +1599,25 @@ mod tests {
         assert_eq!(mesh.faces[1].uvs[1], [1.0, 0.0]);
         assert!(mesh.material_textures[0].is_none());
         assert!(mesh.material_textures[1].is_some());
+    }
+
+    #[test]
+    fn a_clip_ends_on_its_last_key() {
+        let key = |frame| AnimKeyframe {
+            frame,
+            mat: identity_mat(),
+            pos: [0.0; 3],
+        };
+        let anim = Kf2Anim {
+            bones: vec![AnimBone {
+                name: "Pelvis".to_string(),
+                parent: None,
+                fps: 15.0,
+                duration: 46,
+                keys: vec![key(0), key(45)],
+            }],
+        };
+        assert_eq!(clip_end(&anim), 3.0);
     }
 
     #[test]
