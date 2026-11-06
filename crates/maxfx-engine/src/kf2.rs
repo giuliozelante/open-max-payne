@@ -111,6 +111,11 @@ pub struct CharacterRig {
     pub bind: Option<Kf2Anim>,
     /// A shot or reload clip that replaces the idle while it plays.
     pub action: Option<Kf2Anim>,
+    /// `CHARANIM_2_STAND` and `CHARANIM_2_RUN`, for a `TwoHandedAnimation` weapon.
+    pub two_handed_idle: Option<Kf2Anim>,
+    pub two_handed_walk: Option<Kf2Anim>,
+    /// The weapon in hand wants the two-handed clips.
+    pub two_handed: bool,
 }
 
 fn read_i32(data: &[u8], i: &mut usize) -> Option<i32> {
@@ -949,6 +954,9 @@ fn rig_from_mesh(mesh: KfsMesh, skin: Option<SkdSkin>, path: &Path) -> Character
         // exported in. `Pose.kf2` raises the arms ~0.39 rad and narrows the legs.
         bind: load_anim_named(path, &["widepose.kf2", "pose.kf2"]),
         action: None,
+        two_handed_idle: load_anim_named(path, &["2_stand.kf2"]),
+        two_handed_walk: load_anim_named(path, &["2_run.kf2"]),
+        two_handed: false,
     }
 }
 

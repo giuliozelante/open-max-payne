@@ -4328,6 +4328,8 @@ mod tests {
             .expect("particles.txt");
         let beretta = &defs["beretta"];
         assert_eq!(beretta.shots_per_second, 4.0);
+        assert!(!beretta.two_handed);
+        assert!(defs["pumpshotgun"].two_handed);
         assert!(beretta.fire_clip.is_some() && beretta.reload_clip.is_some());
         assert!(beretta.reload_sound_delay > 0.0);
         // These script the shot on the body clip, not in the weapon file.
