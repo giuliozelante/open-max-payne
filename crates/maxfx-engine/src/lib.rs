@@ -2596,7 +2596,21 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
         .into_iter()
         .filter_map(|name| {
             let text = source.read(&format!("{DIR}{name}.txt"))?;
-            let mut def = hud::WeaponDef::parse(&shooting, &String::from_utf8_lossy(&text))?;
+            let text = String::from_utf8_lossy(&text).into_owned();
+            let mut def = hud::WeaponDef::parse(&shooting, &text)?;
+            let mut projectiles = |index: &str| -> Vec<hud::ProjectileDef> {
+                hud::parse_shot_projectiles(&text, index)
+                    .into_iter()
+                    .filter_map(|(projectile, count)| {
+                        let path = format!(r"\data\database\projectiles\{projectile}.txt");
+                        let file = source.read(&path)?;
+                        let file = String::from_utf8_lossy(&file);
+                        hud::ProjectileDef::parse(&shooting, &file, count)
+                    })
+                    .collect()
+            };
+            def.projectiles = projectiles("WEAPONANIM_SHOOT");
+            def.quiet_projectiles = projectiles("WEAPONANIM_SHOOT_NOEFFECTS");
             if let Some((file, frame)) = reloads.get(&name) {
                 let path = format!(r"\data\database\skeletons\default_skeleton\{file}");
                 let clip = source
@@ -2628,12 +2642,23 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
                     .read(&path)
                     .and_then(|bytes| kf2::parse_kf2_anim(&bytes));
             }
+            def.round_pattern = hud::parse_round_pattern(&skeleton, &body);
             let blows = hud::parse_bone_projectiles(&skeleton, &body);
             if let Some((_, projectile)) = blows.first() {
                 let path = format!(r"\data\database\projectiles\{projectile}.txt");
-                def.melee_reach = source
-                    .read(&path)
-                    .and_then(|text| hud::parse_melee_reach(&String::from_utf8_lossy(&text)));
+                let file = source.read(&path);
+                let file = file.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+                def.melee_reach = file.as_deref().and_then(hud::parse_melee_reach);
+                // The clip's blows replace the weapon file's own `P_CreateProjectile`.
+                def.projectiles = file
+                    .as_deref()
+                    .and_then(|file| {
+                        let blow = hud::ProjectileDef::parse(&shooting, file, 1)?;
+                        let damage = hud::parse_melee_damage(file).unwrap_or(blow.damage);
+                        Some(hud::ProjectileDef { damage, ..blow })
+                    })
+                    .into_iter()
+                    .collect();
                 let fps = def
                     .fire_clip
                     .as_ref()
@@ -4329,6 +4354,27 @@ mod tests {
         let beretta = &defs["beretta"];
         assert_eq!(beretta.shots_per_second, 4.0);
         assert!(!beretta.two_handed);
+        let damage = |name: &str| defs[name].projectiles.first().map(|shot| shot.damage);
+        assert_eq!(damage("beretta"), Some(5));
+        assert_eq!(damage("deserteagle"), Some(10));
+        assert_eq!(damage("sniper"), Some(70));
+        assert_eq!(damage("leadpipe"), Some(9));
+        assert_eq!(defs["ingram"].round_pattern, [true, false, true, false]);
+        let quiet = defs["ingram"].round_projectiles(1)[0].decal.as_deref();
+        assert_eq!(quiet, Some("bullethit_noeffects"));
+        let shotgun = &defs["pumpshotgun"].projectiles;
+        let plan: Vec<(u32, Option<&str>)> = shotgun
+            .iter()
+            .map(|shot| (shot.count, shot.decal.as_deref()))
+            .collect();
+        assert_eq!(
+            plan,
+            [
+                (1, Some("bullethit_shotgun")),
+                (2, Some("bullethit_shotgun")),
+                (2, Some("bullethit_shotgun_group")),
+            ]
+        );
         assert!(defs["pumpshotgun"].two_handed);
         assert!(beretta.fire_clip.is_some() && beretta.reload_clip.is_some());
         assert!(beretta.reload_sound_delay > 0.0);

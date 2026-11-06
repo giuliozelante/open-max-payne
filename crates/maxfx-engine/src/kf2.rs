@@ -83,6 +83,23 @@ pub struct Kf2Anim {
     pub bones: Vec<AnimBone>,
 }
 
+/// `MaximumHealth` of a skin file, through `ai_ranges.h`'s `HEALTH_CLASS_*`.
+pub fn skin_max_health(text: &str, ai_ranges: &str) -> Option<i32> {
+    let value = text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        let value = value.split(';').next()?.trim();
+        key.trim()
+            .eq_ignore_ascii_case("MaximumHealth")
+            .then_some(value)
+    })?;
+    value.parse().ok().or_else(|| {
+        ai_ranges.lines().find_map(|line| {
+            let mut words = line.strip_prefix("#define")?.split_whitespace();
+            (words.next()? == value).then(|| words.next()?.parse().ok())?
+        })
+    })
+}
+
 /// One `CHARANIM_RANDOMDEATH` clip and its `(seconds, catalog, cue)` sounds, in order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeathClip {
@@ -116,6 +133,8 @@ pub struct CharacterRig {
     pub two_handed_walk: Option<Kf2Anim>,
     /// The weapon in hand wants the two-handed clips.
     pub two_handed: bool,
+    /// The skin's `MaximumHealth`; 0 when no skin file named it.
+    pub max_health: i32,
 }
 
 fn read_i32(data: &[u8], i: &mut usize) -> Option<i32> {
@@ -957,6 +976,7 @@ fn rig_from_mesh(mesh: KfsMesh, skin: Option<SkdSkin>, path: &Path) -> Character
         two_handed_idle: load_anim_named(path, &["2_stand.kf2"]),
         two_handed_walk: load_anim_named(path, &["2_run.kf2"]),
         two_handed: false,
+        max_health: 0,
     }
 }
 
@@ -1077,8 +1097,13 @@ pub fn load_skin_body(level_or_game_path: &Path, skin_id: &str) -> Option<SkinBo
             })
         })
     })?;
+    let ranges = load_bytes_from_ras(level_or_game_path, &["ai_ranges.h"])
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    let mut rig = rig_from_mesh(mesh, skd, level_or_game_path);
+    rig.max_health = skin_max_health(&text, &ranges).unwrap_or(0);
     Some(SkinBody {
-        rig: rig_from_mesh(mesh, skd, level_or_game_path),
+        rig,
         invulnerable: skin_blocks_projectiles(&text),
     })
 }
@@ -1607,6 +1632,17 @@ mod tests {
         assert_eq!(mesh.faces[1].uvs[1], [1.0, 0.0]);
         assert!(mesh.material_textures[0].is_none());
         assert!(mesh.material_textures[1].is_some());
+    }
+
+    #[test]
+    fn a_skin_health_is_a_number_or_a_class() {
+        let ranges = "#define HEALTH_CLASS_7\t\t45\n#define HEALTH_CLASS_70\t\t1\n";
+        assert_eq!(skin_max_health("MaximumHealth = 60;\n", ranges), Some(60));
+        assert_eq!(
+            skin_max_health("MaximumHealth = HEALTH_CLASS_7;\n", ranges),
+            Some(45)
+        );
+        assert_eq!(skin_max_health("Other = 1;\n", ranges), None);
     }
 
     #[test]

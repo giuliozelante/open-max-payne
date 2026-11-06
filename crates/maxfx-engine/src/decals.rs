@@ -52,6 +52,9 @@ pub struct DecalSet {
     pub no_decal: Vec<String>,
     /// By lower-case material category.
     pub materials: BTreeMap<String, DecalMaterial>,
+    /// Its `A_PlayFloating3DSound` cue and `PS_StartEffect` effect, when it has them.
+    pub sound: Option<String>,
+    pub effect: Option<String>,
 }
 
 impl DecalSet {
@@ -86,9 +89,17 @@ impl DecalSet {
                 Some(name.split('"').next()?.to_ascii_lowercase())
             })
             .collect();
+        let head = text[start..]
+            .lines()
+            .skip(1)
+            .take_while(|line| !line.trim_start().starts_with("[Materials]"))
+            .collect::<Vec<_>>()
+            .join("\n");
         (!materials.is_empty()).then_some(Self {
             no_decal,
             materials,
+            sound: crate::hud::weapon_cue_line(&head, "A_PlayFloating3DSound", 1),
+            effect: crate::hud::weapon_cue_line(&head, "PS_StartEffect", 0),
         })
     }
 
@@ -119,7 +130,8 @@ pub struct Decal {
 /// The level's decals, oldest first.
 #[derive(Debug, Clone, Default)]
 pub struct DecalField {
-    pub set: DecalSet,
+    /// By lower-case block name.
+    pub sets: BTreeMap<String, DecalSet>,
     pub decals: VecDeque<Decal>,
     pub textures: BTreeMap<SpriteTexture, DecodedTexture>,
     seed: u32,
@@ -139,16 +151,17 @@ fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 }
 
 impl DecalField {
-    /// Reads the bullet decals and their bitmaps from the game data.
-    pub fn load(game_dir: &std::path::Path) -> Self {
+    /// Reads the `decals.txt` blocks named and their bitmaps from the game data.
+    pub fn load<'a>(game_dir: &std::path::Path, blocks: impl Iterator<Item = &'a str>) -> Self {
         let read = |file: &str| {
             crate::read_game_bytes(game_dir, &format!(r"\data\database\decals\{file}"))
         };
-        let set = read("decals.txt")
-            .and_then(|bytes| {
-                DecalSet::parse(&String::from_utf8_lossy(&bytes), "bullethit_generic")
-            })
+        let text = read("decals.txt")
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .unwrap_or_default();
+        let sets: BTreeMap<String, DecalSet> = blocks
+            .filter_map(|block| Some((block.to_ascii_lowercase(), DecalSet::parse(&text, block)?)))
+            .collect();
         let bitmap = |material: &DecalMaterial| {
             let decode = |file: &str| crate::scene::decode_texture_blob(&read(file)?);
             let colour = decode(&material.file)?;
@@ -161,13 +174,13 @@ impl DecalField {
                 pixels: with_alpha(&colour, &alpha),
             })
         };
-        let textures = set
-            .materials
+        let textures = sets
             .values()
+            .flat_map(|set| set.materials.values())
             .filter_map(|material| Some((texture_key(&material.file), bitmap(material)?)))
             .collect();
         Self {
-            set,
+            sets,
             textures,
             ..Self::default()
         }
@@ -184,13 +197,15 @@ impl DecalField {
     /// Places a decal for a shot along `dir` that hit a surface of `category` at `point`.
     pub fn add(
         &mut self,
+        block: &str,
         category: &str,
         point: [f32; 3],
         normal: [f32; 3],
         dir: [f32; 3],
         owner: Option<usize>,
     ) -> bool {
-        let Some(material) = self.set.material(category).cloned() else {
+        let set = self.sets.get(&block.to_ascii_lowercase());
+        let Some(material) = set.and_then(|set| set.material(category)).cloned() else {
             return false;
         };
         let frame = surface_frame(normal, dir);
@@ -288,6 +303,9 @@ mod tests {
 [bullethit_generic] // bullet holes
 {
 	[Message]
+	String ="this->A_PlayFloating3DSound( projectiles, bullethit_generic, \"\");";
+
+	[Message]
 	String ="this->PS_StartEffect( bullethit_generic, \"\");";
 
 	[NoDecalMaterial] Name = "Character";
@@ -318,10 +336,21 @@ mod tests {
 "#;
 
     fn field() -> DecalField {
+        let set = DecalSet::parse(TEXT, "bullethit_generic").expect("set");
         DecalField {
-            set: DecalSet::parse(TEXT, "bullethit_generic").expect("set"),
+            sets: BTreeMap::from([("bullethit_generic".to_string(), set)]),
             ..DecalField::default()
         }
+    }
+
+    #[test]
+    fn a_decal_block_names_its_own_sound_and_effect_or_none() {
+        let set = DecalSet::parse(TEXT, "bullethit_generic").expect("set");
+        assert_eq!(set.sound.as_deref(), Some("bullethit_generic"));
+        assert_eq!(set.effect.as_deref(), Some("bullethit_generic"));
+        let silent = "[pellet]\n{\n\t[NoDecalMaterial] Name = \"Water\";\n\t[Materials]\n\t{\n\t\t[Default]\n\t\tFilename = \"a.jpg\";\n\t\tAlphaFilename = \"b.jpg\";\n\t\tMinimumRadius = 0.01;\n\t\tMaximumRadius = 0.02;\n\t\tRotationRandom = 360;\n\t}\n}\n[next]\n{\n[Message]\nString =\"this->PS_StartEffect( other, \\\"\\\");\";\n}\n";
+        let set = DecalSet::parse(silent, "pellet").expect("pellet");
+        assert_eq!((set.sound, set.effect), (None, None));
     }
 
     #[test]
@@ -348,19 +377,21 @@ mod tests {
         if crate::read_game_bytes(&game, r"\data\database\decals\decals.txt").is_none() {
             return;
         }
-        let field = DecalField::load(&game);
+        let field = DecalField::load(&game, ["bullethit_generic"].into_iter());
         assert!(
-            field.set.materials.len() >= 20,
+            field.sets["bullethit_generic"].materials.len() >= 20,
             "{:?}",
-            field.set.materials.keys()
+            field.sets["bullethit_generic"].materials.keys()
         );
-        assert!(field.set.material("wood").is_some());
+        assert!(field.sets["bullethit_generic"].material("wood").is_some());
         assert!(
-            field.set.material("externalwall").is_some(),
+            field.sets["bullethit_generic"]
+                .material("externalwall")
+                .is_some(),
             "falls back to Default"
         );
-        assert!(field.set.material("skybox").is_none());
-        for material in field.set.materials.values() {
+        assert!(field.sets["bullethit_generic"].material("skybox").is_none());
+        for material in field.sets["bullethit_generic"].materials.values() {
             let texture = field.texture(&texture_key(&material.file));
             let texture = texture.unwrap_or_else(|| panic!("{}", material.file));
             assert!(
@@ -429,6 +460,7 @@ mod tests {
     fn a_decal_lies_on_the_surface_just_toward_the_shooter() {
         let mut decals = field();
         assert!(decals.add(
+            "bullethit_generic",
             "stucco",
             [1.0, 2.0, 3.0],
             [0.0, 0.0, -1.0],
@@ -445,14 +477,28 @@ mod tests {
     #[test]
     fn a_wall_hit_from_behind_faces_the_shooter() {
         let mut decals = field();
-        decals.add("stucco", [0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], None);
+        decals.add(
+            "bullethit_generic",
+            "stucco",
+            [0.0; 3],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            None,
+        );
         assert_eq!(decals.decals[0].pos, [0.0, 0.0, -SURFACE_OFFSET]);
     }
 
     #[test]
     fn a_floor_decal_lies_flat() {
         let mut decals = field();
-        decals.add("stucco", [0.0; 3], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], None);
+        decals.add(
+            "bullethit_generic",
+            "stucco",
+            [0.0; 3],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            None,
+        );
         let decal = &decals.decals[0];
         assert_eq!(decal.right[1], 0.0);
         assert_eq!(decal.up[1], 0.0);
@@ -462,6 +508,7 @@ mod tests {
     fn a_surface_that_takes_no_decals_gets_none() {
         let mut decals = field();
         assert!(!decals.add(
+            "bullethit_generic",
             "character",
             [0.0; 3],
             [0.0, 1.0, 0.0],
@@ -476,6 +523,7 @@ mod tests {
         let mut decals = field();
         for k in 0..MAX_DECALS + 1 {
             decals.add(
+                "bullethit_generic",
                 "stucco",
                 [k as f32, 0.0, 0.0],
                 [0.0, 1.0, 0.0],
@@ -491,6 +539,7 @@ mod tests {
     fn a_decal_turns_into_an_oriented_sprite_and_goes_with_its_mesh() {
         let mut decals = field();
         decals.add(
+            "bullethit_generic",
             "stucco",
             [0.0; 3],
             [0.0, 0.0, -1.0],

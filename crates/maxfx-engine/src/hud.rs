@@ -461,6 +461,70 @@ pub fn load_font(game_dir: &std::path::Path, base: &str) -> Option<HudFont> {
     })
 }
 
+/// What one `P_CreateProjectile` of a shot does, from `database/projectiles/<name>.txt`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ProjectileDef {
+    /// The message's second argument.
+    pub count: u32,
+    pub damage: i32,
+    /// `Accuracy`: the spread, up to `Accuracy / 2500` off the aim (`0x7068cd`).
+    pub accuracy: f32,
+    /// `D_CreateDecal` block of `decals.txt`.
+    pub decal: Option<String>,
+}
+
+impl ProjectileDef {
+    /// `shooting_h` names the numbers. `None` for what does no damage, such as a spent case.
+    pub fn parse(shooting_h: &str, text: &str, count: u32) -> Option<Self> {
+        let sections = parse_sections(&format!("{shooting_h}\n{text}"));
+        let key = |name: &str| sections.iter().find_map(|s| s.text(name));
+        let damage = key("damage")?.parse().ok().filter(|damage| *damage > 0)?;
+        Some(Self {
+            count,
+            damage,
+            accuracy: key("accuracy")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0.0),
+            decal: weapon_cue_line(text, "D_CreateDecal", 0),
+        })
+    }
+}
+
+/// Rounds of a `CHARANIM_SHOOT<WEAPON>` clip in order: `false` for `WEAPONANIM_SHOOT_NOEFFECTS`.
+pub fn parse_round_pattern(skeleton: &str, index: &str) -> Vec<bool> {
+    let header = format!("Index = {index};");
+    skeleton
+        .lines()
+        .skip_while(|line| !line.contains(&header))
+        .skip(1)
+        .take_while(|line| !line.contains("[Animation]"))
+        .filter(|line| line.contains("WS_AnimateShooting"))
+        .map(|line| !line.contains("WEAPONANIM_SHOOT_NOEFFECTS"))
+        .collect()
+}
+
+/// `(projectile, count)` of each `P_CreateProjectile` in the weapon's `[Animation]` of `index`.
+pub fn parse_shot_projectiles(weapon_txt: &str, index: &str) -> Vec<(String, u32)> {
+    let header = format!("Index = {index};");
+    weapon_txt
+        .lines()
+        .skip_while(|line| !line.contains(&header))
+        .skip(1)
+        .take_while(|line| !line.contains("[Animation]"))
+        .filter_map(|line| {
+            let name = weapon_cue_line(line, "P_CreateProjectile", 0)?;
+            let count = weapon_cue_line(line, "P_CreateProjectile", 1)?;
+            Some((name, count.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Third `P_Explosion` argument of a melee projectile. HYPOTHESIS: its damage (9 for the pipe).
+pub fn parse_melee_damage(projectile_txt: &str) -> Option<i32> {
+    let damage = weapon_cue_line(projectile_txt, "P_Explosion", 2)?;
+    damage.parse::<f32>().ok().map(|damage| damage as i32)
+}
+
 /// What `database/weapons/<name>.txt` says about a weapon's ammunition.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct WeaponDef {
@@ -494,6 +558,12 @@ pub struct WeaponDef {
     pub reload_clip: Option<crate::kf2::Kf2Anim>,
     /// `TwoHandedAnimation`: Max carries it with the `CHARANIM_2_*` clips.
     pub two_handed: bool,
+    /// What one shot or melee blow creates.
+    pub projectiles: Vec<ProjectileDef>,
+    /// What a `WEAPONANIM_SHOOT_NOEFFECTS` round creates.
+    pub quiet_projectiles: Vec<ProjectileDef>,
+    /// `parse_round_pattern` of the weapon's shoot clip.
+    pub round_pattern: Vec<bool>,
     /// Metres a melee weapon reaches; `None` for a gun.
     pub melee_reach: Option<f32>,
     /// Seconds into the shoot clip of each melee blow.
@@ -528,6 +598,9 @@ impl WeaponDef {
             reload_clip: None,
             two_handed: key("twohandedanimation")
                 .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
+            projectiles: Vec::new(),
+            quiet_projectiles: Vec::new(),
+            round_pattern: Vec::new(),
             melee_reach: None,
             melee_blows: Vec::new(),
             model: weapon_txt
@@ -565,7 +638,7 @@ pub fn parse_melee_reach(projectile_txt: &str) -> Option<f32> {
 }
 
 /// Argument `arg` of the first `verb` call in `lines`.
-fn weapon_cue_line(text: &str, verb: &str, arg: usize) -> Option<String> {
+pub(crate) fn weapon_cue_line(text: &str, verb: &str, arg: usize) -> Option<String> {
     let (_, call) = text.split_once(verb)?;
     let args = call.trim_start().strip_prefix('(')?;
     let args = args.split(')').next()?;
@@ -586,6 +659,19 @@ pub fn parse_bone_projectiles(skeleton: &str, index: &str) -> Vec<(u32, String)>
             Some((frame.trim().parse().ok()?, name))
         })
         .collect()
+}
+
+impl WeaponDef {
+    /// What the `round`th shot creates, following the clip's pattern.
+    pub fn round_projectiles(&self, round: usize) -> &[ProjectileDef] {
+        let pattern = &self.round_pattern;
+        let quiet = !pattern.is_empty() && !pattern[round % pattern.len()];
+        if quiet && !self.quiet_projectiles.is_empty() {
+            &self.quiet_projectiles
+        } else {
+            &self.projectiles
+        }
+    }
 }
 
 /// `(frame, catalog, cue)` of each `A_Play3DSound` in the `[Animation]` of `index`.
@@ -1410,6 +1496,68 @@ mod tests {
             !WeaponDef::parse("", &file("NO"))
                 .expect("weapon")
                 .two_handed
+        );
+    }
+
+    #[test]
+    fn a_shot_lists_its_projectiles_but_only_from_the_shoot_animation() {
+        let text = "[Animation] Index = WEAPONANIM_SHOOT; Filename = s.kf2;\n[Message] Frame = 0; String = \"this->P_CreateProjectile ( bullet_shotgun_straight, 1 );\";\n[Message] Frame = 0; String = \"this->P_CreateProjectile ( bullet_pumpshotgun, 2 );\";\n[Animation] Index = WEAPONANIM_SHOOT_NOEFFECTS; Filename = s.kf2;\n[Message] Frame = 0; String = \"this->P_CreateProjectile ( bullet_other, 1 );\";\n";
+        assert_eq!(
+            parse_shot_projectiles(text, "WEAPONANIM_SHOOT"),
+            [
+                ("bullet_shotgun_straight".to_string(), 1),
+                ("bullet_pumpshotgun".to_string(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_clip_lists_its_rounds_with_and_without_effects() {
+        let text = "[Animation] Index = CHARANIM_SHOOTINGRAM; Filename = a.kf2;\n[Message] Frame = 0; String = \"RightHandWeapon->A_Play3DSound ( weapons, shoot_ingram );\";\n[Message] Frame = 2; String = \"RightHandWeapon->WS_AnimateShooting(\" WEAPONANIM_SHOOT \",\" WEAPONANIM_SHOOTEMPTY \");\";\n[Message] Frame = 5; String = \"RightHandWeapon->WS_AnimateShooting(\" WEAPONANIM_SHOOT_NOEFFECTS \",\" WEAPONANIM_SHOOTEMPTY \");\";\n[Animation] Index = CHARANIM_SHOOTLOWINGRAM; Filename = b.kf2;\n";
+        assert_eq!(
+            parse_round_pattern(text, "CHARANIM_SHOOTINGRAM"),
+            [true, false]
+        );
+    }
+
+    #[test]
+    fn rounds_follow_the_pattern_and_fall_back_without_one() {
+        let shot = |damage| ProjectileDef {
+            count: 1,
+            damage,
+            ..Default::default()
+        };
+        let mut def = WeaponDef {
+            projectiles: vec![shot(5)],
+            quiet_projectiles: vec![shot(6)],
+            round_pattern: vec![true, false],
+            ..Default::default()
+        };
+        let damage = |def: &WeaponDef, round| def.round_projectiles(round)[0].damage;
+        assert_eq!(
+            [damage(&def, 0), damage(&def, 1), damage(&def, 2)],
+            [5, 6, 5]
+        );
+        def.round_pattern.clear();
+        assert_eq!(damage(&def, 1), 5);
+    }
+
+    #[test]
+    fn a_projectile_file_gives_damage_spread_and_decal() {
+        let text = "[Decal]\nString = \"this->D_CreateDecal( bullethit_shotgun );\";\n[Attributes]\nAccuracy \t= PUMPSHOTGUN_BULLETSPREAD ;\nDamage \t\t= PUMPSHOTGUN_BULLETDAMAGE ;\n";
+        let defines = "#define PUMPSHOTGUN_BULLETDAMAGE 5\n#define PUMPSHOTGUN_BULLETSPREAD 150\n";
+        assert_eq!(
+            ProjectileDef::parse(defines, text, 2),
+            Some(ProjectileDef {
+                count: 2,
+                damage: 5,
+                accuracy: 150.0,
+                decal: Some("bullethit_shotgun".to_string()),
+            })
+        );
+        assert_eq!(
+            ProjectileDef::parse("", "[Attributes]\nDamage = 0;\n", 1),
+            None
         );
     }
 
