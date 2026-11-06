@@ -37,11 +37,9 @@ pub(crate) fn hardware_renderer() -> bool {
 pub(crate) const FRAME_W: usize = W;
 pub(crate) const FRAME_H: usize = H;
 pub(crate) const NEAR_Z: f32 = 0.15;
-/// Back plane without fog. HYPOTHESIS: retail's fog-less back plane is not read yet; 1000 m
-/// is past every room the shipped levels can show, where 220 m visibly cut the startup city.
-pub(crate) const FAR_Z: f32 = 1000.0;
-/// `globalconfig.txt` `[camera]` `MinimumBackPlaneDistance`.
-const MIN_BACK_PLANE: f32 = 10.0;
+/// Back plane. Retail (`0x67a4de`) pushes it each frame past the far side of every bounding
+/// sphere in view, whatever the fog, so it never clips what is visible; here it is a depth range.
+pub(crate) const FAR_Z: f32 = 100_000.0;
 const EYE_HEIGHT: f32 = 1.65;
 /// One `DetailOffset` step from `materials.txt`, in metres toward the camera.
 pub(crate) const DETAIL_OFFSET_M: f32 = 0.02;
@@ -2060,11 +2058,6 @@ fn camera_view(scene: &LdbScene, idx: usize, rooms: &BTreeMap<i32, [f32; 3]>) ->
     (pos, right, up, fwd)
 }
 
-/// Back plane: the fog's end (nothing past it shows through full fog), else [`FAR_Z`].
-pub(crate) fn back_plane(fog: Option<LevelFog>) -> f32 {
-    fog.map_or(FAR_Z, |fog| fog.end.max(MIN_BACK_PLANE))
-}
-
 /// Linear fog amount at view depth `z`: 0 before `start`, 1 from `end` on.
 pub(crate) fn fog_amount(fog: &LevelFog, z: f32) -> f32 {
     if fog.end <= fog.start {
@@ -2741,7 +2734,7 @@ fn draw_poly<'a>(
         if cz >= NEAR_Z {
             all_behind = false;
         }
-        if cz <= back_plane(scene.fog) {
+        if cz <= FAR_Z {
             all_far = false;
         }
         cam_verts.push(CamVert {
@@ -4003,21 +3996,6 @@ mod tests {
     }
 
     #[test]
-    fn fog_end_is_the_back_plane_with_a_floor() {
-        // globalconfig.txt `[camera]` `MinimumBackPlaneDistance = 10.0`.
-        let fog = |end| {
-            Some(crate::scene::LevelFog {
-                color: [0.0; 3],
-                start: 0.0,
-                end,
-            })
-        };
-        assert_eq!(back_plane(None), FAR_Z);
-        assert_eq!(back_plane(fog(400.0)), 400.0);
-        assert_eq!(back_plane(fog(5.0)), 10.0);
-    }
-
-    #[test]
     fn software_fog_mixes_by_view_depth_and_spares_the_sky() {
         let fog = crate::scene::LevelFog {
             color: [0.0, 0.0, 0.0],
@@ -4056,6 +4034,28 @@ mod tests {
         assert_eq!((w, h), (W, H));
         assert!(fb.iter().any(|px| *px != fb[0]), "the glass must show");
         assert!(render_frame(&scene, Some("::nowhere.DO")).is_err());
+    }
+
+    #[test]
+    fn a_surface_past_the_fog_end_draws_in_the_fog_colour() {
+        // The intro's statue stands 714 m out under fog `-700, 700`, darker than the retail sky.
+        let mut scene = empty_scene();
+        scene.fog = Some(crate::scene::LevelFog {
+            color: [20.0, 20.0, 20.0],
+            start: -5.0,
+            end: 5.0,
+        });
+        scene.dynamic_meshes.push(glass_quad(false));
+        let mut cam = glass_quad(false);
+        cam.name = "::Bathroom::camera2.DO".into();
+        cam.polys.clear();
+        cam.world_mat = [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0];
+        cam.local_start_mat = cam.world_mat;
+        cam.world_pos = [-20.0, 1.0, 0.0];
+        cam.local_start_pos = cam.world_pos;
+        scene.dynamic_meshes.push(cam);
+        let (_, _, fb) = render_frame(&scene, Some("::bathroom::camera2.DO")).expect("frame");
+        assert!(fb.contains(&0x0014_1414));
     }
 
     #[test]

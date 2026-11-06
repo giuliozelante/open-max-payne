@@ -7,7 +7,7 @@
 use crate::kf2::KfsMesh;
 use crate::particles::{Sprite, SpriteTexture};
 use crate::render3d::{
-    back_plane, dynamic_mesh_drawn, dynamic_world, poly_policy, DETAIL_OFFSET_M, FRAME_H, FRAME_W,
+    dynamic_mesh_drawn, dynamic_world, poly_policy, DETAIL_OFFSET_M, FAR_Z, FRAME_H, FRAME_W,
     NEAR_Z,
 };
 use crate::scene::LdbScene;
@@ -1344,7 +1344,6 @@ impl GpuRenderer {
             self.depth_out.slice(..).get_mapped_range(),
         ) {
             let depths: &[f32] = bytemuck::cast_slice(&depths);
-            let far = back_plane(scene.fog);
             for (i, (rgba, &d)) in colors.as_chunks::<4>().0.iter().zip(depths).enumerate() {
                 // Drawn pixels: geometry wrote depth; sprites write no depth but leave alpha
                 // over the transparent clear.
@@ -1353,7 +1352,7 @@ impl GpuRenderer {
                 }
                 fb[i] = (u32::from(rgba[0]) << 16) | (u32::from(rgba[1]) << 8) | u32::from(rgba[2]);
                 if d < 1.0 {
-                    zb[i] = d * far;
+                    zb[i] = d * FAR_Z;
                 }
             }
         }
@@ -1408,7 +1407,7 @@ impl GpuRenderer {
                 fov_scale / (w * 0.5),
                 fov_scale / (h * 0.5),
                 if use_lightmaps { 1.0 } else { 0.0 },
-                back_plane(scene.fog),
+                FAR_Z,
             ],
             params2: [NEAR_Z, if self.sky.1 { 1.0 } else { 0.0 }, w, h],
             fog: scene.fog.map_or([0.0; 4], |fog| {
