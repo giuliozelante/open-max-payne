@@ -212,8 +212,6 @@ pub fn run_3d_walkthrough(
     let mut action_messages: Vec<(f32, String)> = Vec::new();
     let mut strip_weapon = scene.inventory.current.clone();
     let mut strip_age = f32::MAX;
-    // `(seconds into the clip, message)` of the painkiller still to come.
-    let mut pill_messages: Vec<(f32, String)> = Vec::new();
     // The `CHARANIM_` index of `CharacterRig::action`.
     let mut action_index = String::new();
     let mut reload_seen = 0;
