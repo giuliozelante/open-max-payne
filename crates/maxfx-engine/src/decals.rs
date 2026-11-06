@@ -259,18 +259,25 @@ impl DecalField {
         true
     }
 
-    /// Decals to draw; `hidden` says whether a dynamic mesh is hidden.
-    pub fn sprites(&self, hidden: impl Fn(usize) -> bool) -> Vec<Sprite> {
+    /// Decals to draw; `hidden` says whether a dynamic mesh is hidden, `light` how lit a point is.
+    pub fn sprites(
+        &self,
+        hidden: impl Fn(usize) -> bool,
+        light: impl Fn([f32; 3]) -> [f32; 3],
+    ) -> Vec<Sprite> {
         self.decals
             .iter()
             .filter(|decal| !decal.owner.is_some_and(&hidden))
-            .map(|decal| Sprite {
-                pos: decal.pos,
-                size: decal.size,
-                rgba: [1.0; 4],
-                additive: false,
-                texture: texture_key(&decal.file),
-                facing: Some([decal.right, decal.up]),
+            .map(|decal| {
+                let [r, g, b] = light(decal.pos);
+                Sprite {
+                    pos: decal.pos,
+                    size: decal.size,
+                    rgba: [r, g, b, 1.0],
+                    additive: false,
+                    texture: texture_key(&decal.file),
+                    facing: Some([decal.right, decal.up]),
+                }
             })
             .collect()
     }
@@ -587,11 +594,12 @@ mod tests {
             [0.0, 0.0, 1.0],
             Some(3),
         );
-        let sprites = decals.sprites(|_| false);
+        let sprites = decals.sprites(|_| false, |_| [0.25, 0.5, 0.75]);
         assert_eq!(sprites.len(), 1);
         assert_eq!(sprites[0].size, 0.04);
         assert_eq!(sprites[0].facing.map(|f| f[1]), Some([0.0, 1.0, 0.0]));
         assert_eq!(sprites[0].texture.effect, r"decal:bitmaps\hole_default.jpg");
-        assert!(decals.sprites(|mesh| mesh == 3).is_empty());
+        assert_eq!(sprites[0].rgba, [0.25, 0.5, 0.75, 1.0]);
+        assert!(decals.sprites(|mesh| mesh == 3, |_| [1.0; 3]).is_empty());
     }
 }

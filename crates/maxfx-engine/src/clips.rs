@@ -111,6 +111,8 @@ pub struct CharacterClips {
     pub anims: BTreeMap<String, Arc<Kf2Anim>>,
     /// The skin's `AirborneSpeed`, in metres per second.
     pub airborne_speed: f32,
+    /// The skin's `CanAbortShootDodgeFrame`: from here a dive on the ground gets up.
+    pub abort_dive_frame: u32,
 }
 
 impl CharacterClips {

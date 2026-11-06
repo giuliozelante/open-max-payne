@@ -2854,6 +2854,10 @@ pub fn load_character_clips(game_dir: &Path, skin: &str) -> clips::CharacterClip
         .iter()
         .find_map(|section| section.number("airbornespeed"))
         .unwrap_or_default();
+    let abort_dive_frame = hud::parse_sections(&skin)
+        .iter()
+        .find_map(|section| section.number("canabortshootdodgeframe"))
+        .unwrap_or_default() as u32;
     let files: std::collections::BTreeSet<&str> = table.files().collect();
     let anims = files
         .into_iter()
@@ -2867,6 +2871,7 @@ pub fn load_character_clips(game_dir: &Path, skin: &str) -> clips::CharacterClip
         table,
         anims,
         airborne_speed,
+        abort_dive_frame,
     }
 }
 
