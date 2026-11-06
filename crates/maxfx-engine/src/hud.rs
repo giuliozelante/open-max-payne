@@ -79,11 +79,24 @@ pub struct SlowMotion {
     pub heartbeat_interval: f32,
     /// Seconds until the next heartbeat.
     pub heartbeat_in: f32,
+    /// `RegenerationTime`: seconds to refill from empty while inactive.
+    pub regeneration_seconds: f32,
+    /// `characters.h` `BONUS_SLOWMOTION`: the share of the gauge a kill gives.
+    pub kill_bonus: f32,
 }
 
 impl SlowMotion {
-    pub fn parse(globalconfig: &str) -> Option<Self> {
+    pub fn parse(globalconfig: &str, characters_h: &str) -> Option<Self> {
         let sections = parse_sections(globalconfig);
+        let bonus = characters_h
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("#define")?
+                    .trim()
+                    .strip_prefix("BONUS_SLOWMOTION")
+            })
+            .and_then(|value| value.trim().parse().ok());
         let general = sections.iter().find(|s| s.path == "slowmotion/general")?;
         let threshold = general.text("threshold")?.strip_suffix('%')?;
         Some(Self {
@@ -94,7 +107,14 @@ impl SlowMotion {
             heartbeat_message: general.file("heartbeatsoundmessage")?,
             heartbeat_interval: general.number("heartbeatsoundinterval")?,
             heartbeat_in: 0.0,
+            regeneration_seconds: general.number("regenerationtime")?,
+            kill_bonus: bonus?,
         })
+    }
+
+    /// A kill fills the gauge by `kill_bonus`.
+    pub fn reward_kill(&mut self) {
+        self.level = (self.level + self.kill_bonus).min(1.0);
     }
 
     /// The heartbeat message when one is due. The first comes as slow motion starts.
@@ -120,6 +140,8 @@ impl SlowMotion {
                 self.level = 0.0;
                 self.active = false;
             }
+        } else {
+            self.level = (self.level + seconds / self.regeneration_seconds).min(1.0);
         }
     }
 }
@@ -1194,13 +1216,16 @@ mod tests {
             heartbeat_message: "beat".into(),
             heartbeat_interval: 1.25,
             heartbeat_in: 0.0,
+            regeneration_seconds: 100.0,
+            kill_bonus: 0.12,
         }
     }
 
     #[test]
     fn globalconfig_gives_the_gauges_length_and_threshold() {
-        let text = "[slowmotion]\n{\n\t[general]\n\tSlowMotionTime\t\t\t= 15.0;\t\t\t// length\n\tThreshold\t\t\t\t= 0.1%;\t\t\t// must be exceeded\n\tHeartbeatSoundMessage\t= \"beat\";\n\tHeartbeatSoundInterval\t= 1.25;\t\t\t// interval\n}\n";
-        assert_eq!(SlowMotion::parse(text), Some(gauge()));
+        let text = "[slowmotion]\n{\n\t[general]\n\tSlowMotionTime\t\t\t= 15.0;\t\t\t// length\n\tThreshold\t\t\t\t= 0.1%;\t\t\t// must be exceeded\n\tHeartbeatSoundMessage\t= \"beat\";\n\tHeartbeatSoundInterval\t= 1.25;\t\t\t// interval\n\tRegenerationTime\t= 100.0;\t// takes this many seconds\n}\n";
+        let characters = "#define\tBONUS_SLOWMOTION\t\t\t\t0.12\n";
+        assert_eq!(SlowMotion::parse(text, characters), Some(gauge()));
     }
 
     #[test]
@@ -1222,6 +1247,28 @@ mod tests {
         assert_eq!(slow.heartbeat(0.1), None);
         slow.step(true, 0.1);
         assert!(slow.heartbeat(0.1).is_some());
+    }
+
+    #[test]
+    fn the_gauge_refills_at_its_regeneration_rate_while_inactive() {
+        let mut slow = gauge();
+        slow.level = 0.5;
+        slow.step(false, 10.0);
+        assert!((slow.level - 0.6).abs() < 1e-5, "{}", slow.level);
+        slow.level = 0.999;
+        slow.step(false, 10.0);
+        assert_eq!(slow.level, 1.0);
+    }
+
+    #[test]
+    fn a_kill_fills_the_gauge_by_its_bonus_up_to_full() {
+        let mut slow = gauge();
+        slow.level = 0.5;
+        slow.reward_kill();
+        assert!((slow.level - 0.62).abs() < 1e-5);
+        slow.level = 0.95;
+        slow.reward_kill();
+        assert_eq!(slow.level, 1.0);
     }
 
     #[test]

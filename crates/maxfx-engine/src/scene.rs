@@ -1440,14 +1440,18 @@ impl LdbScene {
         }
     }
 
-    /// Startup weapon messages, in order, once the weapon definitions are loaded.
-    pub fn apply_startup_weapons(&mut self) {
+    /// Startup weapon and music messages, in order, once the weapon definitions are loaded.
+    pub fn apply_startup_player_scripts(&mut self) {
         let is_weapon = |act: &String| {
             let verb = Message::parse(act).map(|msg| msg.verb.to_ascii_lowercase());
             verb.is_some_and(|verb| {
                 matches!(
                     verb.as_str(),
-                    "c_removeallweapons" | "c_pickupweapon" | "c_pickupammo" | "c_setinfiniteammo"
+                    "c_removeallweapons"
+                        | "c_pickupweapon"
+                        | "c_pickupammo"
+                        | "c_setinfiniteammo"
+                        | "a_playmusic"
                 )
             })
         };
@@ -1551,6 +1555,29 @@ impl LdbScene {
         }
         let fsm_name = strip_mesh_suffix(&mesh.name).to_string();
         self.dispatch_hook(&fsm_name, "DO_OnDeath")
+    }
+
+    /// Whether mesh `index` scripts anything on a bullet.
+    pub fn reacts_to_bullets(&self, index: usize) -> bool {
+        let Some(mesh) = self.dynamic_meshes.get(index) else {
+            return false;
+        };
+        let Some(fsm) = self.fsm_index(strip_mesh_suffix(&mesh.name)) else {
+            return false;
+        };
+        self.fsms[fsm].hooks.iter().any(|(name, always, by_state)| {
+            name == "DO_BulletCollides"
+                && (!always.is_empty() || by_state.iter().any(|(_, list)| !list.is_empty()))
+        })
+    }
+
+    /// A bullet hit mesh `index`: its `DO_BulletCollides` event.
+    pub fn bullet_hits(&mut self, index: usize) -> bool {
+        let Some(mesh) = self.dynamic_meshes.get(index) else {
+            return false;
+        };
+        let fsm_name = strip_mesh_suffix(&mesh.name).to_string();
+        self.dispatch_hook(&fsm_name, "DO_BulletCollides")
     }
 
     /// The player ran into mesh `index`: its `DO_CharacterCollides` event.
@@ -4536,6 +4563,51 @@ mod tests {
         assert!(!scene.step_touch_triggers(&origins, [0.0; 3]));
     }
 
+    /// The tutorial's padlock: only state 2 opens the door.
+    fn padlock_scene() -> LdbScene {
+        let mut scene = door_fsm_scene();
+        scene.fsms[0].hooks.push((
+            "DO_BulletCollides".into(),
+            Vec::new(),
+            vec![("2".into(), vec![HIDE.into()])],
+        ));
+        scene
+    }
+
+    #[test]
+    fn a_bullet_runs_the_meshs_event_for_its_current_state() {
+        let mut scene = padlock_scene();
+        assert!(scene.reacts_to_bullets(0));
+        assert!(
+            !scene.bullet_hits(0),
+            "the tutorial has not reached the lock"
+        );
+        assert!(!scene.dynamic_meshes[0].hidden);
+        scene.fsms[0].state = "2".into();
+        assert!(scene.bullet_hits(0));
+        assert!(scene.dynamic_meshes[0].hidden);
+    }
+
+    #[test]
+    fn a_mesh_with_no_bullet_event_does_not_react() {
+        let scene = door_fsm_scene();
+        assert!(!scene.reacts_to_bullets(0));
+        assert!(!scene.reacts_to_bullets(99));
+    }
+
+    #[test]
+    fn startup_music_is_requested() {
+        // `Tutorial.ldb` `Start_FSM`: the alley's city ambience.
+        let mut scene = door_fsm_scene();
+        scene.fsms[0].startup_actions =
+            vec!["maxpayne_gamemode->a_playmusic(elevated_city_ambience);".into()];
+        scene.apply_startup_player_scripts();
+        assert_eq!(
+            scene.music_request.as_deref(),
+            Some("elevated_city_ambience")
+        );
+    }
+
     #[test]
     fn running_into_a_mesh_runs_its_character_collides_event() {
         // `::entrance06::cin_trigger`: an invisible box that clears itself and starts a scare.
@@ -4617,7 +4689,7 @@ mod tests {
         ]
         .map(String::from)
         .to_vec();
-        scene.apply_startup_weapons();
+        scene.apply_startup_player_scripts();
         let stock = scene.inventory.stock("beretta").expect("beretta");
         assert_eq!((stock.clip, stock.pocket, stock.infinite), (18, 60, false));
         assert!(scene

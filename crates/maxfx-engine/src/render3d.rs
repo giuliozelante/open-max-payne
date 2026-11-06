@@ -282,7 +282,7 @@ pub fn run_3d_walkthrough(
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
     scene.inventory.best_weapons = crate::load_best_weapons(&game_root);
-    scene.apply_startup_weapons();
+    scene.apply_startup_player_scripts();
     let hud_assets = crate::hud::HudAssets::load(&game_root);
     let text = |path: &str| {
         crate::read_game_bytes(&game_root, path)
@@ -294,8 +294,14 @@ pub fn run_3d_walkthrough(
         .unwrap_or(RETAIL_RIG);
     // The mesh the player last ran into: `DO_CharacterCollides` fires once per contact.
     let mut last_contact = None;
+    let mut mouse_fire_held = false;
     let mut slow_motion = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt")
-        .and_then(|bytes| crate::hud::SlowMotion::parse(&String::from_utf8_lossy(&bytes)))
+        .and_then(|bytes| {
+            let characters = crate::read_game_bytes(&game_root, r"\data\database\characters.h")
+                .map(|text| String::from_utf8_lossy(&text).into_owned())
+                .unwrap_or_default();
+            crate::hud::SlowMotion::parse(&String::from_utf8_lossy(&bytes), &characters)
+        })
         .unwrap_or(crate::hud::SlowMotion {
             level: 1.0,
             active: false,
@@ -304,6 +310,8 @@ pub fn run_3d_walkthrough(
             heartbeat_message: String::new(),
             heartbeat_interval: 1.25,
             heartbeat_in: 0.0,
+            regeneration_seconds: 1.0e8,
+            kill_bonus: 0.12,
         });
 
     let mut fb = vec![0u32; W * H];
@@ -376,9 +384,8 @@ pub fn run_3d_walkthrough(
             wireframe = !wireframe;
         }
 
-        // Interact (`E`): trigger nearest dynamic mesh / door within 6m
+        // Interact (`E`): the action button trigger in reach
         if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
-            toggle_nearest_dynamic_mesh(&mut scene, &room_origins, player_pos, 36.0);
             let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
             if scene.activate_nearest_trigger(&room_origins, feet) {
                 play_queued_sounds(
@@ -520,13 +527,22 @@ pub fn run_3d_walkthrough(
         }
         scene.inventory.step(world_dt);
 
-        // Shoot (`F` or `LeftCtrl` / `RightCtrl`)
-        let fire_pressed = window.is_key_pressed(Key::F, KeyRepeat::No)
+        // Shoot (left mouse, `F` or `LeftCtrl` / `RightCtrl`)
+        let mouse_fire = window.get_mouse_down(MouseButton::Left);
+        let fire_pressed = (mouse_fire && !mouse_fire_held)
+            || window.is_key_pressed(Key::F, KeyRepeat::No)
             || window.is_key_pressed(Key::LeftCtrl, KeyRepeat::No)
             || window.is_key_pressed(Key::RightCtrl, KeyRepeat::No);
+        mouse_fire_held = mouse_fire;
         if fire_pressed && scene.player_controls && shot_timer <= 0.0 && scene.inventory.fire() {
             shot_timer = 0.18;
             let aim_dir = [sy * cp, sp, cy * cp];
+            // The dot marks the view's centre, so the shot leaves from the camera.
+            let aim_from = if third_person && !fly_mode {
+                chase_camera(&scene, &chase_rig, player_pos, aim_dir)
+            } else {
+                player_pos
+            };
             // Raycast against living enemies
             let mut best_hit: Option<(usize, f32)> = None;
             for (idx, en) in enemies.iter().enumerate() {
@@ -535,26 +551,31 @@ pub fn run_3d_walkthrough(
                 }
                 let center = [en.world_pos[0], en.world_pos[1] + 1.0, en.world_pos[2]];
                 let to_en = [
-                    center[0] - player_pos[0],
-                    center[1] - player_pos[1],
-                    center[2] - player_pos[2],
+                    center[0] - aim_from[0],
+                    center[1] - aim_from[1],
+                    center[2] - aim_from[2],
                 ];
                 let t = to_en[0] * aim_dir[0] + to_en[1] * aim_dir[1] + to_en[2] * aim_dir[2];
                 if (0.5..=65.0).contains(&t) {
-                    let cx = player_pos[0] + aim_dir[0] * t - center[0];
-                    let cy_d = (player_pos[1] + aim_dir[1] * t - center[1]) * 0.55;
-                    let cz = player_pos[2] + aim_dir[2] * t - center[2];
+                    let cx = aim_from[0] + aim_dir[0] * t - center[0];
+                    let cy_d = (aim_from[1] + aim_dir[1] * t - center[1]) * 0.55;
+                    let cz = aim_from[2] + aim_dir[2] * t - center[2];
                     let dist_sq = cx * cx + cy_d * cy_d + cz * cz;
                     if dist_sq < 0.65 && best_hit.is_none_or(|(_, b)| t < b) {
                         best_hit = Some((idx, t));
                     }
                 }
             }
-            let mesh_hit = aim_hit_dynamic(&scene, &room_origins, player_pos, aim_dir);
+            let mesh_hit = aim_hit_dynamic(&scene, &room_origins, aim_from, aim_dir)
+                .filter(|(_, t)| segment_hit(&scene, aim_from, aim_dir.map(|c| c * t)).is_none());
             match (mesh_hit, best_hit) {
                 (Some((midx, mt)), enemy) if enemy.is_none_or(|(_, et)| mt < et) => {
-                    if scene.damage_mesh(midx, BERETTA_BULLET_DAMAGE) {
+                    let scripted = scene.bullet_hits(midx);
+                    let broke = scene.damage_mesh(midx, BERETTA_BULLET_DAMAGE);
+                    if broke {
                         println!("  3D Engine: {} broke", scene.dynamic_meshes[midx].name);
+                    }
+                    if scripted || broke {
                         play_queued_sounds(
                             &mut scene,
                             &catalog_root(level_path),
@@ -570,6 +591,7 @@ pub fn run_3d_walkthrough(
                     en.hit_flash = 0.25;
                     if en.health == 0 {
                         scene.kill_character(&en.name);
+                        slow_motion.reward_kill();
                     }
                     println!(
                         "  3D Engine: Hit {}! (health={})",
@@ -577,14 +599,7 @@ pub fn run_3d_walkthrough(
                         en.health.max(0)
                     );
                 }
-                _ => {
-                    let probe = [
-                        player_pos[0] + aim_dir[0] * 4.0,
-                        player_pos[1] + aim_dir[1] * 4.0,
-                        player_pos[2] + aim_dir[2] * 4.0,
-                    ];
-                    toggle_nearest_dynamic_mesh(&mut scene, &room_origins, probe, 16.0);
-                }
+                _ => {}
             }
         }
 
@@ -980,45 +995,6 @@ const MAX_FRAME_DT: f32 = 0.1;
 /// Game time for one frame: the wall time since the previous frame, capped at `MAX_FRAME_DT`.
 fn frame_dt(elapsed: std::time::Duration) -> f32 {
     elapsed.as_secs_f32().min(MAX_FRAME_DT)
-}
-
-fn toggle_nearest_dynamic_mesh(
-    scene: &mut LdbScene,
-    room_origins: &BTreeMap<i32, [f32; 3]>,
-    pos: [f32; 3],
-    max_d2: f32,
-) {
-    let mut best_dm: Option<(usize, f32)> = None;
-    for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
-        if dm.opening_anim().is_none() {
-            continue;
-        }
-        let ro = room_origins.get(&dm.room_id).copied().unwrap_or([0.0; 3]);
-        let wx = ro[0] + dm.world_pos[0];
-        let wy = ro[1] + dm.world_pos[1];
-        let wz = ro[2] + dm.world_pos[2];
-        let d2 = (wx - pos[0]).powi(2) + (wy - pos[1]).powi(2) + (wz - pos[2]).powi(2);
-        if d2 < max_d2 && best_dm.is_none_or(|(_, b)| d2 < b) {
-            best_dm = Some((idx, d2));
-        }
-    }
-    if let Some((idx, _)) = best_dm {
-        let dm = &mut scene.dynamic_meshes[idx];
-        // Play the opening track (retail `DO_Animate`); it holds the end pose.
-        if dm.active_track.is_none() {
-            if let Some(name) = dm.opening_anim().map(|anim| anim.name.clone()) {
-                dm.play_track(&name);
-            }
-        }
-        if let Some(anim) = dm.opening_anim() {
-            println!(
-                "  3D Engine: DO_Animate {} ({}) -> {:?}",
-                dm.name,
-                anim.name,
-                anim.end_scripts.first().map(|s| s.as_str()).unwrap_or("ok")
-            );
-        }
-    }
 }
 
 fn can_stand_at(
@@ -1463,7 +1439,7 @@ fn draw_dynamic_meshes(
     flush_tris(&tris, fb, zb, raster_threads());
 }
 
-/// Closest dynamic mesh that has hit points and whose posed bounds meet the ray.
+/// Closest dynamic mesh that bullets affect and whose posed bounds meet the ray.
 fn aim_hit_dynamic(
     scene: &LdbScene,
     rooms: &BTreeMap<i32, [f32; 3]>,
@@ -1472,7 +1448,8 @@ fn aim_hit_dynamic(
 ) -> Option<(usize, f32)> {
     let mut best: Option<(usize, f32)> = None;
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
-        if dm.hidden || dm.hitpoints.is_none() || dm.polys.is_empty() {
+        let shootable = dm.hitpoints.is_some() || scene.reacts_to_bullets(idx);
+        if dm.hidden || !shootable || dm.polys.is_empty() {
             continue;
         }
         let (mat, pos) = dynamic_world(scene, idx, rooms);
@@ -4803,34 +4780,6 @@ mod tests {
             let (o, b) = ((opaque >> shift) & 0xff, (blended >> shift) & 0xff);
             assert!(b.abs_diff(o * 128 / 255) <= 1, "{shift}: {o} -> {b}");
         }
-    }
-
-    #[test]
-    fn interacting_with_a_drawer_plays_its_open_track() {
-        let mut scene = empty_scene();
-        let mut drawer = glass_quad(false);
-        drawer.name = "::startroom::New mesh 62::drawer.DO".into();
-        drawer.anims.push(crate::scene::SceneDynamicAnim {
-            name: "open".into(),
-            duration: 0.7,
-            start_mat: drawer.local_start_mat,
-            start_pos: [0.0; 3],
-            end_mat: drawer.local_start_mat,
-            end_pos: [0.3, 0.0, 0.0],
-            start_scripts: Vec::new(),
-            reverse_end_scripts: Vec::new(),
-            end_scripts: Vec::new(),
-            curves: [Vec::new(), Vec::new()],
-        });
-        scene.dynamic_meshes.push(drawer);
-        toggle_nearest_dynamic_mesh(&mut scene, &BTreeMap::new(), [0.5, 0.0, 0.0], 36.0);
-        let drawer = &scene.dynamic_meshes[0];
-        assert_eq!(drawer.active_track.as_deref(), Some("open"));
-        assert_eq!(
-            drawer.posed_local().1,
-            [0.0; 3],
-            "starts closed, then animates"
-        );
     }
 
     pub(super) fn glass_quad(hidden: bool) -> SceneDynamicMesh {
