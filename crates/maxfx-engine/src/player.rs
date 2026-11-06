@@ -180,7 +180,12 @@ impl PlayerMotion {
                 if let Some(kind) = c.dodge.filter(|_| c.grounded && moving) {
                     self.start_dodge(clips, c, kind);
                 } else if c.jump && c.grounded {
-                    self.start_jump(c);
+                    // Jump clips only face forwards, so any other way rolls.
+                    if c.forward < 0 || (c.forward == 0 && c.right != 0) {
+                        self.start_dodge(clips, c, DodgeKind::Roll);
+                    } else {
+                        self.start_jump(c);
+                    }
                 } else if !c.grounded {
                     self.fall(c);
                 } else if self.state != State::Land || moving {
@@ -754,6 +759,41 @@ mod tests {
         assert!(near(step.velocity, [0.0, 4.0]));
         motion.step(&clips, &grounded(), 1.0);
         assert_eq!(motion.state, State::Ground);
+    }
+
+    #[test]
+    fn a_jump_backwards_or_sideways_rolls_as_no_jump_clip_faces_there() {
+        for (forward, right, index) in [
+            (-1, 0, "CHARANIM_DODGEBACKWARD"),
+            (0, -1, "CHARANIM_DODGELEFT"),
+            (0, 1, "CHARANIM_DODGERIGHT"),
+            (-1, 1, "CHARANIM_DODGEBACKWARDRIGHT"),
+        ] {
+            let c = Controls {
+                forward,
+                right,
+                jump: true,
+                ..grounded()
+            };
+            let mut motion = PlayerMotion::default();
+            motion.step(&clips(), &c, 0.01);
+            assert_eq!(motion.state, State::Roll, "{index}");
+            assert_eq!(motion.index.as_deref(), Some(index));
+        }
+    }
+
+    #[test]
+    fn a_jump_forwards_or_on_the_spot_stays_a_jump() {
+        for forward in [0, 1] {
+            let c = Controls {
+                forward,
+                jump: true,
+                ..grounded()
+            };
+            let mut motion = PlayerMotion::default();
+            motion.step(&clips(), &c, 0.01);
+            assert!(matches!(motion.state, State::Jump { .. }));
+        }
     }
 
     #[test]
