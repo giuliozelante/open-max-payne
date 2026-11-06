@@ -10,6 +10,9 @@ const MAX_DECALS: usize = 1000;
 /// How far a decal sits off its surface, toward the shooter.
 const SURFACE_OFFSET: f32 = 0.01;
 
+/// Width, height and `0x00RRGGBB` pixels.
+type Bitmap = (u32, u32, Vec<u32>);
+
 /// One `[Materials]` entry.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DecalMaterial {
@@ -128,19 +131,14 @@ impl DecalField {
             .unwrap_or_default();
         let bitmap = |material: &DecalMaterial| {
             let decode = |file: &str| crate::scene::decode_texture_blob(&read(file)?);
-            let (width, height, colour) = decode(&material.file)?;
-            let (_, _, alpha) = decode(&material.alpha_file)?;
-            let pixels = colour
-                .iter()
-                .zip(&alpha)
-                .map(|(rgb, grey)| ((grey & 0x00ff_0000) << 8) | (rgb & 0x00ff_ffff))
-                .collect();
+            let colour = decode(&material.file)?;
+            let alpha = decode(&material.alpha_file)?;
             Some(DecodedTexture {
                 path: material.file.clone(),
                 flag: 0,
-                width,
-                height,
-                pixels,
+                width: colour.0,
+                height: colour.1,
+                pixels: with_alpha(&colour, &alpha),
             })
         };
         let textures = set
@@ -229,6 +227,22 @@ impl DecalField {
     pub fn texture(&self, key: &SpriteTexture) -> Option<&DecodedTexture> {
         self.textures.get(key)
     }
+}
+
+/// `colour` with `alpha`'s red channel in the top byte, alpha stretched to the colour's size.
+fn with_alpha(colour: &Bitmap, alpha: &Bitmap) -> Vec<u32> {
+    let (width, height, rgb) = colour;
+    let (alpha_width, alpha_height, grey) = alpha;
+    let mut pixels = Vec::with_capacity(rgb.len());
+    for y in 0..*height {
+        for x in 0..*width {
+            let (ax, ay) = (x * alpha_width / width, y * alpha_height / height);
+            let a = grey[(ay * alpha_width + ax) as usize];
+            let p = rgb[(y * width + x) as usize];
+            pixels.push(((a & 0x00ff_0000) << 8) | (p & 0x00ff_ffff));
+        }
+    }
+    pixels
 }
 
 fn texture_key(file: &str) -> SpriteTexture {
@@ -326,7 +340,32 @@ mod tests {
                 "{}",
                 material.file
             );
+            assert_eq!(
+                texture.pixels.len(),
+                (texture.width * texture.height) as usize,
+                "{}",
+                material.file
+            );
         }
+    }
+
+    #[test]
+    fn an_alpha_map_smaller_than_its_bitmap_stretches_over_it() {
+        // `Hole_Default`: a 128 x 128 bitmap with a 32 x 32 alpha file.
+        let colour = (2, 2, vec![0x0011_2233; 4]);
+        let alpha = (1, 1, vec![0x0080_8080]);
+        assert_eq!(with_alpha(&colour, &alpha), vec![0x8011_2233; 4]);
+    }
+
+    #[test]
+    fn each_part_of_an_alpha_map_lands_on_its_part_of_the_bitmap() {
+        let colour = (4, 1, vec![0; 4]);
+        let alpha = (2, 1, vec![0x0010_1010, 0x0020_2020]);
+        let tops: Vec<u32> = with_alpha(&colour, &alpha)
+            .iter()
+            .map(|p| p >> 24)
+            .collect();
+        assert_eq!(tops, [0x10, 0x10, 0x20, 0x20]);
     }
 
     #[test]
