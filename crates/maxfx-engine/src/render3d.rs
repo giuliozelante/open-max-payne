@@ -92,6 +92,14 @@ struct EnemyState {
     death: Option<(usize, f32, usize)>,
 }
 
+/// How a level run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelEnd {
+    Closed,
+    /// Max died, and the level restarts. Retail reloads the last save, which the engine lacks.
+    Died,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_3d_walkthrough(
     screen: &mut crate::frontend::Screen,
@@ -102,7 +110,7 @@ pub fn run_3d_walkthrough(
     player_skin: Option<&str>,
     world_sphere: Option<&str>,
     cinematic: bool,
-) -> Result<(), String> {
+) -> Result<LevelEnd, String> {
     screen.set_title(title);
     let (catalog_player, johnny_rig) = load_character_rigs(level_path);
     let mut player_rig = player_skin
@@ -198,6 +206,7 @@ pub fn run_3d_walkthrough(
     let mut right_was_down = false;
     let mut shot_timer: f32 = 0.0;
     // Seconds into the player's shot or reload clip.
+    let mut level_end = LevelEnd::Closed;
     let mut action_time: f32 = 0.0;
     // `(seconds into the clip, message)` of the painkiller still to come.
     let mut pill_messages: Vec<(f32, String)> = Vec::new();
@@ -424,6 +433,10 @@ pub fn run_3d_walkthrough(
         if cinematic
             && (scene.mode_switch.is_some() || window.is_key_pressed(Key::Space, KeyRepeat::No))
         {
+            break;
+        }
+        if motion.death_over() {
+            level_end = LevelEnd::Died;
             break;
         }
         if window.is_key_pressed(Key::V, KeyRepeat::No) {
@@ -1200,6 +1213,12 @@ pub fn run_3d_walkthrough(
                 scene.screen_flash = Some(flash);
             }
             last_health = max.health;
+            if max.health <= 0.0 {
+                motion.die(&player_clips, yaw);
+                scene.player_controls = false;
+                fly_mode = false;
+                pending.clear();
+            }
         }
 
         // Update Enemy AI (turn toward Max Payne and advance along floor when within 24m)
@@ -1745,7 +1764,7 @@ pub fn run_3d_walkthrough(
     }
     screen.set_mouse_captured(false);
     screen.put_gpu(gpu);
-    Ok(())
+    Ok(level_end)
 }
 
 /// Saves a frame every few seconds into `OPENMAXFX_CAPTURE_DIR`, for comparing with retail. It is
