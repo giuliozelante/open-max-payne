@@ -27,6 +27,8 @@ pub struct Sprite {
     pub rgba: [f32; 4],
     pub additive: bool,
     pub texture: SpriteTexture,
+    /// Right and up axes of a quad fixed in the world, such as a decal; `None` faces the camera.
+    pub facing: Option<[[f32; 3]; 2]>,
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +214,7 @@ impl ParticleField {
                             sequence: p.sequence,
                             frame,
                         },
+                        facing: None,
                     });
                 }
             }

@@ -147,17 +147,17 @@ impl SlowMotion {
 }
 
 /// One `[Section]` of `hud.txt`: its lower-case path, such as `health/sprite`, and its keys.
-struct Section {
-    path: String,
+pub(crate) struct Section {
+    pub(crate) path: String,
     keys: BTreeMap<String, String>,
 }
 
 impl Section {
-    fn text(&self, key: &str) -> Option<&str> {
+    pub(crate) fn text(&self, key: &str) -> Option<&str> {
         self.keys.get(key).map(String::as_str)
     }
 
-    fn number(&self, key: &str) -> Option<f32> {
+    pub(crate) fn number(&self, key: &str) -> Option<f32> {
         self.text(key)?.parse().ok()
     }
 
@@ -172,7 +172,7 @@ impl Section {
         Some([parts.next()?.ok()?, parts.next()?.ok()?])
     }
 
-    fn file(&self, key: &str) -> Option<String> {
+    pub(crate) fn file(&self, key: &str) -> Option<String> {
         Some(self.text(key)?.trim_matches('"').to_string())
     }
 
@@ -245,7 +245,7 @@ fn expand(value: &str, defines: &BTreeMap<String, String>) -> String {
 }
 
 /// Sections in file order. A `[Name]` before `{` opens a block; the others end at the next one.
-fn parse_sections(text: &str) -> Vec<Section> {
+pub(crate) fn parse_sections(text: &str) -> Vec<Section> {
     let mut defines = BTreeMap::new();
     let mut sections: Vec<Section> = Vec::new();
     let mut blocks: Vec<String> = Vec::new();

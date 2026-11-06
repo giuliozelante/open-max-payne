@@ -1247,6 +1247,7 @@ impl GpuRenderer {
                 self.sprite_textures.insert(sprite.texture.clone(), group);
             }
             let h = sprite.size * 0.5;
+            let [right, up] = sprite.facing.unwrap_or([right, up]);
             let corner = |a: f32, b: f32, uv: [f32; 2]| SpriteVertex {
                 pos: [0, 1, 2].map(|k| sprite.pos[k] + (right[k] * a + up[k] * b) * h),
                 uv,
@@ -2579,6 +2580,7 @@ mod tests {
                     sequence: 0,
                     frame: 0,
                 },
+                facing: None,
             };
             let mut sw = vec![0u32; w * h];
             let mut sw_zb = vec![f32::INFINITY; w * h];
@@ -2639,6 +2641,7 @@ mod tests {
                 sequence: 0,
                 frame: 0,
             },
+            facing: None,
         };
         let view = crate::render3d::test_view([0.0; 3], [0.0, 0.0, 1.0]);
         let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
