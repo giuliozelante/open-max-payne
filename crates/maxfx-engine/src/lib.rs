@@ -4849,6 +4849,7 @@ mod tests {
         let weapons = load_weapon_defs(&game);
         assert_eq!(weapons["beretta"].slot, Some(1));
         assert_eq!(weapons["pumpshotgun"].slot, Some(2));
+        assert!(weapons["painkiller"].fire_clip.is_some());
         assert_eq!(difficulty.auto_aim, [4.0, 2.0]);
         assert!(weapons["pumpshotgun"].auto_aim);
         assert!(!weapons["sniper"].auto_aim);
