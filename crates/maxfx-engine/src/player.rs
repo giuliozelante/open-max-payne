@@ -240,7 +240,9 @@ impl PlayerMotion {
         let air = turn([keys[1] * air, 0.0, keys[0] * air], c.yaw);
         let clip = |yaw: f32| turn(def.velocity(seconds), yaw);
         match self.state {
-            State::Ground | State::GetUp => clip(c.yaw),
+            // A run's `EndPosition` is a speed: retail Max covers about 4 m/s on a 4.2 clip.
+            State::Ground => turn(def.end, c.yaw),
+            State::GetUp => clip(c.yaw),
             State::Jump { .. } => {
                 let [x, z] = clip(c.yaw);
                 [x + air[0], z + air[1]]
@@ -374,6 +376,13 @@ fn due(def: &ClipDef, rate: f32, from: f32, to: f32) -> Vec<String> {
     passed.into_iter().map(|(_, text)| text.clone()).collect()
 }
 
+/// `def` sends `GM_EnableBulletTime( false )`.
+pub fn stops_bullet_time(def: &ClipDef) -> bool {
+    def.messages
+        .iter()
+        .any(|(_, text)| clip_effect(text) == Some(ClipEffect::BulletTimeOff))
+}
+
 /// What a clip message does to the player.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClipEffect {
@@ -434,6 +443,10 @@ mod tests {
         [Animation] Index = CHARANIM_RUN; Filename = run;\n\
         [Movement] EndPosition = (0,0,4);\n\
         [Message] Frame = 2; String = \"this->P_CreateProjectileToBone(dummy_footstep_right,1,foot-r);\";\n\
+        [Animation] Index = CHARANIM_WALKBACKWARD; Filename = fall;\n\
+        [Movement] EndPosition = (0,0,-3);\n\
+        [Animation] Index = CHARANIM_RELOADBERETTA; Filename = land;\n\
+        [Message] Frame = 0; String = \"maxpayne_gamemode->gm_enablebullettime( false );\";\n\
         [Animation] Index = CHARANIM_STRAFERIGHT; Filename = run;\n\
         [Movement] EndPosition = (4,0,0);\n\
         [Animation] Index = CHARANIM_CROUCH; Filename = crouch;\n\
@@ -512,6 +525,25 @@ mod tests {
         };
         let step = PlayerMotion::default().step(&clips(), &c, 0.1);
         assert!(near(step.velocity, [4.0, 0.0]));
+    }
+
+    #[test]
+    fn a_run_clip_gives_its_speed_whatever_its_length() {
+        let c = Controls {
+            forward: -1,
+            ..grounded()
+        };
+        let step = PlayerMotion::default().step(&clips(), &c, 0.1);
+        assert!(near(step.velocity, [0.0, -3.0]));
+    }
+
+    #[test]
+    fn a_clip_that_turns_bullet_time_off_says_so() {
+        let clips = clips();
+        let reload = clips.table.get("CHARANIM_RELOADBERETTA").expect("reload");
+        assert!(stops_bullet_time(reload));
+        let run = clips.table.get("CHARANIM_RUN").expect("run");
+        assert!(!stops_bullet_time(run));
     }
 
     #[test]

@@ -1134,6 +1134,23 @@ impl PlayerInventory {
         }
     }
 
+    /// The reload key.
+    pub fn start_reload(&mut self) {
+        if self.reloading.is_some() {
+            return;
+        }
+        let Some(def) = self.current.as_ref().and_then(|name| self.defs.get(name)) else {
+            return;
+        };
+        let Some(stock) = self.ammo.get(&def.inventory_id) else {
+            return;
+        };
+        if !stock.infinite && stock.clip < def.clip_size && stock.pocket > 0 {
+            self.reloading = Some(def.reload_seconds);
+            self.reload_clips += 1;
+        }
+    }
+
     /// A `C_Reload` outside a reload clip, as a dive's first frame sends.
     pub fn reload_now(&mut self) {
         self.reloading = Some(0.0);
@@ -1952,6 +1969,22 @@ mod tests {
         player.step(0.4);
         assert_eq!(player.stock("beretta"), stock(18, 2, false));
         assert!(player.fire());
+    }
+
+    #[test]
+    fn asking_to_reload_needs_room_in_the_clip_and_rounds_in_the_pocket() {
+        let mut player = emptied_beretta(3);
+        player.start_reload();
+        assert!(player.reloading.is_some());
+        assert_eq!(player.reload_clips, 1);
+        player.step(1.4);
+        let before = player.reload_clips;
+        player.start_reload();
+        assert_eq!(
+            player.reloading, None,
+            "the clip is full or the pocket empty"
+        );
+        assert_eq!(player.reload_clips, before);
     }
 
     #[test]
