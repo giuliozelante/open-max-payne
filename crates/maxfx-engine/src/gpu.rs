@@ -2133,6 +2133,7 @@ mod tests {
                 // Wound so that (b - a) x (c - a) = -z, the KFS front.
                 faces: vec![face([0, 2, 1]), face([0, 3, 2])],
                 material_textures: vec![None],
+                parts: Vec::new(),
             },
             skin: None,
             idle: None,
@@ -2141,6 +2142,7 @@ mod tests {
             action: None,
             motion: None,
             fade: Default::default(),
+            gun_clip: None,
             aim: None,
             aim_pitch: 0.0,
             two_handed_idle: None,

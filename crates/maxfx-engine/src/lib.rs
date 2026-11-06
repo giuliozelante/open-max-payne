@@ -2657,6 +2657,14 @@ pub fn load_weapon_defs(game_dir: &Path) -> BTreeMap<String, hud::WeaponDef> {
                     .read(&path)
                     .and_then(|bytes| kf2::parse_kf2_anim(&bytes));
             }
+            let own_clips = clips::ClipTable::parse(&text, "");
+            def.gun_clip = own_clips
+                .get("WEAPONANIM_SHOOT")
+                .map(|clip| resolve_win_path(&format!(r"{DIR}{name}\{}", clip.file)))
+                .and_then(|path| source.read(&path))
+                .and_then(|bytes| kf2::parse_kf2_anim(&bytes))
+                .filter(|clip| clip.bones.iter().any(|bone| bone.keys.len() > 1))
+                .map(std::sync::Arc::new);
             let mut aim_clip = |way: &str| {
                 let index = format!("CHARANIM_SHOOT{way}{}", name.to_ascii_uppercase());
                 let file = &table.get(&index)?.file;
@@ -4526,6 +4534,20 @@ mod tests {
         assert!(mesh.material_textures.iter().all(Option::is_some));
         assert_eq!(mesh.faces.len(), 203 + 72 + 48);
         assert_eq!(mesh.faces[203].indices[0], 281);
+        // Only the slide works when the gun is pumped.
+        let clip = defs["pumpshotgun"].gun_clip.as_ref().expect("clip");
+        let seconds = crate::render3d::clip_seconds(clip);
+        let moved = (1..20)
+            .map(|step| kf2::part_verts(&mesh, clip, seconds * step as f32 / 20.0))
+            .map(|verts| {
+                let (node, run) = mesh.parts.last().expect("slide");
+                assert_eq!(node, "Slide");
+                let first = run.start;
+                assert_eq!(verts[0], mesh.vertices[0]);
+                (verts[first][2] - mesh.vertices[first][2]).abs()
+            })
+            .fold(0.0, f32::max);
+        assert!((0.05..0.5).contains(&moved), "slide moved {moved}");
     }
 
     #[test]
