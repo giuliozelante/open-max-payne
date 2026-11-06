@@ -474,7 +474,8 @@ pub fn run_3d_walkthrough(
             scene.dispatch_message("", &message);
         }
         // `[StartMessages]` set one speed for everything, Max included.
-        let world_dt = base_dt * scene.game_speed.value * scene.dodge_speed.value;
+        let world_dt =
+            base_dt * scene.game_speed.value * scene.dodge_speed.value * scene.global_speed.value;
         let player_dt = world_dt;
         let weapon = scene.inventory.current.as_ref();
         let weapon = weapon.and_then(|name| scene.inventory.defs.get(name));
@@ -1095,6 +1096,18 @@ pub fn run_3d_walkthrough(
             let time = player_clip_time(rig, player_moving, walk_phase, anim_clock, action_time);
             if let Some((_, pose)) = character_locals(rig, player_moving, time) {
                 rig.fade.remember(pose);
+            }
+        }
+
+        if let Some(level) = scene.slow_motion_level.take() {
+            slow_motion.level = level.clamp(0.0, 1.0);
+        }
+        for (name, order) in std::mem::take(&mut scene.character_orders) {
+            if let Some(en) = enemies
+                .iter_mut()
+                .find(|en| en.name.eq_ignore_ascii_case(&name))
+            {
+                obey(en, &order, &scene, &room_origins);
             }
         }
 
@@ -3830,6 +3843,30 @@ pub(crate) fn clip_seconds(clip: &crate::kf2::Kf2Anim) -> f32 {
         .map_or(0.0, |bone| bone.duration as f32 / bone.fps)
 }
 
+/// A script's order to `en`.
+fn obey(
+    en: &mut EnemyState,
+    order: &crate::scene::CharacterOrder,
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+) {
+    match order {
+        crate::scene::CharacterOrder::SetHealth(health) => en.health = *health,
+        crate::scene::CharacterOrder::Teleport(place) => {
+            let found = scene
+                .jumppoints
+                .iter()
+                .position(|jp| scene.jumppoint_place(jp).eq_ignore_ascii_case(place));
+            if let Some(index) = found {
+                let [x, y, z] = spawn_pos(scene, rooms, index);
+                en.world_pos = [x, y - EYE_HEIGHT, z];
+                en.yaw = scene.jumppoints[index].yaw();
+                en.room_id = scene.jumppoints[index].room_id;
+            }
+        }
+    }
+}
+
 /// `dir` thrown off by `accuracy`, as retail does at `0x7068cd`: a random unit vector scaled by
 /// `rand * Accuracy / 2500` added to the aim, then normalised again.
 fn spread_aim(dir: [f32; 3], accuracy: f32, seed: &mut u32) -> [f32; 3] {
@@ -5366,6 +5403,50 @@ mod tests {
     }
 
     #[test]
+    fn a_teleported_character_stands_on_the_start_point_and_faces_its_way() {
+        let mut scene = empty_scene();
+        scene.jumppoints.push(crate::scene::SceneJumppoint {
+            name: "::Street::Tele_02".to_string(),
+            room_id: 7,
+            pos: [1.0, 0.0, 2.0],
+            mat: [0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+            jp_type: 1,
+        });
+        let rooms = BTreeMap::from([(7, [10.0, 0.0, 20.0])]);
+        let mut en = EnemyState {
+            name: "::Teleport::E01".to_string(),
+            room_id: 1,
+            world_pos: [0.0; 3],
+            yaw: 0.0,
+            walk_phase: 0.0,
+            health: 100,
+            hit_flash: 0.0,
+            rig_index: 0,
+            pursues: false,
+            invulnerable: false,
+            death: None,
+        };
+        let place = "::street::tele_02".to_string();
+        obey(
+            &mut en,
+            &crate::scene::CharacterOrder::Teleport(place),
+            &scene,
+            &rooms,
+        );
+        assert_eq!(en.world_pos[0], 11.0);
+        assert_eq!(en.world_pos[2], 22.0);
+        assert_eq!(en.room_id, 7);
+        assert!(
+            (en.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-5,
+            "{}",
+            en.yaw
+        );
+        let health = crate::scene::CharacterOrder::SetHealth(1);
+        obey(&mut en, &health, &scene, &rooms);
+        assert_eq!(en.health, 1);
+    }
+
+    #[test]
     fn a_shot_turns_toward_where_the_character_aims() {
         let mesh = crate::kf2::KfsMesh {
             name: String::new(),
@@ -6565,6 +6646,9 @@ mod tests {
             fov_multiplier: crate::scene::Ramp::at(1.0),
             game_speed: crate::scene::Ramp::at(1.0),
             dodge_speed: crate::scene::Ramp::at(1.0),
+            global_speed: crate::scene::Ramp::at(1.0),
+            slow_motion_level: None,
+            character_orders: Vec::new(),
             screen_flash: None,
             inventory: Default::default(),
             hud_prints: Vec::new(),

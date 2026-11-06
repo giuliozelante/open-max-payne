@@ -518,6 +518,15 @@ pub struct ScenePortalExit {
     pub target_exit_name: String,
 }
 
+/// What a script tells a character to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CharacterOrder {
+    /// `C_Teleport`: go to the start point of this name, and face its way.
+    Teleport(String),
+    /// `C_SetHealth`.
+    SetHealth(i32),
+}
+
 #[derive(Debug, Clone)]
 pub struct SceneJumppoint {
     pub name: String,
@@ -693,6 +702,13 @@ pub struct LdbScene {
     /// `GM_ChangeGameSpeed`: what a dodge's clips multiply the game speed by, apart from the
     /// speed bullet time sets.
     pub dodge_speed: Ramp,
+    /// `GM_ChangeGlobalGameSpeed`: a speed of its own, so "slow motion rooms" survive dodges and
+    /// bullet time.
+    pub global_speed: Ramp,
+    /// `GM_SetPlayerControlledSlowMotion`: a level the bullet time gauge is to take.
+    pub slow_motion_level: Option<f32>,
+    /// `C_Teleport` and `C_SetHealth` for the character named first.
+    pub character_orders: Vec<(String, CharacterOrder)>,
     /// The running `MPHM_FlashToColor`.
     pub screen_flash: Option<ScreenFlash>,
     /// The player's weapons, as the `C_PickupWeapon` family of messages leaves them.
@@ -1182,6 +1198,39 @@ impl LdbScene {
                 self.dodge_speed.set(speed, number(1).unwrap_or(0.0));
                 true
             }
+            "gm_changeglobalgamespeed" => {
+                let number = |i: usize| msg.args.get(i).and_then(|a| a.trim().parse::<f32>().ok());
+                let Some(speed) = number(0).filter(|speed| *speed > 0.0) else {
+                    return false;
+                };
+                self.global_speed.set(speed, number(1).unwrap_or(0.0));
+                true
+            }
+            "gm_setplayercontrolledslowmotion" => {
+                let level = msg.args.first().and_then(|a| a.trim().parse::<f32>().ok());
+                self.slow_motion_level = level;
+                level.is_some()
+            }
+            "c_teleport" => {
+                let Some(place) = msg.args.first() else {
+                    return false;
+                };
+                let place = place.trim().trim_matches('"').to_string();
+                let order = CharacterOrder::Teleport(place);
+                self.character_orders
+                    .push((msg.receiver.to_string(), order));
+                true
+            }
+            "c_sethealth" => {
+                let health = msg.args.first().and_then(|a| a.trim().parse::<i32>().ok());
+                let Some(health) = health else {
+                    return false;
+                };
+                let order = CharacterOrder::SetHealth(health);
+                self.character_orders
+                    .push((msg.receiver.to_string(), order));
+                true
+            }
             "gm_changecontrolledgamespeed" => {
                 let number = |i: usize| msg.args.get(i).and_then(|a| a.trim().parse::<f32>().ok());
                 let Some(speed) = number(0).filter(|speed| *speed > 0.0) else {
@@ -1514,6 +1563,7 @@ impl LdbScene {
         self.widescreen.step(dt);
         self.fov_multiplier.step(dt);
         self.game_speed.step(dt);
+        self.global_speed.step(dt);
         self.dodge_speed.step(dt);
         if let Some(flash) = self.screen_flash.as_mut() {
             flash.age += dt;
@@ -3213,6 +3263,9 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         fov_multiplier: Ramp::at(1.0),
         game_speed: Ramp::at(1.0),
         dodge_speed: Ramp::at(1.0),
+        global_speed: Ramp::at(1.0),
+        slow_motion_level: None,
+        character_orders: Vec::new(),
         screen_flash: None,
         inventory: Default::default(),
         hud_prints: Vec::new(),
@@ -3281,6 +3334,38 @@ fn parent_name(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_global_speed_is_its_own_layer() {
+        let mut scene = LdbScene {
+            game_speed: Ramp::at(0.5),
+            global_speed: Ramp::at(1.0),
+            ..Default::default()
+        };
+        assert!(scene.dispatch_message("", "maxpayne_gamemode->gm_changeglobalgamespeed(.8, 0);"));
+        assert_eq!(scene.global_speed.value, 0.8);
+        assert_eq!(scene.game_speed.value, 0.5);
+    }
+
+    #[test]
+    fn scripts_can_refill_bullet_time_and_order_characters_about() {
+        let mut scene = LdbScene::default();
+        let refill = "maxpayne_gamemode->GM_SetPlayerControlledSlowmotion(1);";
+        assert!(scene.dispatch_message("", refill));
+        assert_eq!(scene.slow_motion_level, Some(1.0));
+        assert!(scene.dispatch_message("", "::Teleport::E01->C_Teleport(\"::Street::Tele_02\");"));
+        assert!(scene.dispatch_message("", "::Teleport::E01->C_SetHealth(1);"));
+        assert_eq!(
+            scene.character_orders,
+            [
+                (
+                    "::Teleport::E01".to_string(),
+                    CharacterOrder::Teleport("::Street::Tele_02".to_string())
+                ),
+                ("::Teleport::E01".to_string(), CharacterOrder::SetHealth(1)),
+            ]
+        );
+    }
 
     #[test]
     fn a_dodge_changes_its_own_game_speed_and_leaves_bullet_time_alone() {
@@ -3375,6 +3460,9 @@ mod tests {
             fov_multiplier: Ramp::at(1.0),
             game_speed: Ramp::at(1.0),
             dodge_speed: Ramp::at(1.0),
+            global_speed: Ramp::at(1.0),
+            slow_motion_level: None,
+            character_orders: Vec::new(),
             screen_flash: None,
             inventory: Default::default(),
             hud_prints: Vec::new(),
