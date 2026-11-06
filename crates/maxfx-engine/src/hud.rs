@@ -471,6 +471,47 @@ pub struct ProjectileDef {
     pub accuracy: f32,
     /// `D_CreateDecal` block of `decals.txt`.
     pub decal: Option<String>,
+    /// Its `[CharacterHit]` projectile, with that file's values.
+    pub character_hit: Option<SplatterDef>,
+}
+
+/// A projectile that only flies and marks where it lands, such as `blood_bullet_small`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SplatterDef {
+    pub count: u32,
+    /// `Speed`, metres per second.
+    pub speed: f32,
+    pub accuracy: f32,
+    /// `GravityMultiplier`.
+    pub gravity: f32,
+    pub decal: Option<String>,
+}
+
+impl SplatterDef {
+    pub fn parse(text: &str, count: u32) -> Option<Self> {
+        let sections = parse_sections(text);
+        let number = |name: &str| {
+            let value = sections.iter().find_map(|s| s.text(name))?;
+            value.parse::<f32>().ok()
+        };
+        Some(Self {
+            count,
+            speed: number("speed")?,
+            accuracy: number("accuracy").unwrap_or(0.0),
+            gravity: number("gravitymultiplier").unwrap_or(0.0),
+            // Blood files spell the verb in lower case.
+            decal: weapon_cue_line(&text.to_ascii_lowercase(), "d_createdecal", 0),
+        })
+    }
+}
+
+/// `(projectile, count)` of a projectile file's `[CharacterHit]`.
+pub fn parse_character_hit(text: &str) -> Option<(String, u32)> {
+    let (_, rest) = text.split_once("[CharacterHit]")?;
+    let block = rest.split("\n[").next()?;
+    let name = weapon_cue_line(block, "P_CreateProjectile", 0)?;
+    let count = weapon_cue_line(block, "P_CreateProjectile", 1)?;
+    Some((name, count.parse().ok()?))
 }
 
 impl ProjectileDef {
@@ -486,6 +527,7 @@ impl ProjectileDef {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0.0),
             decal: weapon_cue_line(text, "D_CreateDecal", 0),
+            character_hit: None,
         })
     }
 }
@@ -1605,6 +1647,27 @@ mod tests {
     }
 
     #[test]
+    fn a_character_hit_names_its_splatter_and_that_file_says_how_it_flies() {
+        let bullet = "[Decal]\nString = \"this->D_CreateDecal( bullethit_generic );\";\n\n[CharacterHit]\nString = \"this->P_CreateProjectile( blood_bullet_small, 1 );\";\n[Attributes]\n";
+        assert_eq!(
+            parse_character_hit(bullet),
+            Some(("blood_bullet_small".to_string(), 1))
+        );
+        assert_eq!(parse_character_hit("[Attributes]\n"), None);
+        let blood = "[Decal]\nString =\"this->d_createdecal( blood_small );\";\n[Attributes]\nAccuracy \t= 500;\nSpeed \t\t= 8 ;\nDamage \t\t= 0;\nGravityMultiplier\t\t= 1.0;\n";
+        assert_eq!(
+            SplatterDef::parse(blood, 1),
+            Some(SplatterDef {
+                count: 1,
+                speed: 8.0,
+                accuracy: 500.0,
+                gravity: 1.0,
+                decal: Some("blood_small".to_string()),
+            })
+        );
+    }
+
+    #[test]
     fn a_projectile_file_gives_damage_spread_and_decal() {
         let text = "[Decal]\nString = \"this->D_CreateDecal( bullethit_shotgun );\";\n[Attributes]\nAccuracy \t= PUMPSHOTGUN_BULLETSPREAD ;\nDamage \t\t= PUMPSHOTGUN_BULLETDAMAGE ;\n";
         let defines = "#define PUMPSHOTGUN_BULLETDAMAGE 5\n#define PUMPSHOTGUN_BULLETSPREAD 150\n";
@@ -1615,6 +1678,7 @@ mod tests {
                 damage: 5,
                 accuracy: 150.0,
                 decal: Some("bullethit_shotgun".to_string()),
+                character_hit: None,
             })
         );
         assert_eq!(

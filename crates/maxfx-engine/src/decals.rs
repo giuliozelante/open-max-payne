@@ -115,6 +115,29 @@ impl DecalSet {
     }
 }
 
+/// A `SplatterDef` in flight.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Droplet {
+    pub pos: [f32; 3],
+    pub vel: [f32; 3],
+    /// Acceleration: the level's gravity times `GravityMultiplier`.
+    pub gravity: [f32; 3],
+    pub decal: String,
+    pub age: f32,
+}
+
+impl Droplet {
+    /// Advance `seconds`, returning the distance and unit direction just flown.
+    pub fn step(&mut self, seconds: f32) -> (f32, [f32; 3]) {
+        self.age += seconds;
+        self.vel = std::array::from_fn(|c| self.vel[c] + self.gravity[c] * seconds);
+        let delta = self.vel.map(|c| c * seconds);
+        self.pos = std::array::from_fn(|c| self.pos[c] + delta[c]);
+        let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        (length, normalize(delta))
+    }
+}
+
 /// A placed decal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decal {
@@ -341,6 +364,24 @@ mod tests {
             sets: BTreeMap::from([("bullethit_generic".to_string(), set)]),
             ..DecalField::default()
         }
+    }
+
+    #[test]
+    fn a_droplet_falls_along_its_arc() {
+        let mut drop = Droplet {
+            pos: [0.0, 2.0, 0.0],
+            vel: [8.0, 0.0, 0.0],
+            gravity: [0.0, -20.0, 0.0],
+            decal: "blood_small".to_string(),
+            age: 0.0,
+        };
+        let (length, dir) = drop.step(0.1);
+        // Semi-implicit, as particles: velocity (8, -2, 0), then moved by it.
+        assert_eq!(drop.vel, [8.0, -2.0, 0.0]);
+        assert!((drop.pos[0] - 0.8).abs() < 1e-5 && (drop.pos[1] - 1.8).abs() < 1e-5);
+        assert!((length - 0.8246).abs() < 1e-3, "{length}");
+        assert!(dir[1] < 0.0 && dir[0] > 0.9);
+        assert_eq!(drop.age, 0.1);
     }
 
     #[test]
