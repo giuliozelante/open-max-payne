@@ -215,6 +215,74 @@ impl ParticleField {
     }
 }
 
+/// The bitmap of one frame as an RGBA texture (alpha in the top byte). The colour file is a JPEG or
+/// TGA; the alpha file, when the particle is alpha-blended, is a grey PCX or TGA mask. Additive
+/// particles have no alpha file and are opaque.
+pub fn frame_texture(frame: &openpfx::effect::RpsFrame) -> Option<crate::scene::DecodedTexture> {
+    let (width, height, color) = crate::scene::decode_texture_blob(&frame.color)?;
+    let alpha = match &frame.alpha {
+        None => None,
+        Some((_, bytes)) => decode_pcx_grey(bytes)
+            .or_else(|| {
+                crate::scene::decode_texture_blob(bytes)
+                    .map(|(w, h, px)| (w, h, px.iter().map(|p| (p >> 16) as u8).collect()))
+            })
+            .filter(|(w, h, _)| (*w, *h) == (width, height))
+            .map(|(_, _, grey)| grey),
+    };
+    let pixels = color
+        .iter()
+        .enumerate()
+        .map(|(i, &rgb)| {
+            let a = alpha
+                .as_ref()
+                .map_or(0xff, |grey| grey.get(i).copied().unwrap_or(0xff));
+            (u32::from(a) << 24) | (rgb & 0x00ff_ffff)
+        })
+        .collect();
+    Some(crate::scene::DecodedTexture {
+        path: frame.color_path.clone(),
+        flag: 0,
+        width,
+        height,
+        pixels,
+    })
+}
+
+/// 8-bit, one-plane RLE PCX as a grey image (the red channel of its 256-colour palette).
+fn decode_pcx_grey(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    if data.len() < 128 || data[0] != 0x0a || data[2] != 1 || data[3] != 8 || data[65] != 1 {
+        return None;
+    }
+    let word = |at: usize| u16::from_le_bytes([data[at], data[at + 1]]);
+    let width = u32::from(word(8).checked_sub(word(4))?) + 1;
+    let height = u32::from(word(10).checked_sub(word(6))?) + 1;
+    let stride = usize::from(word(66));
+    let mut rows = Vec::with_capacity(stride * height as usize);
+    let mut i = 128;
+    while rows.len() < stride * height as usize {
+        let byte = *data.get(i)?;
+        i += 1;
+        if byte >= 0xc0 {
+            let value = *data.get(i)?;
+            i += 1;
+            rows.extend(std::iter::repeat_n(value, usize::from(byte & 0x3f)));
+        } else {
+            rows.push(byte);
+        }
+    }
+    let palette =
+        (data.len() >= 769 && data[data.len() - 769] == 0x0c).then(|| &data[data.len() - 768..]);
+    let grey = (0..height as usize)
+        .flat_map(|y| (0..width as usize).map(move |x| (y, x)))
+        .map(|(y, x)| {
+            let index = rows[y * stride + x];
+            palette.map_or(index, |p| p[usize::from(index) * 3])
+        })
+        .collect();
+    Some((width, height, grey))
+}
+
 /// A random value between a two-channel graph's min and max (a one-channel graph is constant).
 fn between(minmax: &[f32], seed: &mut u32) -> f32 {
     match minmax {
@@ -292,6 +360,66 @@ mod tests {
 
     fn at_origin(_: &str) -> Option<([f32; 3], [f32; 9])> {
         Some(([0.0, 10.0, 0.0], IDENTITY))
+    }
+
+    /// 8-bit, one-plane, RLE PCX (version 5) with a grey palette, as the snow alpha masks.
+    fn pcx(width: u16, height: u16, rows: &[&[u8]]) -> Vec<u8> {
+        let mut out = vec![0u8; 128];
+        out[..4].copy_from_slice(&[0x0a, 5, 1, 8]);
+        out[8..10].copy_from_slice(&(width - 1).to_le_bytes());
+        out[10..12].copy_from_slice(&(height - 1).to_le_bytes());
+        out[65] = 1;
+        out[66..68].copy_from_slice(&width.to_le_bytes());
+        for row in rows {
+            for &v in *row {
+                // A run of one, the RLE form for values >= 0xc0; plain bytes otherwise.
+                if v >= 0xc0 {
+                    out.extend([0xc1, v]);
+                } else {
+                    out.push(v);
+                }
+            }
+        }
+        out.push(0x0c);
+        for i in 0..=255u8 {
+            out.extend([i, i, i]);
+        }
+        out
+    }
+
+    fn tga(width: u16, height: u16, bgr: &[[u8; 3]]) -> Vec<u8> {
+        let mut out = vec![0u8; 18];
+        out[2] = 2;
+        out[12..14].copy_from_slice(&width.to_le_bytes());
+        out[14..16].copy_from_slice(&height.to_le_bytes());
+        out[16] = 24;
+        out[17] = 0x20; // top-left origin
+        for px in bgr {
+            out.extend(px);
+        }
+        out
+    }
+
+    #[test]
+    fn a_frame_takes_its_colour_from_one_file_and_its_alpha_from_the_other() {
+        // Snow: snow0000.TGA (colour) + snow0000.PCX (alpha mask).
+        let frame = RpsFrame {
+            color_path: "snow0000.TGA".into(),
+            color: tga(2, 1, &[[0, 0, 255], [255, 0, 0]]),
+            alpha: Some(("snow0000.PCX".into(), pcx(2, 1, &[&[0x10, 0xf0]]))),
+        };
+        let texture = frame_texture(&frame).expect("texture");
+        assert_eq!((texture.width, texture.height), (2, 1));
+        assert_eq!(texture.pixels, [0x10ff_0000, 0xf000_00ff]);
+        // Additive particles have no alpha file: fully opaque.
+        let additive = RpsFrame {
+            alpha: None,
+            ..frame
+        };
+        assert_eq!(
+            frame_texture(&additive).unwrap().pixels,
+            [0xffff_0000, 0xff00_00ff]
+        );
     }
 
     #[test]
