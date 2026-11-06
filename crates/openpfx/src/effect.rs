@@ -75,7 +75,7 @@ pub struct RpsEmission {
     pub lifetime: Graph,
     /// "Emission Direction": X, Y, Z over the cycle.
     pub direction: Graph,
-    /// First vec3 of the emission (HYPOTHESIS: "Relative Position").
+    /// Third vec3 of the emission: "Relative Position", the offset from the emitter.
     pub position: [f32; 3],
     /// Second vec3 (HYPOTHESIS: the "X/Y/Z +/-" direction randomisation).
     pub spread: [f32; 3],
@@ -84,6 +84,8 @@ pub struct RpsEmission {
     /// Spawn box corners (HYPOTHESIS: the "Square" emission volume; `snowstorm_60m` is ±30/±10/±30).
     pub box_max: [f32; 3],
     pub box_min: [f32; 3],
+    /// "Sphere" emitter shape, hotspot and falloff radius; `None` is the box.
+    pub sphere: Option<[f32; 2]>,
     /// "Size Multiplier": min and max, over the cycle.
     pub size_multiplier: Graph,
     /// "Rotation Multiplier": min and max, over the cycle.
@@ -268,20 +270,22 @@ impl Cursor<'_> {
         let velocity = self.graph()?;
         let lifetime = self.graph()?;
         let direction = self.graph()?;
-        let position = self.vec3()?;
-        let spread = self.vec3()?;
         self.vec3()?;
+        let spread = self.vec3()?;
+        let position = self.vec3()?;
         self.float()?;
         let cycle_length = self.float()?;
         self.float()?;
         self.float()?;
-        for _ in 0..3 {
-            self.int()?;
-        }
+        self.int()?;
+        self.int()?;
+        let shape = self.int()?;
         self.vec3()?;
-        for _ in 0..5 {
+        for _ in 0..3 {
             self.float()?;
         }
+        let hotspot = self.float()?;
+        let falloff = self.float()?;
         let box_max = self.vec3()?;
         let box_min = self.vec3()?;
         let size_multiplier = self.graph()?;
@@ -301,6 +305,7 @@ impl Cursor<'_> {
             cycle_length,
             box_max,
             box_min,
+            sphere: (shape == 1).then_some([hotspot, falloff]),
             size_multiplier,
             rotation_multiplier,
         })
@@ -376,7 +381,7 @@ mod tests {
     }
 
     /// `0x40`/2 emission with its inner `0x21`/5, light off.
-    fn emission(cycle: f32, box_max: [f32; 3], box_min: [f32; 3]) -> Vec<RpsValue> {
+    fn emission(cycle: f32, shape: i32, box_max: [f32; 3], box_min: [f32; 3]) -> Vec<RpsValue> {
         let mut out = vec![int(0x40), int(2), int(0x21), int(5)];
         out.extend(curve(2, &[500.0, 1000.0, 500.0, 1000.0]));
         out.extend(curve(2, &[0.25, 0.5, 0.25, 0.5]));
@@ -384,7 +389,7 @@ mod tests {
         out.extend(curve(3, &[0.0, -1.0, 0.0, 0.0, -1.0, 0.0]));
         out.extend([v3(0.0, -3.0, 12.0), v3(2.0, 2.0, 2.0), v3(0.0, 5.0, -30.0)]);
         out.extend([f(0.8), f(cycle), f(0.0), f(1.0)]);
-        out.extend([int(0), int(0), int(0), v3(0.0, 1.0, 0.0)]);
+        out.extend([int(0), int(0), int(shape), v3(0.0, 1.0, 0.0)]);
         out.extend([f(1.0), f(1.0), f(0.0), f(3.0), f(6.0)]);
         out.extend([
             v3(box_max[0], box_max[1], box_max[2]),
@@ -414,9 +419,9 @@ mod tests {
                 0.8,
                 &[("snow\\snow0000.TGA", b"tga0", "snow\\snow0000.PCX", b"pcx0")],
             ),
-            emission(5.0, [30.0, 10.0, 30.0], [-30.0, -10.0, -30.0]),
+            emission(5.0, 0, [30.0, 10.0, 30.0], [-30.0, -10.0, -30.0]),
             particle(0.0, &[]),
-            emission(2.0, [1.0, 1.0, 1.0], [-1.0, -1.0, -1.0]),
+            emission(2.0, 1, [1.0, 1.0, 1.0], [-1.0, -1.0, -1.0]),
         ]);
         let effect = rps_effect(&data).expect("effect");
         assert_eq!(effect.max_particles, 500);
@@ -435,12 +440,14 @@ mod tests {
         assert_eq!(snow.emission.rate.at(0.0), [500.0, 1000.0]);
         assert_eq!(snow.emission.lifetime.at(0.0), [0.2, 1.0]);
         assert_eq!(snow.emission.direction.at(0.0), [0.0, -1.0, 0.0]);
-        assert_eq!(snow.emission.position, [0.0, -3.0, 12.0]);
+        assert_eq!(snow.emission.position, [0.0, 5.0, -30.0]);
+        assert_eq!(snow.emission.sphere, None);
         assert_eq!(snow.emission.spread, [2.0, 2.0, 2.0]);
         assert_eq!(snow.emission.box_max, [30.0, 10.0, 30.0]);
         assert_eq!(snow.emission.box_min, [-30.0, -10.0, -30.0]);
         assert_eq!(snow.emission.size_multiplier.at(0.0), [0.3, 0.4]);
         assert_eq!(effect.emitters[1].emission.cycle_length, 2.0);
+        assert_eq!(effect.emitters[1].emission.sphere, Some([3.0, 6.0]));
         assert!(effect.emitters[1].particle.additive);
         assert_eq!(effect.emitters[1].particle.sequences, [Vec::new()]);
     }
