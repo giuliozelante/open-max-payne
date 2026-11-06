@@ -4,6 +4,7 @@ pub mod clips;
 pub mod decals;
 pub mod frontend;
 pub mod gpu;
+pub mod health;
 pub mod hud;
 pub mod items;
 pub mod kf2;
@@ -2755,6 +2756,12 @@ fn load_flying(source: &mut GameSource, name: &str) -> Option<projectiles::Flyin
     Some(def)
 }
 
+/// The health multipliers of `\\data\\difficulty.txt`.
+pub fn load_difficulty(game_dir: &Path) -> Option<health::Difficulty> {
+    let text = read_game_bytes(game_dir, r"\data\difficulty.txt")?;
+    health::Difficulty::parse(&String::from_utf8_lossy(&text))
+}
+
 /// `weaponpriority.txt` `[BestWeapons]`, strongest first.
 pub fn load_best_weapons(game_dir: &Path) -> Vec<String> {
     read_game_bytes(game_dir, r"\data\weaponpriority.txt")
@@ -4811,6 +4818,20 @@ mod tests {
         assert_eq!(entries[0].ambient, Some([140.0, 135.0, 110.0]));
         assert_eq!(entries[1].ambient, Some([32.0, 33.0, 34.0]));
         assert_eq!(entries[2].ambient, None);
+    }
+
+    #[test]
+    fn retail_difficulty_scales_enemies_and_leaves_max_alone() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        if !game.is_dir() {
+            return;
+        }
+        let difficulty = load_difficulty(&game).expect("difficulty.txt");
+        assert_eq!(difficulty.enemy_health, 0.8);
+        assert_eq!(difficulty.player_health, 1.0);
     }
 
     #[test]
