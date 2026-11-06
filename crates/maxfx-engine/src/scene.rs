@@ -519,12 +519,12 @@ pub struct ScenePortalExit {
 }
 
 /// What a script tells a character to do.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CharacterOrder {
     /// `C_Teleport`: go to the start point of this name, and face its way.
     Teleport(String),
-    /// `C_SetHealth`.
-    SetHealth(i32),
+    /// `C_SetHealth`: a fraction of maximum health (0x699ad0; 0x6999a0 refuses anything outside 0..1).
+    SetHealth(f32),
 }
 
 #[derive(Debug, Clone)]
@@ -1224,8 +1224,8 @@ impl LdbScene {
                 true
             }
             "c_sethealth" => {
-                let health = msg.args.first().and_then(|a| a.trim().parse::<i32>().ok());
-                let Some(health) = health else {
+                let health = msg.args.first().and_then(|a| a.trim().parse::<f32>().ok());
+                let Some(health) = health.filter(|health| (0.0..=1.0).contains(health)) else {
                     return false;
                 };
                 let order = CharacterOrder::SetHealth(health);
@@ -3365,9 +3365,23 @@ mod tests {
                     "::Teleport::E01".to_string(),
                     CharacterOrder::Teleport("::Street::Tele_02".to_string())
                 ),
-                ("::Teleport::E01".to_string(), CharacterOrder::SetHealth(1)),
+                (
+                    "::Teleport::E01".to_string(),
+                    CharacterOrder::SetHealth(1.0)
+                ),
             ]
         );
+    }
+
+    #[test]
+    fn set_health_takes_a_fraction_and_refuses_anything_outside_it() {
+        let mut scene = LdbScene::default();
+        assert!(scene.dispatch_message("", "::E01->C_SetHealth(0.25);"));
+        assert_eq!(
+            scene.character_orders,
+            [("::E01".to_string(), CharacterOrder::SetHealth(0.25))]
+        );
+        assert!(!scene.dispatch_message("", "::E01->C_SetHealth(60);"));
     }
 
     #[test]

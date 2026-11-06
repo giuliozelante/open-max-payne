@@ -77,7 +77,9 @@ struct EnemyState {
     world_pos: [f32; 3],
     yaw: f32,
     walk_phase: f32,
-    health: i32,
+    health: f32,
+    /// The skin's `MaximumHealth` times `EnemyHealthMultiplier` (0x691bd0).
+    max_health: f32,
     hit_flash: f32,
     rig_index: usize,
     pursues: bool,
@@ -129,6 +131,8 @@ pub fn run_3d_walkthrough(
     let johnny_index = if bodies.is_empty() { None } else { Some(0) };
     let mut skin_cache: BTreeMap<String, (usize, bool)> = BTreeMap::new();
 
+    let enemy_health = crate::load_difficulty(&catalog_root(level_path))
+        .map_or(1.0, |difficulty| difficulty.enemy_health);
     // Build active enemies from `scene.characters` (already C_Teleport-resolved)
     let mut enemies: Vec<EnemyState> = Vec::new();
     for ch in &scene.characters {
@@ -157,17 +161,15 @@ pub fn run_3d_walkthrough(
         ) {
             wy = fy;
         }
+        let max_health = bodies[rig_index].max_health.max(1) as f32 * enemy_health;
         enemies.push(EnemyState {
             name: ch.name.clone(),
             room_id: ch.room_id,
             world_pos: [ro[0] + ch.pos[0], wy, ro[2] + ch.pos[2]],
             yaw: 0.0,
             walk_phase: 0.0,
-            health: if ch.starts_dead() {
-                0
-            } else {
-                bodies[rig_index].max_health.max(1)
-            },
+            health: if ch.starts_dead() { 0.0 } else { max_health },
+            max_health,
             hit_flash: 0.0,
             rig_index,
             pursues: ch.pursues(),
@@ -774,7 +776,7 @@ pub fn run_3d_walkthrough(
                 // Raycast against living enemies
                 let mut best_hit: Option<(usize, f32)> = None;
                 for (idx, en) in enemies.iter().enumerate() {
-                    if en.health <= 0 || en.invulnerable {
+                    if en.health <= 0.0 || en.invulnerable {
                         continue;
                     }
                     if let Some(t) = ray_hits_character(aim_from, aim_dir, en.world_pos) {
@@ -963,7 +965,7 @@ pub fn run_3d_walkthrough(
         for (pos, blast) in blasts {
             for en in enemies
                 .iter_mut()
-                .filter(|en| en.health > 0 && !en.invulnerable)
+                .filter(|en| en.health > 0.0 && !en.invulnerable)
             {
                 let far =
                     crate::projectiles::distance_to_character(pos, en.world_pos, ENEMY_HEIGHT);
@@ -1111,7 +1113,7 @@ pub fn run_3d_walkthrough(
                     queue_sound(&mut scene, catalog, cue, en.world_pos);
                 }
             }
-            if en.health <= 0 || !en.pursues {
+            if en.health <= 0.0 || !en.pursues {
                 continue;
             }
             let dx = player_feet[0] - en.world_pos[0];
@@ -1280,7 +1282,7 @@ pub fn run_3d_walkthrough(
                             en.yaw,
                             time,
                             moving,
-                            en.health <= 0,
+                            en.health <= 0.0,
                         ),
                     };
                     let light = character_vertex_light(
@@ -1294,7 +1296,7 @@ pub fn run_3d_walkthrough(
                     characters.push(crate::gpu::GpuCharacter {
                         mesh: &erig.mesh,
                         verts,
-                        two_sided: en.health <= 0 && dying.is_none(),
+                        two_sided: en.health <= 0.0 && dying.is_none(),
                         light,
                     });
                 }
@@ -1417,7 +1419,7 @@ pub fn run_3d_walkthrough(
                 let dying = en
                     .death
                     .and_then(|(clip, time, _)| Some((death_clips.get(clip)?, time)));
-                let dead = en.health <= 0 && dying.is_none();
+                let dead = en.health <= 0.0 && dying.is_none();
                 let verts = match dying {
                     Some((death, time)) => {
                         dying_world_verts(erig, death, en.world_pos, en.yaw, time)
@@ -3733,7 +3735,7 @@ fn flight_contact(
     let dir = delta.map(|c| c / length);
     let enemy = enemies
         .iter()
-        .filter(|en| en.health > 0)
+        .filter(|en| en.health > 0.0)
         .filter_map(|en| ray_hits_character(from, dir, en.world_pos))
         .map(|t| t / length)
         .filter(|t| *t <= 1.0)
@@ -3747,15 +3749,15 @@ fn flight_contact(
 
 /// Take `damage` off `en`. True if that killed it.
 fn hurt_enemy(en: &mut EnemyState, damage: i32, scene: &mut LdbScene, clips: usize) -> bool {
-    let alive = en.health > 0;
-    en.health -= damage;
+    let alive = en.health > 0.0;
+    en.health -= damage as f32;
     en.hit_flash = 0.25;
     println!(
         "  3D Engine: Hit {}! (health={})",
         en.name,
-        en.health.max(0)
+        en.health.max(0.0)
     );
-    if !alive || en.health > 0 {
+    if !alive || en.health > 0.0 {
         return false;
     }
     scene.kill_character(&en.name);
@@ -3824,7 +3826,7 @@ fn obey(
     rooms: &BTreeMap<i32, [f32; 3]>,
 ) {
     match order {
-        crate::scene::CharacterOrder::SetHealth(health) => en.health = *health,
+        crate::scene::CharacterOrder::SetHealth(health) => en.health = health * en.max_health,
         crate::scene::CharacterOrder::Teleport(place) => {
             let found = scene
                 .jumppoints
@@ -5392,7 +5394,8 @@ mod tests {
             world_pos: [0.0; 3],
             yaw: 0.0,
             walk_phase: 0.0,
-            health: 100,
+            health: 100.0,
+            max_health: 80.0,
             hit_flash: 0.0,
             rig_index: 0,
             pursues: false,
@@ -5414,9 +5417,9 @@ mod tests {
             "{}",
             en.yaw
         );
-        let health = crate::scene::CharacterOrder::SetHealth(1);
+        let health = crate::scene::CharacterOrder::SetHealth(0.5);
         obey(&mut en, &health, &scene, &rooms);
-        assert_eq!(en.health, 1);
+        assert_eq!(en.health, 40.0);
     }
 
     #[test]
