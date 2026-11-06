@@ -456,8 +456,8 @@ struct CharacterCache {
 pub struct GpuCharacter<'a> {
     pub mesh: &'a KfsMesh,
     pub verts: Vec<[f32; 3]>,
-    /// Lying dead: drawn two-sided (`character_face_normal`).
-    pub dead: bool,
+    /// Drawn from both sides (`character_face_normal`): lying dead, or a held weapon.
+    pub two_sided: bool,
     /// Per-vertex diffuse from `character_vertex_light`.
     pub light: Vec<[f32; 3]>,
 }
@@ -1640,7 +1640,7 @@ impl GpuRenderer {
                 let material = face.mat_index.min(materials - 1);
                 let out = by_material.entry(material).or_default();
                 let normal =
-                    crate::render3d::character_face_normal(&ch.verts, face.indices, ch.dead);
+                    crate::render3d::character_face_normal(&ch.verts, face.indices, ch.two_sided);
                 let cull_ref = ch.verts.get(face.indices[0]).copied().unwrap_or([0.0; 3]);
                 for (k, &i) in face.indices.iter().enumerate() {
                     let Some(&pos) = ch.verts.get(i) else {
@@ -2175,7 +2175,7 @@ mod tests {
             let character = GpuCharacter {
                 mesh: &rig.mesh,
                 verts,
-                dead: false,
+                two_sided: false,
                 light,
             };
             let mut fb = vec![0u32; w * h];
@@ -2211,7 +2211,7 @@ mod tests {
             let character = GpuCharacter {
                 mesh: &rig.mesh,
                 verts,
-                dead: false,
+                two_sided: false,
                 light,
             };
             let mut fb = vec![0u32; w * h];
