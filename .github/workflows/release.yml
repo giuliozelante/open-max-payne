@@ -11,6 +11,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # .cargo/config.toml limits local builds to one job and one linker thread.
+  # Release builds run at full speed: an empty RUSTFLAGS drops the linker limit.
+  CARGO_BUILD_JOBS: default
+  RUSTFLAGS: ""
 
 jobs:
   build:
