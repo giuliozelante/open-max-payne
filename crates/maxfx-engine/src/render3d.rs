@@ -84,6 +84,8 @@ struct EnemyState {
     rig_index: usize,
     pursues: bool,
     invulnerable: bool,
+    /// Waits out of the world in a sealed room until a script teleports it.
+    held: bool,
     /// Index of the death clip, seconds into it, and how many of its sounds have played.
     death: Option<(usize, f32, usize)>,
 }
@@ -133,7 +135,7 @@ pub fn run_3d_walkthrough(
 
     let enemy_health = crate::load_difficulty(&catalog_root(level_path))
         .map_or(1.0, |difficulty| difficulty.enemy_health);
-    // Build active enemies from `scene.characters` (already C_Teleport-resolved)
+    // Build active enemies from `scene.characters`, which wait until a script teleports them.
     let mut enemies: Vec<EnemyState> = Vec::new();
     for ch in &scene.characters {
         let key = ch.skin.to_ascii_lowercase();
@@ -174,10 +176,12 @@ pub fn run_3d_walkthrough(
             rig_index,
             pursues: ch.pursues(),
             invulnerable,
+            held: false,
             death: None,
         });
     }
     let mut jp_idx = scene.spawn_jumppoint_index(player_start);
+    let start_room = scene.jumppoints.get(jp_idx).map_or(-1, |jp| jp.room_id);
 
     let mut player_pos = spawn_pos(&scene, &room_origins, jp_idx);
     let mut yaw: f32 = scene.jumppoints.get(jp_idx).map_or(0.0, |jp| jp.yaw());
@@ -801,7 +805,7 @@ pub fn run_3d_walkthrough(
                 // Raycast against living enemies
                 let mut best_hit: Option<(usize, f32)> = None;
                 for (idx, en) in enemies.iter().enumerate() {
-                    if en.health <= 0.0 || en.invulnerable {
+                    if en.health <= 0.0 || en.invulnerable || en.held {
                         continue;
                     }
                     if let Some(t) = ray_hits_character(aim_from, aim_dir, en.world_pos) {
@@ -990,7 +994,7 @@ pub fn run_3d_walkthrough(
         for (pos, blast) in blasts {
             for en in enemies
                 .iter_mut()
-                .filter(|en| en.health > 0.0 && !en.invulnerable)
+                .filter(|en| en.health > 0.0 && !en.invulnerable && !en.held)
             {
                 let far =
                     crate::projectiles::distance_to_character(pos, en.world_pos, ENEMY_HEIGHT);
@@ -1108,6 +1112,9 @@ pub fn run_3d_walkthrough(
                 obey(en, &order, &scene, &room_origins);
             }
         }
+        for en in &mut enemies {
+            en.held = en.room_id != start_room && scene.room_sealed(en.room_id);
+        }
 
         if let Some(max) = player_health.as_mut() {
             max.step(world_dt);
@@ -1146,7 +1153,7 @@ pub fn run_3d_walkthrough(
                     queue_sound(&mut scene, catalog, cue, en.world_pos);
                 }
             }
-            if en.health <= 0.0 || !en.pursues {
+            if en.health <= 0.0 || !en.pursues || en.held {
                 continue;
             }
             let dx = player_feet[0] - en.world_pos[0];
@@ -1298,7 +1305,7 @@ pub fn run_3d_walkthrough(
         let mut characters = Vec::new();
         let mut scene_view = None;
         if gpu.is_some() && !wireframe {
-            for en in &enemies {
+            for en in enemies.iter().filter(|en| !en.held) {
                 if let Some(erig) = bodies.get(en.rig_index) {
                     let moving = en.walk_phase > 0.0;
                     let time = if moving { en.walk_phase } else { anim_clock };
@@ -1445,7 +1452,7 @@ pub fn run_3d_walkthrough(
         // 3. Render each character with the skin the level named (the hardware renderer drew
         // them in step 1).
         let cpu_characters = gpu.is_none() || wireframe;
-        for en in enemies.iter().filter(|_| cpu_characters) {
+        for en in enemies.iter().filter(|en| cpu_characters && !en.held) {
             if let Some(erig) = bodies.get(en.rig_index) {
                 let moving = en.walk_phase > 0.0;
                 let time = if moving { en.walk_phase } else { anim_clock };
@@ -3770,7 +3777,7 @@ fn flight_contact(
     let dir = delta.map(|c| c / length);
     let enemy = enemies
         .iter()
-        .filter(|en| en.health > 0.0)
+        .filter(|en| en.health > 0.0 && !en.held)
         .filter_map(|en| ray_hits_character(from, dir, en.world_pos))
         .map(|t| t / length)
         .filter(|t| *t <= 1.0)
@@ -5441,6 +5448,7 @@ mod tests {
             rig_index: 0,
             pursues: false,
             invulnerable: false,
+            held: false,
             death: None,
         };
         let place = "::street::tele_02".to_string();
@@ -6673,6 +6681,7 @@ mod tests {
             global_speed: crate::scene::Ramp::at(1.0),
             slow_motion_level: None,
             character_orders: Vec::new(),
+            closed_exits: Default::default(),
             screen_flash: None,
             inventory: Default::default(),
             hud_prints: Vec::new(),
