@@ -364,7 +364,7 @@ fn strip_block_comments(text: &str) -> String {
 }
 
 /// `value` with each `#define`d word replaced.
-fn expand(value: &str, defines: &BTreeMap<String, String>) -> String {
+pub(crate) fn expand(value: &str, defines: &BTreeMap<String, String>) -> String {
     let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
     let mut out = String::new();
     let mut word = String::new();
