@@ -105,6 +105,8 @@ pub fn skin_max_health(text: &str, ai_ranges: &str) -> Option<i32> {
 pub struct DeathClip {
     pub clip: Kf2Anim,
     pub sounds: Vec<(f32, String, String)>,
+    /// `(seconds, projectile)` of what it throws from the body, in order.
+    pub blood: Vec<(f32, crate::hud::SplatterDef)>,
 }
 
 /// Time of the clip's last key: `sample_locals` wraps at its duration, so a pose that must hold

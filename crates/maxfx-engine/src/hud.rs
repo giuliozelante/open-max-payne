@@ -796,6 +796,25 @@ pub fn parse_clip_sounds(skeleton: &str, index: &str) -> Vec<(u32, String, Strin
         .collect()
 }
 
+/// `(frame, projectile, count)` of each `P_CreateProjectileToBone` in the `[Animation]` of `index`.
+pub fn parse_clip_projectiles(skeleton: &str, index: &str) -> Vec<(u32, String, u32)> {
+    let header = format!("Index = {index};");
+    skeleton
+        .lines()
+        .skip_while(|line| !line.contains(&header))
+        .skip(1)
+        .take_while(|line| !line.contains("[Animation]"))
+        .filter_map(|line| {
+            // The skeleton spells the verb in more than one case.
+            let line = line.to_ascii_lowercase();
+            let frame = line.split_once("frame =")?.1.split(';').next()?;
+            let name = weapon_cue_line(&line, "p_createprojectiletobone", 0)?;
+            let count = weapon_cue_line(&line, "p_createprojectiletobone", 1)?;
+            Some((frame.trim().parse().ok()?, name, count.parse().ok()?))
+        })
+        .collect()
+}
+
 /// Argument `arg` of the first `verb` message in the `[Animation]` of `index`.
 pub(crate) fn weapon_cue(weapon_txt: &str, index: &str, verb: &str, arg: usize) -> Option<String> {
     let header = format!("Index = {index};");
@@ -1509,6 +1528,18 @@ mod tests {
             pocket,
             infinite,
         })
+    }
+
+    #[test]
+    fn a_death_clip_names_the_blood_it_leaves_whatever_the_verbs_case() {
+        let text = "\t[Animation] Index = CHARANIM_RANDOMDEATH1; Filename = a.kf2;\n\t\t[Message] Frame = 38; String = \"this->P_CreateProjectileToBone( blood_dummy, 2, torso );\";\n\t\t[Message] Frame = 90; String = \"this->P_CreateprojectileToBone( dummy_smokingbody, 1, shoulders );\";\n\t[Animation] Index = CHARANIM_RANDOMDEATH2; Filename = b.kf2;\n";
+        assert_eq!(
+            parse_clip_projectiles(text, "CHARANIM_RANDOMDEATH1"),
+            [
+                (38, "blood_dummy".to_string(), 2),
+                (90, "dummy_smokingbody".to_string(), 1)
+            ]
+        );
     }
 
     #[test]

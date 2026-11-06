@@ -2869,7 +2869,21 @@ pub fn load_death_clips(game_dir: &Path) -> Vec<kf2::DeathClip> {
                 .into_iter()
                 .map(|(frame, catalog, cue)| (frame as f32 / fps, catalog, cue))
                 .collect();
-            Some(kf2::DeathClip { clip, sounds })
+            let blood = hud::parse_clip_projectiles(&skeleton, &index)
+                .into_iter()
+                .filter_map(|(frame, name, count)| {
+                    let path = format!(r"\data\database\projectiles\{name}.txt");
+                    let file = source.read(&path)?;
+                    let file = String::from_utf8_lossy(&file);
+                    let blood = hud::SplatterDef::parse(&file, count)?;
+                    blood.decal.is_some().then(|| (frame as f32 / fps, blood))
+                })
+                .collect();
+            Some(kf2::DeathClip {
+                clip,
+                sounds,
+                blood,
+            })
         })
         .collect()
 }
@@ -4715,6 +4729,25 @@ mod tests {
         for name in ["grenade", "molotov", "m79"] {
             let model = defs[name].flying[0].0.model.as_deref().expect("model");
             assert!(load_flying_model(&game, model).is_some(), "{name}: {model}");
+        }
+    }
+
+    #[test]
+    fn retail_death_clips_leave_a_pool_of_blood() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(home).join("Games/MaxPayne1");
+        if !game.is_dir() {
+            return;
+        }
+        let clips = load_death_clips(&game);
+        assert!(!clips.is_empty());
+        for clip in &clips {
+            let (_, blood) = clip.blood.first().expect("every death bleeds");
+            assert_eq!(blood.count, 2);
+            assert_eq!(blood.decal.as_deref(), Some("blood_large"));
+            assert_eq!(blood.speed, 3.0);
         }
     }
 
