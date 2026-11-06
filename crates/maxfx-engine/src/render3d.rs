@@ -241,6 +241,7 @@ pub fn run_3d_walkthrough(
     scene.apply_startup_items();
     scene.apply_startup_sends();
     scene.apply_startup_animates();
+    scene.apply_startup_effects();
     if cinematic {
         // The scripts own the camera; the player body stays where the level puts it (Max with the
         // sniper rifle on the rooftop in the startup intro).
