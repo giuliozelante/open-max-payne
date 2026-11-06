@@ -1767,6 +1767,23 @@ impl LdbScene {
         }
     }
 
+    /// Startup `PS_StartEffect` only: the Tutorial's snow emitters start this way.
+    pub fn apply_startup_effects(&mut self) {
+        let scripts: Vec<(String, String)> = self
+            .fsms
+            .iter()
+            .flat_map(|fsm| {
+                fsm.startup_actions.iter().filter_map(|act| {
+                    let verb = Message::parse(act)?.verb.to_ascii_lowercase();
+                    (verb == "ps_starteffect").then(|| (fsm.name.clone(), act.clone()))
+                })
+            })
+            .collect();
+        for (name, act) in scripts {
+            self.dispatch_message(&name, &act);
+        }
+    }
+
     /// Subtract `amount` from a mesh that has hit points. At zero, run its `DO_OnDeath` hook.
     pub fn damage_mesh(&mut self, index: usize, amount: i32) -> bool {
         let Some(mesh) = self.dynamic_meshes.get_mut(index) else {
@@ -3781,6 +3798,17 @@ mod tests {
             target_room_id,
             target_exit_name: String::new(),
         }
+    }
+
+    #[test]
+    fn a_startup_effect_starts_with_the_level() {
+        let mut scene = door_fsm_scene();
+        scene.fsms[0].name = "::alley::snow1".into();
+        scene.fsms[0].startup_actions =
+            vec!["::alley::snow1->ps_starteffect(medium_snowfall_7m_loop, \"\");".into()];
+        scene.apply_startup_effects();
+        assert_eq!(scene.effect_queue.len(), 1);
+        assert_eq!(scene.effect_queue[0].effect, "medium_snowfall_7m_loop");
     }
 
     #[test]
