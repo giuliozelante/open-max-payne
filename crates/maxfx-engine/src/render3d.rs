@@ -213,6 +213,9 @@ pub fn run_3d_walkthrough(
     // Seconds into the player's shot or reload clip.
     let mut action_time: f32 = 0.0;
     let mut reload_seen = false;
+    // Reach of the melee weapon swung last, and the clip times of its blows still to land.
+    let mut melee: Option<f32> = None;
+    let mut melee_blows: Vec<f32> = Vec::new();
     // Seconds until the reload's sound, and its cue.
     let mut reload_cue: Option<(f32, String)> = None;
     let mut fly_mode = false;
@@ -581,6 +584,7 @@ pub fn run_3d_walkthrough(
         mouse_fire_held = mouse_fire;
         // The last round can switch the weapon, so this is read before firing.
         let shooter = scene.inventory.current.clone();
+        let mut shooting = false;
         if fire_pressed && scene.player_controls && shot_timer <= 0.0 && scene.inventory.fire() {
             let def = shooter.and_then(|name| scene.inventory.defs.get(&name).cloned());
             let def = def.unwrap_or_default();
@@ -589,6 +593,8 @@ pub fn run_3d_walkthrough(
             if let Some(cue) = &def.fire_sound {
                 queue_weapon_sound(&mut scene, cue, feet);
             }
+            melee = def.melee_reach;
+            melee_blows.clone_from(&def.melee_blows);
             if let Some(rig) = player_rig.as_mut() {
                 rig.action = def.fire_clip.clone();
                 action_time = 0.0;
@@ -600,13 +606,23 @@ pub fn run_3d_walkthrough(
                     hit_effects.start_muzzle(&mut particle_sprites, muzzle, frame);
                 }
             }
+            shooting = melee.is_none();
+        }
+        let blow_due = melee_blows.first().is_some_and(|at| action_time >= *at);
+        if blow_due {
+            melee_blows.remove(0);
+        }
+        if shooting || blow_due {
+            let reach = if blow_due { melee } else { None };
             let aim_dir = [sy * cp, sp, cy * cp];
-            // The dot marks the view's centre, so the shot leaves from the camera.
-            let aim_from = if third_person && !fly_mode {
+            // The dot marks the view's centre, so a bullet leaves from the camera. A blow leaves
+            // from Max.
+            let aim_from = if third_person && !fly_mode && reach.is_none() {
                 chase_camera(&scene, &chase_rig, player_pos, aim_dir)
             } else {
                 player_pos
             };
+            let within = |t: f32| reach.is_none_or(|reach| t <= reach);
             // Raycast against living enemies
             let mut best_hit: Option<(usize, f32)> = None;
             for (idx, en) in enemies.iter().enumerate() {
@@ -614,13 +630,14 @@ pub fn run_3d_walkthrough(
                     continue;
                 }
                 if let Some(t) = ray_hits_character(aim_from, aim_dir, en.world_pos) {
-                    if t <= 100.0 && best_hit.is_none_or(|(_, b)| t < b) {
+                    if t <= 100.0 && within(t) && best_hit.is_none_or(|(_, b)| t < b) {
                         best_hit = Some((idx, t));
                     }
                 }
             }
-            let level_hit = aim_hit_level(&scene, aim_from, aim_dir);
+            let level_hit = aim_hit_level(&scene, aim_from, aim_dir).filter(|hit| within(hit.0));
             let mesh_hit = aim_hit_dynamic(&scene, &room_origins, aim_from, aim_dir)
+                .filter(|hit| within(hit.1))
                 .filter(|hit| level_hit.is_none_or(|level| hit.1 < level.0));
             let category = |scene: &LdbScene, id: i32| {
                 let material = scene.materials.get(&id);
@@ -631,11 +648,13 @@ pub fn run_3d_walkthrough(
                 (Some((midx, mt, normal, material)), enemy)
                     if enemy.is_none_or(|(_, et)| mt < et) =>
                 {
-                    let kind = category(&scene, material);
-                    decals.add(&kind, at(mt), normal, aim_dir, Some(midx));
-                    let frame = crate::decals::surface_frame(normal, aim_dir);
-                    let hit = at(mt);
-                    hit_effects.start(&mut scene, &mut particle_sprites, &kind, hit, frame);
+                    if reach.is_none() {
+                        let kind = category(&scene, material);
+                        decals.add(&kind, at(mt), normal, aim_dir, Some(midx));
+                        let frame = crate::decals::surface_frame(normal, aim_dir);
+                        let hit = at(mt);
+                        hit_effects.start(&mut scene, &mut particle_sprites, &kind, hit, frame);
+                    }
                     let scripted = scene.bullet_hits(midx);
                     println!(
                         "  3D Engine: shot hit {} at {mt:.1} m (scripted: {scripted})",
@@ -670,7 +689,7 @@ pub fn run_3d_walkthrough(
                     );
                 }
                 _ => {
-                    if let Some((t, normal, material)) = level_hit {
+                    if let Some((t, normal, material)) = level_hit.filter(|_| reach.is_none()) {
                         let kind = category(&scene, material);
                         decals.add(&kind, at(t), normal, aim_dir, None);
                         let frame = crate::decals::surface_frame(normal, aim_dir);

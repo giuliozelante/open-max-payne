@@ -492,6 +492,10 @@ pub struct WeaponDef {
     pub fire_clip: Option<crate::kf2::Kf2Anim>,
     /// `CHARANIM_RELOAD<WEAPON>`.
     pub reload_clip: Option<crate::kf2::Kf2Anim>,
+    /// Metres a melee weapon reaches; `None` for a gun.
+    pub melee_reach: Option<f32>,
+    /// Seconds into the shoot clip of each melee blow.
+    pub melee_blows: Vec<f32>,
 }
 
 impl WeaponDef {
@@ -520,6 +524,8 @@ impl WeaponDef {
             reload_sound_delay: 0.0,
             fire_clip: None,
             reload_clip: None,
+            melee_reach: None,
+            melee_blows: Vec::new(),
             model: weapon_txt
                 .split_once("[LOD]")
                 .and_then(|(_, lod)| lod.split_once("ExportData"))
@@ -532,6 +538,50 @@ impl WeaponDef {
                 }),
         })
     }
+}
+
+/// Reach of a melee projectile: it flies `Speed` for `ExplosionDelay`, then `P_Explosion` reaches
+/// its first argument further. HYPOTHESIS: that argument is the blast radius.
+pub fn parse_melee_reach(projectile_txt: &str) -> Option<f32> {
+    let attribute = |name: &str| {
+        projectile_txt.lines().find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            let value = value.split(';').next()?.trim();
+            key.trim()
+                .eq_ignore_ascii_case(name)
+                .then_some(value)?
+                .parse::<f32>()
+                .ok()
+        })
+    };
+    let blast = weapon_cue_line(projectile_txt, "P_Explosion", 0)?
+        .parse::<f32>()
+        .ok()?;
+    Some(attribute("Speed")? * attribute("ExplosionDelay")? + blast)
+}
+
+/// Argument `arg` of the first `verb` call in `lines`.
+fn weapon_cue_line(text: &str, verb: &str, arg: usize) -> Option<String> {
+    let (_, call) = text.split_once(verb)?;
+    let args = call.trim_start().strip_prefix('(')?;
+    let args = args.split(')').next()?;
+    Some(args.split(',').nth(arg)?.trim().to_string())
+}
+
+/// `(frame, projectile)` of each `p_createprojectiletobone` in the `[Animation]` of `index`.
+pub fn parse_bone_projectiles(skeleton: &str, index: &str) -> Vec<(u32, String)> {
+    let header = format!("Index = {index};");
+    skeleton
+        .lines()
+        .skip_while(|line| !line.contains(&header))
+        .skip(1)
+        .take_while(|line| !line.contains("[Animation]"))
+        .filter_map(|line| {
+            let frame = line.split_once("Frame =")?.1.split(';').next()?;
+            let name = weapon_cue_line(line, "p_createprojectiletobone", 0)?;
+            Some((frame.trim().parse().ok()?, name))
+        })
+        .collect()
 }
 
 /// Argument `arg` of the first `verb` message in the `[Animation]` of `index`.
@@ -1290,6 +1340,27 @@ mod tests {
     fn reload_sound_frames_come_from_the_weapons_ws_animate() {
         let text = "\t[Animation] Index = CHARANIM_RELOADBERETTA; Filename = r.kf2;\n\t{\n\t\t[Message] Frame = 0; String = \"RightHandWeapon->WS_Hide( FALSE );\";\n\t\t[Message] Frame = 10; String = \"RightHandWeapon->WS_Animate(\" WEAPONANIM_RELOAD \");\";\n\t}\n";
         assert_eq!(parse_reload_sound_frames(text)["beretta"], 10);
+    }
+
+    #[test]
+    fn a_melee_projectile_reaches_its_flight_and_blast() {
+        let text = "[Animationset]\n{\n[Message] Frame = 0; String = \"this->P_Explosion( 0.80, 0.801, 9, 8.99, FALSE );\";\n}\n[Attributes]\nSpeed \t\t= 20;\nDelayedExplosion \t\t= TRUE;\nExplosionDelay\t\t\t= 0.05;\n";
+        let reach = parse_melee_reach(text).expect("melee");
+        assert!((reach - 1.8).abs() < 1e-5, "{reach}");
+        // A bullet does not explode.
+        assert_eq!(parse_melee_reach("Speed = 400;\n"), None);
+    }
+
+    #[test]
+    fn bone_projectiles_list_each_blow_of_the_clip() {
+        let text = "[Animation] Index = CHARANIM_SHOOTLEADPIPE; Filename = a.kf2;\n{\n[Message] Frame = 0; String = \"this->C_AnimateTexture( 1 );\";\n[Message] Frame = 7; String = \"this->p_createprojectiletobone( bullet_leadpipe, 1, neck );\";\n[Message] Frame = 31; String = \"this->p_createprojectiletobone( bullet_leadpipe, 1, neck );\";\n}\n[Animation] Index = CHARANIM_SHOOTLOWLEADPIPE; Filename = b.kf2;\n[Message] Frame = 9; String = \"this->p_createprojectiletobone( other, 1, neck );\";\n";
+        assert_eq!(
+            parse_bone_projectiles(text, "CHARANIM_SHOOTLEADPIPE"),
+            [
+                (7, "bullet_leadpipe".to_string()),
+                (31, "bullet_leadpipe".to_string())
+            ]
+        );
     }
 
     #[test]
