@@ -190,6 +190,8 @@ pub fn run_3d_walkthrough(
     let mut shot_timer: f32 = 0.0;
     // Seconds into the player's shot or reload clip.
     let mut action_time: f32 = 0.0;
+    // `(seconds into the clip, message)` of the painkiller still to come.
+    let mut pill_messages: Vec<(f32, String)> = Vec::new();
     // The `CHARANIM_` index of `CharacterRig::action`.
     let mut action_index = String::new();
     let mut reload_seen = 0;
@@ -451,7 +453,7 @@ pub fn run_3d_walkthrough(
         let rate = weapon.map_or(1.0, |def| def.slow_motion_rate);
         shot_timer = (shot_timer - cycle_seconds(base_dt, world_dt, rate)).max(0.0);
 
-        if window.is_key_pressed(Key::Tab, KeyRepeat::No) && !scene.jumppoints.is_empty() {
+        if window.is_key_pressed(Key::F2, KeyRepeat::No) && !scene.jumppoints.is_empty() {
             jp_idx = (jp_idx + 1) % scene.jumppoints.len();
             player_pos = spawn_pos(&scene, &room_origins, jp_idx);
             yaw = scene.jumppoints[jp_idx].yaw();
@@ -463,9 +465,46 @@ pub fn run_3d_walkthrough(
                 );
             }
         }
-        if window.is_key_pressed(Key::G, KeyRepeat::No) {
+        if window.is_key_pressed(Key::F3, KeyRepeat::No) {
             fly_mode = !fly_mode;
             vel_y = 0.0;
+        }
+        if scene.player_controls && window.is_key_pressed(Key::G, KeyRepeat::No) {
+            scene.inventory.take_best_loaded();
+        }
+        let pill_key = window.is_key_pressed(Key::Tab, KeyRepeat::No)
+            || window.is_key_pressed(Key::Backspace, KeyRepeat::No);
+        let hurt = player_health
+            .as_ref()
+            .is_some_and(|max| max.health < max.max);
+        // HYPOTHESIS: retail keeps the pills at full health.
+        if pill_key
+            && hurt
+            && scene.player_controls
+            && pill_messages.is_empty()
+            && scene.inventory.take_painkiller()
+        {
+            let index = "CHARANIM_SHOOTPAINKILLER";
+            let clip = scene.inventory.defs.get("painkiller");
+            let clip = clip.and_then(|def| def.fire_clip.clone());
+            let rate = clip
+                .as_ref()
+                .and_then(|clip| clip.bones.first())
+                .map(|b| b.fps);
+            pill_messages = player_clips
+                .table
+                .get(index)
+                .map_or(Vec::new(), |def| def.messages.clone())
+                .into_iter()
+                .map(|(frame, text)| (frame as f32 / rate.unwrap_or(1.0).max(1.0), text))
+                .collect();
+            action_time = 0.0;
+            action_index = "CHARANIM_SHOOT".to_string();
+            if let Some(rig) = player_rig.as_mut() {
+                rig.action = clip;
+                rig.action_time = 0.0;
+                rig.aim = None;
+            }
         }
         if window.is_key_pressed(Key::L, KeyRepeat::No) {
             use_lightmaps = !use_lightmaps;
@@ -1059,6 +1098,22 @@ pub fn run_3d_walkthrough(
             }
         }
         action_time += world_dt;
+        let (due, later) = std::mem::take(&mut pill_messages)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(at, _)| *at <= action_time);
+        pill_messages = later;
+        for (_, text) in due {
+            use crate::player::ClipEffect;
+            match crate::player::clip_effect(&text) {
+                Some(ClipEffect::Sound { catalog, cue }) => {
+                    let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+                    queue_sound(&mut scene, &catalog, &cue, feet);
+                }
+                _ => {
+                    scene.dispatch_message("", &text.replacen("this->", "player->", 1));
+                }
+            }
+        }
         if let Some(rig) = player_rig.as_mut() {
             rig.action_time = action_time;
             rig.aim_pitch = pitch;

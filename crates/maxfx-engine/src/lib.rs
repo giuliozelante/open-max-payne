@@ -4846,6 +4846,7 @@ mod tests {
         let weapons = load_weapon_defs(&game);
         assert_eq!(weapons["beretta"].slot, Some(1));
         assert_eq!(weapons["pumpshotgun"].slot, Some(2));
+        assert!(weapons["painkiller"].fire_clip.is_some());
         assert_eq!(difficulty.player_health, 1.0);
         assert_eq!(difficulty.regenerate, 0.04);
         assert_eq!(difficulty.gained_immediately, 0.05);
