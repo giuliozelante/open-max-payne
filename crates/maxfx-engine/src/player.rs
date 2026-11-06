@@ -290,6 +290,11 @@ impl PlayerMotion {
                 _ => {}
             }
             self.finish(c);
+        } else if self.state == State::Dive
+            && clips.abort_dive_frame > 0
+            && after * rate >= clips.abort_dive_frame as f32
+        {
+            self.finish(c);
         }
         MotionStep {
             clip: Some(clip),
@@ -489,6 +494,7 @@ mod tests {
                 .map(|(name, frames)| (name.to_string(), anim(*frames)))
                 .collect(),
             airborne_speed: 2.0,
+            abort_dive_frame: 20,
         }
     }
 
@@ -710,6 +716,24 @@ mod tests {
         );
         motion.step(&clips, &grounded(), 1.0);
         assert_eq!(motion.state, State::Ground);
+    }
+
+    #[test]
+    fn a_dive_on_the_ground_gets_up_at_its_abort_frame() {
+        let clips = clips();
+        let mut motion = PlayerMotion::default();
+        let c = Controls {
+            forward: 1,
+            dodge: Some(DodgeKind::Dive),
+            ..grounded()
+        };
+        motion.step(&clips, &c, 1.9);
+        assert!(motion.diving());
+        motion.step(&clips, &grounded(), 0.2);
+        assert_eq!(
+            motion.index.as_deref(),
+            Some("CHARANIM_SHOOTDODGEFORWARD_GETUP")
+        );
     }
 
     #[test]

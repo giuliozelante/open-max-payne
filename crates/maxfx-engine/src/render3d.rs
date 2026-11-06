@@ -782,7 +782,7 @@ pub fn run_3d_walkthrough(
             // The dot marks the view's centre, so a bullet leaves from the camera. A blow leaves
             // from Max.
             let aim_from = if third_person && !fly_mode && reach.is_none() {
-                chase_camera(&scene, &chase_rig, player_pos, aim_dir)
+                chase_view(&scene, &room_origins, &chase_rig, player_pos, aim_dir)
             } else {
                 player_pos
             };
@@ -1157,15 +1157,16 @@ pub fn run_3d_walkthrough(
         );
         particle_lights.step(base_dt);
         particle_sprites.step(&scene, &room_origins, base_dt);
-        let mut sprites = particle_sprites.sprites();
-        sprites.extend(
-            decals.sprites(|mesh| scene.dynamic_meshes.get(mesh).is_none_or(|dm| dm.hidden)),
-        );
         let frame_lights: Vec<ScenePointLight> = world_lights
             .iter()
             .cloned()
             .chain(particle_lights.point_lights(&scene, &room_origins))
             .collect();
+        let mut sprites = particle_sprites.sprites();
+        sprites.extend(decals.sprites(
+            |mesh| scene.dynamic_meshes.get(mesh).is_none_or(|dm| dm.hidden),
+            |at| point_brightness(at, &frame_lights, scene.ambient),
+        ));
         start_camera_shakes(
             &mut scene,
             &catalog_root(level_path),
@@ -1208,7 +1209,7 @@ pub fn run_3d_walkthrough(
         let mut cam_up = [-sy * sp, cp, -cy * sp];
         let mut cam_fwd = [sy * cp, sp, cy * cp];
         let mut cam_pos = if third_person && !fly_mode {
-            chase_camera(&scene, &chase_rig, player_pos, cam_fwd)
+            chase_view(&scene, &room_origins, &chase_rig, player_pos, cam_fwd)
         } else {
             player_pos
         };
@@ -1774,7 +1775,8 @@ fn draw_letterbox(fb: &mut [u32], fraction: f32) {
     fb[(H - rows) * W..].fill(0);
 }
 
-/// `globalconfig.txt` `[camera]` `DefaultFOV`, in degrees across the frame.
+/// `globalconfig.txt` `[camera]` `DefaultFOV`, in degrees across retail's 4:3 frame. A wider window
+/// keeps retail's height and sees more at the sides.
 const DEFAULT_FOV: f32 = 70.0;
 
 /// Projection scale for a `gm_changeFOV` multiplier, which scales the view angle (the game's
@@ -1782,7 +1784,7 @@ const DEFAULT_FOV: f32 = 70.0;
 pub(crate) fn fov_scale(multiplier: f32) -> f32 {
     let multiplier = if multiplier > 0.0 { multiplier } else { 1.0 };
     let half = (DEFAULT_FOV * 0.5).to_radians() * multiplier;
-    W as f32 * 0.5 / half.min(1.5).tan()
+    H as f32 * 4.0 / 3.0 * 0.5 / half.min(1.5).tan()
 }
 
 /// Radians per mouse count of free look.
@@ -2158,6 +2160,65 @@ fn chase_camera(scene: &LdbScene, rig: &ChaseRig, player: [f32; 3], cam_fwd: [f3
     };
     let k = (t * len - CAMERA_CLEARANCE).max(0.0) / len;
     keep_clear(scene, [0, 1, 2].map(|c| start[c] + d[c] * k))
+}
+
+/// `chase_camera`, held short of the moving objects too.
+fn chase_view(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    rig: &ChaseRig,
+    player: [f32; 3],
+    cam_fwd: [f32; 3],
+) -> [f32; 3] {
+    let start = chase_start(rig, player, cam_fwd);
+    let eye = chase_camera(scene, rig, player, cam_fwd);
+    let d = sub3(eye, start);
+    let len = dot3(d, d).sqrt();
+    let Some(t) = dynamic_segment_hit(scene, rooms, start, d) else {
+        return eye;
+    };
+    let k = (t * len - CAMERA_CLEARANCE).max(0.0) / len;
+    [0, 1, 2].map(|c| start[c] + d[c] * k)
+}
+
+/// First visible moving object along the segment, as its `t` in 0..1.
+fn dynamic_segment_hit(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    from: [f32; 3],
+    d: [f32; 3],
+) -> Option<f32> {
+    let mut best: Option<f32> = None;
+    for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
+        if dm.hidden || !dm.collisions {
+            continue;
+        }
+        let (xform, origin) = dynamic_world(scene, idx, rooms);
+        for poly in dm
+            .polys
+            .iter()
+            .filter(|p| p.vertices.len() >= 3 && blocks_camera(scene, p.material_id))
+        {
+            let n = xform_dir(xform, poly.normal);
+            let denom = dot3(n, d);
+            if denom.abs() < 1e-6 {
+                continue;
+            }
+            let world: Vec<[f32; 3]> = poly
+                .vertices
+                .iter()
+                .map(|v| xform_point(xform, origin, v.pos))
+                .collect();
+            let t = dot3(n, sub3(world[0], from)) / denom;
+            if !(0.0..=1.0).contains(&t) || best.is_some_and(|b| t >= b) {
+                continue;
+            }
+            if inside_convex(&world, n, [0, 1, 2].map(|c| from[c] + d[c] * t)) {
+                best = Some(t);
+            }
+        }
+    }
+    best
 }
 
 /// Push the eye out to `CAMERA_CLEARANCE` from every camera-blocking polygon it sits over: the
@@ -3420,6 +3481,20 @@ fn point_light_attenuation(d: f32, radius: f32) -> f32 {
         return 0.0;
     }
     1.0 / (0.01 + 20.0 * (d / r) * (d / r))
+}
+
+/// How lit a point with no facing is, 0..1.
+fn point_brightness(at: [f32; 3], lights: &[ScenePointLight], ambient: [f32; 3]) -> [f32; 3] {
+    let mut sum = ambient.map(|c| c / 255.0);
+    for light in lights {
+        let gap = sub3(light.pos, at);
+        let fade = point_light_attenuation(dot3(gap, gap).sqrt(), light.radius);
+        let rgb = light_rgb(light);
+        for c in 0..3 {
+            sum[c] += rgb[c] / 255.0 * fade;
+        }
+    }
+    sum.map(|c| c.min(1.0))
 }
 
 fn light_rgb(l: &ScenePointLight) -> [f32; 3] {
@@ -5704,10 +5779,11 @@ mod tests {
     #[test]
     fn the_fov_multiplier_widens_the_horizontal_angle() {
         // HYPOTHESIS: gm_changefov scales the view angle (house cutscenes use 1.1).
-        // `globalconfig.txt` `DefaultFOV = 70`, across the width of the frame.
-        let half_default = (W as f32 * 0.5 / fov_scale(1.0)).atan().to_degrees();
+        // `globalconfig.txt` `DefaultFOV = 70`, across retail's 4:3 frame at this window's height.
+        let width = H as f32 * 4.0 / 3.0;
+        let half_default = (width * 0.5 / fov_scale(1.0)).atan().to_degrees();
         assert!((half_default - 35.0).abs() < 1e-3, "{half_default}");
-        let half = |scale: f32| (W as f32 * 0.5 / scale).atan();
+        let half = |scale: f32| (width * 0.5 / scale).atan();
         assert!((half(fov_scale(1.1)) - 1.1 * half(fov_scale(1.0))).abs() < 1e-5);
     }
 
@@ -6371,6 +6447,54 @@ mod tests {
         mesh.polys[0].vertices = vertices;
         mesh.polys[0].normal = [0.0, 1.0, 0.0];
         mesh
+    }
+
+    #[test]
+    fn a_dynamic_mesh_stops_the_chase_camera() {
+        // A dive beside the van put the camera inside it.
+        let mut scene = empty_scene();
+        let mut wall = flat_mesh(0.0);
+        let corner = |x, y| {
+            let mut vertex = wall.polys[0].vertices[0];
+            vertex.pos = [x, y, -1.5];
+            vertex
+        };
+        wall.polys[0].vertices = vec![
+            corner(-5.0, -5.0),
+            corner(5.0, -5.0),
+            corner(5.0, 5.0),
+            corner(-5.0, 5.0),
+        ];
+        wall.polys[0].normal = [0.0, 0.0, 1.0];
+        wall.polys[0].material_id = 0;
+        scene.dynamic_meshes.push(wall);
+        let rooms = BTreeMap::new();
+        let eye = chase_view(
+            &scene,
+            &rooms,
+            &RETAIL_RIG,
+            [0.0, 1.6, 0.0],
+            [0.0, 0.0, 1.0],
+        );
+        assert!(eye[2] > -1.5, "{eye:?}");
+        scene.dynamic_meshes[0].hidden = true;
+        let eye = chase_view(
+            &scene,
+            &rooms,
+            &RETAIL_RIG,
+            [0.0, 1.6, 0.0],
+            [0.0, 0.0, 1.0],
+        );
+        assert!(eye[2] < -1.5, "{eye:?}");
+    }
+
+    #[test]
+    fn a_decal_takes_the_ambient_and_the_lights_it_sits_in() {
+        let lamp = light([0.0; 3], 255.0, 2.0, 1.0);
+        let lit = point_brightness([0.0; 3], std::slice::from_ref(&lamp), [51.0; 3]);
+        assert_eq!(lit, [1.0; 3]);
+        let dark = point_brightness([9.0, 0.0, 0.0], std::slice::from_ref(&lamp), [51.0; 3]);
+        assert_eq!(dark, [0.2; 3]);
     }
 
     #[test]

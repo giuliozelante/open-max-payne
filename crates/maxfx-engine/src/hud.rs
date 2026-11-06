@@ -1039,21 +1039,34 @@ impl PlayerInventory {
         }
     }
 
-    /// `C_PickupWeapon(name)`: a full clip the first time. It adds no ammo otherwise: level items
-    /// follow it with `C_PickupAmmo`.
+    /// `C_PickupWeapon(name)`: a full clip the first time, loaded from any ammo found before it.
+    /// It adds no ammo otherwise: level items follow it with `C_PickupAmmo`.
     pub fn pickup_weapon(&mut self, name: &str) {
         let Some(def) = self.defs.get(name) else {
             return;
         };
+        let shared = self.carried.iter().any(|other| {
+            let other = self.defs.get(other);
+            other.is_some_and(|other| other.inventory_id == def.inventory_id)
+        });
         if !self.carried.insert(name.to_string()) {
             return;
         }
-        self.ammo
-            .entry(def.inventory_id.clone())
-            .or_insert(WeaponStock {
-                clip: def.clip_size,
-                ..WeaponStock::default()
-            });
+        match self.ammo.get_mut(&def.inventory_id) {
+            Some(stock) if !shared => {
+                let rounds = stock.pocket.min(def.clip_size - stock.clip);
+                stock.pocket -= rounds;
+                stock.clip += rounds;
+            }
+            Some(_) => {}
+            None => {
+                let stock = WeaponStock {
+                    clip: def.clip_size,
+                    ..WeaponStock::default()
+                };
+                self.ammo.insert(def.inventory_id.clone(), stock);
+            }
+        }
         let rank = |id: &str| self.best_weapons.iter().position(|best| best == id);
         let stronger = match self.current.as_ref().and_then(|name| self.defs.get(name)) {
             None => def.id != "WEAPONID_PAINKILLER",
@@ -1073,9 +1086,8 @@ impl PlayerInventory {
         let Some(def) = self.defs.get(name) else {
             return;
         };
-        if let Some(stock) = self.ammo.get_mut(&def.inventory_id) {
-            stock.pocket = (stock.pocket + amount).min(def.pocket_size);
-        }
+        let stock = self.ammo.entry(def.inventory_id.clone()).or_default();
+        stock.pocket = (stock.pocket + amount).min(def.pocket_size);
     }
 
     /// `C_SetInfiniteAmmo(name, on)`.
@@ -1926,6 +1938,17 @@ mod tests {
         player.pickup_weapon("beretta");
         player.pickup_weapon("molotov");
         assert_eq!(player.current.as_deref(), Some("beretta"));
+    }
+
+    #[test]
+    fn ammo_found_before_its_weapon_waits_and_loads_it() {
+        // The tutorial van: two ammo boxes, then the gun and its own five rounds.
+        let mut player = inventory();
+        player.pickup_ammo("beretta", 10);
+        player.pickup_ammo("beretta", 10);
+        player.pickup_weapon("beretta");
+        player.pickup_ammo("beretta", 5);
+        assert_eq!(player.stock("beretta"), stock(18, 7, false));
     }
 
     #[test]
