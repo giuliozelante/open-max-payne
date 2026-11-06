@@ -452,6 +452,8 @@ pub(crate) fn minifb_key(code: KeyCode) -> Option<Key> {
         KeyCode::Tab => Key::Tab,
         KeyCode::Escape => Key::Escape,
         KeyCode::F1 => Key::F1,
+        KeyCode::F2 => Key::F2,
+        KeyCode::F3 => Key::F3,
         KeyCode::Digit1 => Key::Key1,
         KeyCode::Digit2 => Key::Key2,
         KeyCode::Digit3 => Key::Key3,

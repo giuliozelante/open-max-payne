@@ -102,6 +102,17 @@ pub fn skin_max_health(text: &str, ai_ranges: &str) -> Option<i32> {
     })
 }
 
+/// `AutoAimTarget = YES`.
+pub fn skin_auto_aim_target(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.split("//").next().unwrap_or_default();
+        line.split_once('=').is_some_and(|(key, value)| {
+            let value = value.split(';').next().unwrap_or_default().trim();
+            key.trim().eq_ignore_ascii_case("AutoAimTarget") && value.eq_ignore_ascii_case("yes")
+        })
+    })
+}
+
 /// One `CHARANIM_RANDOMDEATH` clip and its `(seconds, catalog, cue)` sounds, in order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeathClip {
@@ -1083,6 +1094,8 @@ fn lod_field(line: &str, key: &str) -> Option<String> {
 pub struct SkinBody {
     pub rig: CharacterRig,
     pub invulnerable: bool,
+    /// `AutoAimTarget`.
+    pub auto_aim_target: bool,
 }
 
 fn skin_roots(level_or_game_path: &Path) -> Vec<PathBuf> {
@@ -1167,6 +1180,7 @@ pub fn load_skin_body(level_or_game_path: &Path, skin_id: &str) -> Option<SkinBo
     Some(SkinBody {
         rig,
         invulnerable: skin_blocks_projectiles(&text),
+        auto_aim_target: skin_auto_aim_target(&text),
     })
 }
 
@@ -1864,6 +1878,10 @@ mod tests {
     #[test]
     fn a_skin_health_is_a_number_or_a_class() {
         let ranges = "#define HEALTH_CLASS_7\t\t45\n#define HEALTH_CLASS_70\t\t1\n";
+        assert!(skin_auto_aim_target("AutoAimTarget = YES;\n"));
+        assert!(!skin_auto_aim_target(
+            "AutoAimTarget = NO;\n// AutoAimTarget = YES;\n"
+        ));
         assert_eq!(skin_max_health("MaximumHealth = 60;\n", ranges), Some(60));
         assert_eq!(
             skin_max_health("MaximumHealth = HEALTH_CLASS_7;\n", ranges),

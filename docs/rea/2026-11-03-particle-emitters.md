@@ -106,10 +106,11 @@ direction, random rotation from/to, mirroring flags. Snow: gravity 0.8, 20 fps, 
 
 ## Engine corrections after the first in-game comparison (2026-11-04)
 
-- **Velocity (HYPOTHESIS, data-led):** the emission direction is not normalised. Its length scales the
-  "Velocity m/s" value. `snowstorm_60m` stores direction `(0, −3, 30)` and velocity 0.25..0.5. Normalised,
-  the flakes hung almost still as sparse dots next to the retail screenshots. Scaled, the storm blows at
-  7.5–15 m/s and falls at about 1 m/s across the 0.2–1 s lifetimes.
+- **Velocity (VERIFIED, `0x77c3b0`):** a new particle's velocity is a random unit vector times a sample of
+  "Velocity m/s", plus the direction graph, plus the spread times a random value in -1..1 per axis. It then turns
+  with the emitter and adds the emitter's own motion times the value at `+0x98`, which the engine does not do yet.
+  The earlier reading, direction times velocity, was wrong: 347 of 753 retail emitters have velocity 0, among them
+  all snowfall and box debris, and they stood still.
 - **Emitter frame:** every intro emitter is an FSM nested under a moving DO, for example
   `::startroom::cam_mover::camera1::snow` under `camera1.DO` and `::start::…::C1_PAN::f1` under `C1_PAN.DO`.
   These emitters already followed their parent's position; they now take its rotation too

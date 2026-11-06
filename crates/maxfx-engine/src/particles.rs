@@ -171,15 +171,15 @@ impl ParticleField {
                         }),
                     };
                     let local: [f32; 3] = std::array::from_fn(|c| emission.position[c] + spawn[c]);
+                    // 0x77c3b0: a random way at "Velocity m/s", plus the direction, plus the spread.
+                    let speed = between(&emission.velocity.at(u), &mut seed);
+                    let thrown = unit_vector(&mut seed).map(|c| c * speed);
                     let direction = emission.direction.at(u);
-                    let dir: [f32; 3] = std::array::from_fn(|c| {
-                        direction.get(c).copied().unwrap_or(0.0)
+                    let local_vel: [f32; 3] = std::array::from_fn(|c| {
+                        thrown[c]
+                            + direction.get(c).copied().unwrap_or(0.0)
                             + emission.spread[c] * (random(&mut seed) * 2.0 - 1.0)
                     });
-                    // HYPOTHESIS: the direction is not normalised; its length scales the
-                    // velocity (snowstorm_60m: direction (0, -3, 30) x 0.25..0.5 m/s).
-                    let speed = between(&emission.velocity.at(u), &mut seed);
-                    let local_vel = dir.map(|d| d * speed);
                     let sequences = emitter.particle.sequences.len().max(1);
                     list.push(Particle {
                         pos: transform(rot, origin, local),
@@ -345,6 +345,14 @@ fn in_sphere([hotspot, falloff]: [f32; 2], seed: &mut u32) -> [f32; 3] {
     [ring * angle.cos(), ring * angle.sin(), z].map(|c| c * radius)
 }
 
+/// A uniformly random direction.
+fn unit_vector(seed: &mut u32) -> [f32; 3] {
+    let z = random(seed) * 2.0 - 1.0;
+    let angle = random(seed) * std::f32::consts::TAU;
+    let ring = (1.0 - z * z).sqrt();
+    [ring * angle.cos(), ring * angle.sin(), z]
+}
+
 /// `rot` (columns) times `v`, plus `origin`.
 fn transform(rot: [f32; 9], origin: [f32; 3], v: [f32; 3]) -> [f32; 3] {
     std::array::from_fn(|r| origin[r] + rot[r] * v[0] + rot[3 + r] * v[1] + rot[6 + r] * v[2])
@@ -386,9 +394,9 @@ mod tests {
                 },
                 emission: RpsEmission {
                     rate: flat(2, &[rate, rate]),
-                    velocity: flat(2, &[2.0, 2.0]),
+                    velocity: flat(2, &[0.0, 0.0]),
                     lifetime: flat(2, &[life, life]),
-                    direction: flat(3, &[0.0, -1.0, 0.0]),
+                    direction: flat(3, &[0.0, -2.0, 0.0]),
                     position: [0.0, 0.0, 0.0],
                     spread: [0.0; 3],
                     cycle_length: 1.0,
@@ -604,7 +612,7 @@ mod tests {
         // levels.txt `Gravity = ( 0, GRAVITY_VALUE , 0 )` with `GRAVITY_VALUE -20`; the tutorial:
         // the editor's gravity "does not affect the gravity setting used in the game".
         let mut def = effect(10.0, 5.0, 0.5);
-        def.emitters[0].emission.velocity = flat(2, &[0.0, 0.0]);
+        def.emitters[0].emission.direction = flat(3, &[0.0, 0.0, 0.0]);
         let mut field = ParticleField {
             gravity: [0.0, -20.0, 0.0],
             ..Default::default()
@@ -619,22 +627,35 @@ mod tests {
     }
 
     #[test]
-    fn the_direction_graph_scales_the_velocity() {
-        // snowstorm_60m: Emission Direction (0, -3, 30) with Velocity 0.25..0.5 is a sideways storm,
-        // not flakes drifting at half a metre per second.
+    fn the_direction_is_a_velocity_of_its_own() {
+        // medium_snowfall_7m: Velocity 0 and direction (0, -4.38, 0), which still falls.
         let mut def = effect(10.0, 5.0, 0.0);
         def.emitters[0].emission.direction = flat(3, &[0.0, -3.0, 30.0]);
-        def.emitters[0].emission.velocity = flat(2, &[0.5, 0.5]);
+        def.emitters[0].emission.velocity = flat(2, &[0.0, 0.0]);
         let mut field = ParticleField::default();
         field.start("e".into(), "k".into(), std::sync::Arc::new(def), false);
         field.step(0.1, at_origin);
         field.stop("e");
         field.step(1.0, at_origin);
         let p = field.sprites()[0].pos;
-        // The wind blows along the level's +z: the intro's storm sits at z -30 and reaches the
-        // camera looking along -z.
-        assert!((p[2] - 15.0).abs() < 1e-3, "{p:?}");
-        assert!((p[1] - (10.0 - 1.5)).abs() < 1e-3, "{p:?}");
+        assert!((p[2] - 30.0).abs() < 1e-3, "{p:?}");
+        assert!((p[1] - (10.0 - 3.0)).abs() < 1e-3, "{p:?}");
+    }
+
+    #[test]
+    fn the_velocity_throws_a_particle_a_random_way_at_that_speed() {
+        let mut def = effect(10.0, 5.0, 0.0);
+        def.emitters[0].emission.direction = flat(3, &[0.0, 0.0, 0.0]);
+        def.emitters[0].emission.velocity = flat(2, &[2.0, 2.0]);
+        let mut field = ParticleField::default();
+        field.start("e".into(), "k".into(), std::sync::Arc::new(def), false);
+        field.step(0.1, at_origin);
+        let start = field.sprites()[0].pos;
+        field.stop("e");
+        field.step(1.0, at_origin);
+        let end = field.sprites()[0].pos;
+        let moved: f32 = (0..3).map(|c| (end[c] - start[c]).powi(2)).sum();
+        assert!((moved.sqrt() - 2.0).abs() < 1e-3, "{start:?} {end:?}");
     }
 
     #[test]
