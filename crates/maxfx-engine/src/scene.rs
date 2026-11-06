@@ -686,6 +686,10 @@ pub struct LdbScene {
     /// `gm_changeFOV(multiplier, time)`: multiplier on the view angle (1 = default; 0 in a
     /// `Default` scene, which `render3d::fov_scale` also treats as the default).
     pub fov_multiplier: Ramp,
+    /// `GM_ChangeControlledGameSpeed`: how fast the world runs.
+    pub game_speed: Ramp,
+    /// The running `MPHM_FlashToColor`.
+    pub screen_flash: Option<ScreenFlash>,
     /// The player's weapons, as the `C_PickupWeapon` family of messages leaves them.
     pub inventory: crate::hud::PlayerInventory,
     /// `MPHM_Print*` messages not yet shown: is it a tip, and the string ID or text.
@@ -777,6 +781,33 @@ pub struct QueuedSound {
     pub range: Option<crate::SoundRange>,
     /// World position of a sound with no emitter object, as a bullet hit's.
     pub at: Option<[f32; 3]>,
+}
+
+/// A colour that fades in, stays and fades out over the screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenFlash {
+    /// `0xRRGGBBAA`.
+    pub color: u32,
+    pub fade_in: f32,
+    pub hold: f32,
+    pub fade_out: f32,
+    pub age: f32,
+}
+
+impl ScreenFlash {
+    /// Opacity now, 0 to 1 of the colour's own alpha; `None` once over.
+    pub fn opacity(&self) -> Option<f32> {
+        let after_hold = self.age - self.fade_in - self.hold;
+        if self.age < self.fade_in {
+            Some(self.age / self.fade_in)
+        } else if after_hold <= 0.0 {
+            Some(1.0)
+        } else if after_hold < self.fade_out {
+            Some(1.0 - after_hold / self.fade_out)
+        } else {
+            None
+        }
+    }
 }
 
 /// Emitter names of the right and left gun in the player's hands.
@@ -1138,6 +1169,33 @@ impl LdbScene {
                     .set(if on { 1.0 } else { 0.0 }, seconds.unwrap_or(0.0));
                 true
             }
+            "gm_changecontrolledgamespeed" => {
+                let number = |i: usize| msg.args.get(i).and_then(|a| a.trim().parse::<f32>().ok());
+                let Some(speed) = number(0).filter(|speed| *speed > 0.0) else {
+                    return false;
+                };
+                self.game_speed.set(speed, number(1).unwrap_or(0.0));
+                true
+            }
+            "mphm_flashtocolor" => {
+                let number = |i: usize| msg.args.get(i).and_then(|a| a.trim().parse::<f32>().ok());
+                let color = msg.args.first().and_then(|arg| {
+                    u32::from_str_radix(arg.trim().trim_start_matches("0x"), 16).ok()
+                });
+                let (Some(color), Some(fade_in), Some(hold), Some(fade_out)) =
+                    (color, number(1), number(2), number(3))
+                else {
+                    return false;
+                };
+                self.screen_flash = Some(ScreenFlash {
+                    color,
+                    fade_in,
+                    hold,
+                    fade_out,
+                    age: 0.0,
+                });
+                true
+            }
             "gm_changefov" => {
                 let number = |i: usize| msg.args.get(i).and_then(|a| a.trim().parse::<f32>().ok());
                 let Some(multiplier) = number(0).filter(|m| *m > 0.0) else {
@@ -1431,6 +1489,11 @@ impl LdbScene {
     pub fn step_presentation(&mut self, dt: f32) {
         self.widescreen.step(dt);
         self.fov_multiplier.step(dt);
+        self.game_speed.step(dt);
+        if let Some(flash) = self.screen_flash.as_mut() {
+            flash.age += dt;
+        }
+        self.screen_flash = self.screen_flash.filter(|flash| flash.opacity().is_some());
     }
 
     /// Advance a `GM_ChangeFog` fade: every fog value moves linearly from the old fog to the new.
@@ -3099,6 +3162,8 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         fog_fade: None,
         widescreen: Ramp::at(0.0),
         fov_multiplier: Ramp::at(1.0),
+        game_speed: Ramp::at(1.0),
+        screen_flash: None,
         inventory: Default::default(),
         hud_prints: Vec::new(),
         gravity: None,
@@ -3168,6 +3233,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_game_speed_ramps_to_its_target() {
+        let mut scene = LdbScene {
+            game_speed: Ramp::at(1.0),
+            ..Default::default()
+        };
+        let message = "maxpayne_gamemode->gm_changecontrolledgamespeed( 0.2, 0.4 );";
+        assert!(scene.dispatch_message("", message));
+        scene.step_presentation(0.2);
+        assert!((scene.game_speed.value - 0.6).abs() < 1e-5);
+        scene.step_presentation(0.25);
+        assert_eq!(scene.game_speed.value, 0.2);
+    }
+
+    #[test]
+    fn a_flash_fades_in_stays_and_fades_out() {
+        let mut scene = LdbScene::default();
+        let message = "maxpayne_hudmode->mphm_flashtocolor( 0x000000a0, 0.1, 0.2, 0.4 );";
+        assert!(scene.dispatch_message("", message));
+        let flash = scene.screen_flash.expect("flash");
+        assert_eq!(flash.color, 0xa0);
+        let at = |age: f32| ScreenFlash { age, ..flash }.opacity();
+        assert_eq!(at(0.05), Some(0.5));
+        assert_eq!(at(0.2), Some(1.0));
+        assert!((at(0.5).expect("fading") - 0.5).abs() < 1e-5);
+        assert_eq!(at(0.8), None);
+        scene.step_presentation(1.0);
+        assert_eq!(scene.screen_flash, None);
+    }
+
+    #[test]
     fn decodes_uncompressed_24bit_tga() {
         let mut tga = vec![0u8; 18 + 3];
         tga[2] = 2; // uncompressed true-color
@@ -3216,6 +3311,8 @@ mod tests {
             fog_fade: None,
             widescreen: Ramp::at(0.0),
             fov_multiplier: Ramp::at(1.0),
+            game_speed: Ramp::at(1.0),
+            screen_flash: None,
             inventory: Default::default(),
             hud_prints: Vec::new(),
             gravity: None,
