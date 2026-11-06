@@ -1468,8 +1468,50 @@ fn sky_materials(data: &[u8], start: usize, end: usize) -> Option<BTreeMap<Strin
     Some(materials)
 }
 
+/// What follows a packed array: how many of its elements each material group takes. Empty when
+/// the chunk ends with the array.
+fn read_groups(data: &[u8], mut at: usize, end: usize) -> Vec<usize> {
+    if at >= end {
+        return Vec::new();
+    }
+    let Some(count) = read_count(data, &mut at) else {
+        return Vec::new();
+    };
+    (0..count)
+        .map_while(|_| read_count(data, &mut at))
+        .collect()
+}
+
+/// `mesh` cut at its material groups. A group's indices count from its own first vertex, so they
+/// mean nothing against the whole array.
+fn split_groups(
+    mesh: SkyMesh,
+    vertices: &[usize],
+    triangles: &[usize],
+    bitmaps: &[Vec<String>],
+) -> Option<Vec<SkyMesh>> {
+    if vertices.len() < 2 || vertices.len() != triangles.len() {
+        return Some(vec![mesh]);
+    }
+    let (mut first_vertex, mut first_index) = (0, 0);
+    let mut parts = Vec::with_capacity(vertices.len());
+    for (group, (&vertex_count, &triangle_count)) in vertices.iter().zip(triangles).enumerate() {
+        let corners = first_vertex..first_vertex + vertex_count;
+        let indices = first_index..first_index + triangle_count * 3;
+        parts.push(SkyMesh {
+            vertices: mesh.vertices.get(corners.clone())?.to_vec(),
+            uvs: mesh.uvs.get(corners.clone()).unwrap_or_default().to_vec(),
+            indices: mesh.indices.get(indices.clone())?.to_vec(),
+            textures: bitmaps.get(group).cloned().unwrap_or_default(),
+        });
+        (first_vertex, first_index) = (corners.end, indices.end);
+    }
+    Some(parts)
+}
+
 /// The meshes of a world sphere. They use packed arrays, unlike character meshes: positions,
-/// then normals; `u16` triangle indices; one `(u, v, w)` per vertex.
+/// then normals; `u16` triangle indices; one `(u, v, w)` per vertex. Each array ends with the
+/// sizes of its material groups, in the order of the mesh's material names.
 pub fn parse_world_sphere(data: &[u8]) -> Option<Vec<SkyMesh>> {
     let mut materials = BTreeMap::new();
     let mut meshes = Vec::new();
@@ -1482,7 +1524,9 @@ pub fn parse_world_sphere(data: &[u8]) -> Option<Vec<SkyMesh>> {
             let mut mesh = SkyMesh::default();
             let mut node = (String::new(), String::new());
             let mut root = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
-            for (sub, mut p, _) in chunks(data, start, end) {
+            let (mut vertex_groups, mut triangle_groups) = (Vec::new(), Vec::new());
+            let mut bitmaps = Vec::new();
+            for (sub, mut p, stop) in chunks(data, start, end) {
                 match sub {
                     0x0001_0000 => {
                         node.0 = read_str(data, &mut p)?;
@@ -1502,6 +1546,7 @@ pub fn parse_world_sphere(data: &[u8]) -> Option<Vec<SkyMesh>> {
                                 root[2] * x + root[5] * y + root[8] * z + root[11],
                             ]);
                         }
+                        vertex_groups = read_groups(data, p + count * 24, stop);
                     }
                     0x0001_0007 => {
                         let count = read_count(data, &mut p)?;
@@ -1510,11 +1555,14 @@ pub fn parse_world_sphere(data: &[u8]) -> Option<Vec<SkyMesh>> {
                             mesh.indices
                                 .push(u16::from_le_bytes([bytes[0], bytes[1]]) as usize);
                         }
+                        triangle_groups = read_groups(data, p + count * 2, stop);
                     }
                     0x0001_000c => {
-                        let _count = read_i32(data, &mut p)?;
-                        let name = read_str(data, &mut p)?;
-                        mesh.textures = materials.get(&name).cloned().unwrap_or_default();
+                        for _ in 0..read_i32(data, &mut p)? {
+                            let name = read_str(data, &mut p)?;
+                            bitmaps.push(materials.get(&name).cloned().unwrap_or_default());
+                        }
+                        mesh.textures = bitmaps.first().cloned().unwrap_or_default();
                     }
                     0x0001_000e => {
                         let _channel = read_count(data, &mut p)?;
@@ -1527,12 +1575,14 @@ pub fn parse_world_sphere(data: &[u8]) -> Option<Vec<SkyMesh>> {
                     _ => {}
                 }
             }
-            let corners = mesh.vertices.len().min(mesh.uvs.len());
-            if mesh.indices.iter().any(|&index| index >= corners) {
-                return None;
+            for part in split_groups(mesh, &vertex_groups, &triangle_groups, &bitmaps)? {
+                let corners = part.vertices.len().min(part.uvs.len());
+                if part.indices.iter().any(|&index| index >= corners) {
+                    return None;
+                }
+                nodes.push((node.0.clone(), node.1.clone(), root));
+                meshes.push(part);
             }
-            nodes.push((node.0, node.1, root));
-            meshes.push(mesh);
         }
     }
     // Parts of a weapon are local to their parent; a sky's meshes have none.
@@ -1654,6 +1704,54 @@ mod tests {
         let meshes = parse_world_sphere(&file).expect("parts");
         // sky_file's first vertex (1, 2, 3), up 5 in z, then turned.
         assert_eq!(meshes[1].vertices[0], [1.0, -8.0, 2.0]);
+    }
+
+    #[test]
+    fn a_material_group_indexes_its_own_vertices() {
+        let material = |name: &str, bitmap: &str| {
+            let mut body = text(name);
+            body.extend(text(bitmap));
+            chunk(0x0001_0010, &body)
+        };
+        let mut materials = text("textures");
+        materials.extend([0x14, 2]);
+        materials.extend(material("Steel", "steel.jpg"));
+        materials.extend(material("Barrel", "barrel.jpg"));
+        let mut node = text("Gun");
+        node.extend(text(""));
+        node.push(0x1a);
+        node.extend(floats(&[
+            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+        ]));
+        // Six positions, six normals, then three vertices for each of two groups.
+        let positions: Vec<f32> = (0..18).map(|k| k as f32).collect();
+        let mut points = vec![0x11, 6];
+        points.extend(floats(&positions));
+        points.extend(floats(&[0.0; 18]));
+        points.extend([0x11, 2, 0x11, 3, 0x11, 3]);
+        // Both groups count from zero; one triangle each.
+        let mut faces = vec![0x11, 6];
+        faces.extend([0, 0, 1, 0, 2, 0, 0, 0, 1, 0, 2, 0]);
+        faces.extend([0x11, 2, 0x11, 1, 0x11, 1]);
+        let mut slots = vec![0x14, 2];
+        slots.extend(text("Steel"));
+        slots.extend(text("Barrel"));
+        let mut map = vec![0x11, 0, 0x11, 6];
+        map.extend(floats(&[0.5; 18]));
+        let mut mesh = chunk(0x0001_0000, &node);
+        mesh.extend(chunk(0x0001_0006, &points));
+        mesh.extend(chunk(0x0001_0007, &faces));
+        mesh.extend(chunk(0x0001_000c, &slots));
+        mesh.extend(chunk(0x0001_000e, &map));
+        let mut file = chunk(0x0001_000f, &materials);
+        file.extend(chunk(0x0001_0005, &mesh));
+
+        let parts = parse_world_sphere(&file).expect("parts");
+
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1].vertices[0], [9.0, 10.0, 11.0]);
+        assert_eq!(parts[1].indices, [0, 1, 2]);
+        assert_eq!(parts[1].textures, ["barrel.jpg"]);
     }
 
     #[test]
