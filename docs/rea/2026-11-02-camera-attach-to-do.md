@@ -140,6 +140,7 @@ shake.
   (0.06, 0.80, -1.00)`. The comments say the camera is cast from its startpoint toward each, when it is above, behind or
   below the player. Crouching and shoot-dodging have their own camera points, not used yet.
 - **Engine:** casts from the camera point toward the follow position. It had used 2.2 m back and 0.4 m up from the eye.
+- **Owner, from play:** the camera keeps Max as its target. Offsets in the yaw frame swung him out of view, so they now turn with the pitch.
 - **HYPOTHESIS:** the three distances blend linearly with the pitch. Two static passes over `MaxPayne_PlayerCamera::update`
   (ends near `0x504cd1`) did not find the blend, so it is to be tested against play or read with a debugger. The
   backward speed and acceleration (`InitialBackwardsSpeed`, `BackwardsAcceleration`) and the prediction sphere are not

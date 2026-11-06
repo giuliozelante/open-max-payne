@@ -282,6 +282,7 @@ pub fn run_3d_walkthrough(
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
     scene.inventory.best_weapons = crate::load_best_weapons(&game_root);
+    scene.apply_startup_weapons();
     let hud_assets = crate::hud::HudAssets::load(&game_root);
     let text = |path: &str| {
         crate::read_game_bytes(&game_root, path)
@@ -300,6 +301,9 @@ pub fn run_3d_walkthrough(
             active: false,
             seconds: 15.0,
             threshold: 0.001,
+            heartbeat_message: String::new(),
+            heartbeat_interval: 1.25,
+            heartbeat_in: 0.0,
         });
 
     let mut fb = vec![0u32; W * H];
@@ -333,6 +337,9 @@ pub fn run_3d_walkthrough(
             bullet_time || window.get_mouse_down(MouseButton::Right),
             base_dt,
         );
+        if let Some(message) = slow_motion.heartbeat(base_dt).map(str::to_string) {
+            scene.dispatch_message("", &message);
+        }
         let bullet_time_active = slow_motion.active;
         let world_dt = if bullet_time_active {
             base_dt * 0.30
@@ -372,7 +379,8 @@ pub fn run_3d_walkthrough(
         // Interact (`E`): trigger nearest dynamic mesh / door within 6m
         if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             toggle_nearest_dynamic_mesh(&mut scene, &room_origins, player_pos, 36.0);
-            if scene.activate_nearest_trigger(&room_origins, player_pos, 36.0) {
+            let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+            if scene.activate_nearest_trigger(&room_origins, feet) {
                 play_queued_sounds(
                     &mut scene,
                     &catalog_root(level_path),
@@ -506,6 +514,10 @@ pub fn run_3d_walkthrough(
             }
         }
 
+        if !cinematic {
+            let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
+            scene.step_touch_triggers(&room_origins, feet);
+        }
         scene.inventory.step(world_dt);
 
         // Shoot (`F` or `LeftCtrl` / `RightCtrl`)
@@ -1271,14 +1283,19 @@ fn chase_start(rig: &ChaseRig, player: [f32; 3], cam_fwd: [f32; 3]) -> [f32; 3] 
     yaw_offset(feet, cam_fwd, rig.point)
 }
 
-/// The follow position. HYPOTHESIS: the three distances blend linearly with the pitch, from the
-/// middle one when level to the up one looking straight down and the down one looking straight
-/// up. Their comments in `globalconfig.txt` name those positions; the blend itself is not read.
+/// The follow position: an orbit around the camera point. The offset turns with the view's
+/// pitch, so the player stays in frame; `Up` and `Down` take over toward looking straight down
+/// and straight up. HYPOTHESIS for the pitched frame and the linear blend: the distances'
+/// comments name the positions and the update applies a matrix, but the blend is not read.
 fn chase_eye(rig: &ChaseRig, player: [f32; 3], cam_fwd: [f32; 3]) -> [f32; 3] {
     let steep = cam_fwd[1].clamp(-1.0, 1.0).abs().asin() / std::f32::consts::FRAC_PI_2;
     let end = if cam_fwd[1] < 0.0 { rig.up } else { rig.down };
     let follow = [0, 1, 2].map(|c| rig.middle[c] + (end[c] - rig.middle[c]) * steep);
-    yaw_offset(chase_start(rig, player, cam_fwd), cam_fwd, follow)
+    let ahead = normalize([cam_fwd[0], 0.0, cam_fwd[2]]);
+    let right = [ahead[2], 0.0, -ahead[0]];
+    let up = cross3(cam_fwd, right);
+    let start = chase_start(rig, player, cam_fwd);
+    [0, 1, 2].map(|c| start[c] + right[c] * follow[0] + up[c] * follow[1] + cam_fwd[c] * follow[2])
 }
 
 /// How far the chase camera stays off what it hits: `globalconfig.txt` `[camera]`
@@ -4145,27 +4162,33 @@ mod tests {
     }
 
     #[test]
-    fn looking_straight_down_the_camera_uses_the_up_distance() {
+    fn looking_straight_down_the_camera_orbits_above_the_player() {
         let eye = chase_eye(&RETAIL_RIG, [0.0, EYE_HEIGHT, 0.0], [0.0, -1.0, 0.0001]);
-        for (got, want) in eye.iter().zip([0.18, 2.15, -0.52]) {
+        for (got, want) in eye.iter().zip([0.18, 2.15, 0.28]) {
             assert!((got - want).abs() < 1e-3, "{eye:?}");
         }
     }
 
     #[test]
-    fn looking_straight_up_the_camera_uses_the_down_distance() {
+    fn looking_straight_up_the_camera_orbits_below_the_player() {
         let eye = chase_eye(&RETAIL_RIG, [0.0, EYE_HEIGHT, 0.0], [0.0, 1.0, 0.0001]);
-        for (got, want) in eye.iter().zip([0.18, 2.55, -1.12]) {
+        for (got, want) in eye.iter().zip([0.18, 0.75, -0.92]) {
             assert!((got - want).abs() < 1e-3, "{eye:?}");
         }
     }
 
     #[test]
-    fn the_follow_distance_blends_with_the_pitch() {
-        let (s, c) = std::f32::consts::FRAC_PI_4.sin_cos();
-        let eye = chase_eye(&RETAIL_RIG, [0.0, EYE_HEIGHT, 0.0], [0.0, -s, c]);
-        // Half way from the middle distance to the up distance.
-        assert!((eye[2] + 0.12 + 2.2).abs() < 1e-3, "{eye:?}");
+    fn max_stays_near_the_view_axis_at_every_pitch() {
+        // Flat offsets swung him out of the frame as the view tilted.
+        for degrees in [-80.0f32, -60.0, -45.0, -20.0, 0.0, 20.0, 45.0, 60.0, 80.0] {
+            let (s, c) = degrees.to_radians().sin_cos();
+            let fwd = [0.0, s, c];
+            let player = [0.0, EYE_HEIGHT, 0.0];
+            let eye = chase_eye(&RETAIL_RIG, player, fwd);
+            let to_max = normalize(sub3(chase_start(&RETAIL_RIG, player, fwd), eye));
+            let off_axis = dot3(to_max, fwd).clamp(-1.0, 1.0).acos().to_degrees();
+            assert!(off_axis < 46.0, "{degrees}: {off_axis}");
+        }
     }
 
     #[test]

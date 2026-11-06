@@ -65,7 +65,7 @@ impl HourglassColors {
 }
 
 /// The bullet-time gauge of `globalconfig.txt` `[slowmotion]`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SlowMotion {
     /// 0..1.
     pub level: f32,
@@ -74,6 +74,11 @@ pub struct SlowMotion {
     pub seconds: f32,
     /// `Threshold`: the level it takes to start.
     pub threshold: f32,
+    /// `HeartbeatSoundMessage`, sent every `HeartbeatSoundInterval` seconds while active.
+    pub heartbeat_message: String,
+    pub heartbeat_interval: f32,
+    /// Seconds until the next heartbeat.
+    pub heartbeat_in: f32,
 }
 
 impl SlowMotion {
@@ -86,7 +91,24 @@ impl SlowMotion {
             active: false,
             seconds: general.number("slowmotiontime")?,
             threshold: threshold.trim().parse::<f32>().ok()? / 100.0,
+            heartbeat_message: general.file("heartbeatsoundmessage")?,
+            heartbeat_interval: general.number("heartbeatsoundinterval")?,
+            heartbeat_in: 0.0,
         })
+    }
+
+    /// The heartbeat message when one is due. The first comes as slow motion starts.
+    pub fn heartbeat(&mut self, seconds: f32) -> Option<&str> {
+        if !self.active {
+            self.heartbeat_in = 0.0;
+            return None;
+        }
+        self.heartbeat_in -= seconds;
+        if self.heartbeat_in > 0.0 {
+            return None;
+        }
+        self.heartbeat_in = self.heartbeat_interval;
+        Some(&self.heartbeat_message)
     }
 
     /// Advances `seconds` of real time while the player does or does not ask for slow motion.
@@ -1169,13 +1191,37 @@ mod tests {
             active: false,
             seconds: 15.0,
             threshold: 0.001,
+            heartbeat_message: "beat".into(),
+            heartbeat_interval: 1.25,
+            heartbeat_in: 0.0,
         }
     }
 
     #[test]
     fn globalconfig_gives_the_gauges_length_and_threshold() {
-        let text = "[slowmotion]\n{\n\t[general]\n\tSlowMotionTime\t\t\t= 15.0;\t\t\t// length\n\tThreshold\t\t\t\t= 0.1%;\t\t\t// must be exceeded\n}\n";
+        let text = "[slowmotion]\n{\n\t[general]\n\tSlowMotionTime\t\t\t= 15.0;\t\t\t// length\n\tThreshold\t\t\t\t= 0.1%;\t\t\t// must be exceeded\n\tHeartbeatSoundMessage\t= \"beat\";\n\tHeartbeatSoundInterval\t= 1.25;\t\t\t// interval\n}\n";
         assert_eq!(SlowMotion::parse(text), Some(gauge()));
+    }
+
+    #[test]
+    fn the_heartbeat_starts_with_slow_motion_and_repeats_at_its_interval() {
+        let mut slow = gauge();
+        assert_eq!(slow.heartbeat(0.1), None, "not while inactive");
+        slow.step(true, 0.1);
+        assert_eq!(slow.heartbeat(0.1), Some("beat"));
+        assert_eq!(slow.heartbeat(1.0), None);
+        assert_eq!(slow.heartbeat(0.3), Some("beat"));
+    }
+
+    #[test]
+    fn the_heartbeat_restarts_with_the_next_slow_motion() {
+        let mut slow = gauge();
+        slow.step(true, 0.1);
+        assert!(slow.heartbeat(0.1).is_some());
+        slow.step(false, 0.1);
+        assert_eq!(slow.heartbeat(0.1), None);
+        slow.step(true, 0.1);
+        assert!(slow.heartbeat(0.1).is_some());
     }
 
     #[test]
