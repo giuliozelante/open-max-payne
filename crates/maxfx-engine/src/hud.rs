@@ -93,36 +93,6 @@ pub fn parse_string_table(text: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// `#USE#`-style placeholders in `text` replaced by the engine's keys.
-pub fn expand_keys(text: &str) -> String {
-    const KEYS: [(&str, &str); 20] = [
-        ("#USE#", "E"),
-        ("#SHOOT#", "Mouse 1"),
-        ("#BULLETTIME#", "Mouse 2"),
-        ("#JUMP#", "Space"),
-        ("#PAINKILLER#", "Tab"),
-        ("#CROUCH#", "C"),
-        ("#RELOAD#", "R"),
-        ("#BESTWEAPON#", "G"),
-        ("#NEXTWEAPON#", "Mouse Wheel Up"),
-        ("#PREVIOUSWEAPON#", "Mouse Wheel Down"),
-        ("#RUN#", "W"),
-        ("#WALKBACK#", "S"),
-        ("#STRAFELEFT#", "A"),
-        // Retail's own spelling.
-        ("#STAFERIGHT#", "D"),
-        ("#SELECTWEAPONSLOT0#", "1"),
-        ("#SELECTWEAPONSLOT1#", "2"),
-        ("#SELECTWEAPONSLOT2#", "3"),
-        ("#SELECTWEAPONSLOT3#", "4"),
-        ("#SELECTWEAPONSLOT4#", "5"),
-        ("#SELECTWEAPONSLOT5#", "6"),
-    ];
-    KEYS.iter().fold(text.to_string(), |text, (token, key)| {
-        text.replace(token, key)
-    })
-}
-
 /// `text` broken at spaces so no line is wider than `width`.
 pub fn wrap_text(font: &HudFont, text: &str, width: f32) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
@@ -3282,15 +3252,6 @@ Width = 200;
         }
         assert_eq!(log.lines.len(), 3);
         assert_eq!(log.lines[0].0, "b");
-    }
-
-    #[test]
-    fn tip_placeholders_name_the_engines_keys() {
-        assert_eq!(expand_keys("premi #USE# ora"), "premi E ora");
-        assert_eq!(expand_keys("#SHOOT# e #BULLETTIME#"), "Mouse 1 e Mouse 2");
-        assert_eq!(expand_keys("#PAINKILLER#"), "Tab");
-        assert_eq!(expand_keys("(#CROUCH#)"), "(C)");
-        assert_eq!(expand_keys("#TOTALTIME#"), "#TOTALTIME#");
     }
 
     #[test]
