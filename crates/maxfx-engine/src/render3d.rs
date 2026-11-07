@@ -1762,6 +1762,14 @@ pub fn run_3d_walkthrough(
             if !scoped {
                 target.draw_crosshair(&scene.inventory);
             }
+        }
+        // Retail prints `TIP_01` over the Tutorial's opening camera, with the rest of the HUD hidden.
+        if let Some(assets) = hud_assets.as_ref() {
+            let mut target = crate::hud::HudTarget {
+                pixels: &mut fb,
+                width: W,
+                height: H,
+            };
             target.draw_prints(&assets.font, &assets.layout.tip, &tip_log);
             target.draw_prints(&assets.font, &assets.layout.print, &print_log);
         }
