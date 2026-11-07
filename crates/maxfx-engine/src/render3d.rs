@@ -357,6 +357,8 @@ pub fn run_3d_walkthrough(
         })
         .map(|text| crate::hud::parse_string_table(&text))
         .unwrap_or_default();
+    let bindings = crate::input::load_bindings(&game_root);
+    let key_names = crate::input::load_key_names(&game_root);
     let mut print_log = crate::hud::HudPrintLog::default();
     let mut tip_log = crate::hud::HudPrintLog::default();
     let text = |path: &str| {
@@ -1714,7 +1716,7 @@ pub fn run_3d_walkthrough(
             let layout = &assets.layout;
             for (tip, id) in scene.hud_prints.drain(..) {
                 let text = hud_strings.get(&id).unwrap_or(&id);
-                let text = crate::hud::expand_keys(text);
+                let text = crate::input::expand_tokens(text, &bindings, &key_names);
                 let (log, style) = if tip {
                     (&mut tip_log, &layout.tip)
                 } else {
