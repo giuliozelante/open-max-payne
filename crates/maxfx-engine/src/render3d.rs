@@ -305,6 +305,9 @@ pub fn run_3d_walkthrough(
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
     let mut player_health = crate::load_player_health(&game_root);
+    if let Some(capsule) = crate::load_player_capsule(&game_root) {
+        scene.player_capsule = capsule;
+    }
     let mut last_health = player_health.as_ref().map_or(0.0, |max| max.health);
     let config = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt").unwrap_or_default();
     let config = String::from_utf8_lossy(&config);
@@ -558,21 +561,20 @@ pub fn run_3d_walkthrough(
         }
         if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
-            // `CHARANIM_USE` sends `C_Use` on frame 0, so the trigger below needs no wait.
-            // HYPOTHESIS: Max reaches out whether or not anything is in range.
-            if let Some(rig) = player_rig.as_mut().filter(|_| !motion.dodging()) {
-                let index = "CHARANIM_USE";
-                rig.action = player_clips.get(index).map(|(_, clip)| (**clip).clone());
-                rig.action_time = 0.0;
-                rig.aim = None;
-                action_time = 0.0;
-                action_index = index.to_string();
-                action_messages = player_clips.timed_messages(index);
-            }
             if let Some((name, gap)) = scene.nearest_action_trigger(&room_origins, feet) {
                 println!("  3D Engine: use: {name} is {gap:.2} m out of reach");
             }
             if scene.activate_nearest_trigger(&room_origins, feet) {
+                // `CHARANIM_USE` sends `C_Use` on frame 0, so the trigger has already answered.
+                if let Some(rig) = player_rig.as_mut().filter(|_| !motion.dodging()) {
+                    let index = "CHARANIM_USE";
+                    rig.action = player_clips.get(index).map(|(_, clip)| (**clip).clone());
+                    rig.action_time = 0.0;
+                    rig.aim = None;
+                    action_time = 0.0;
+                    action_index = index.to_string();
+                    action_messages = player_clips.timed_messages(index);
+                }
                 play_queued_sounds(
                     &mut scene,
                     &catalog_root(level_path),
@@ -6934,6 +6936,7 @@ mod tests {
             slow_motion_level: None,
             character_orders: Vec::new(),
             closed_exits: Default::default(),
+            player_capsule: [0.48, 1.95],
             screen_flash: None,
             inventory: Default::default(),
             hud_prints: Vec::new(),

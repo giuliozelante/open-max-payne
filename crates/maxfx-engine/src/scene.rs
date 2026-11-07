@@ -721,6 +721,8 @@ pub struct LdbScene {
     pub slow_motion_level: Option<f32>,
     /// `C_Teleport` and `C_SetHealth` for the character named first.
     pub character_orders: Vec<(String, CharacterOrder)>,
+    /// `CapsuleRadius` and `CapsuleTop` of Max's skin, which reach for triggers.
+    pub player_capsule: [f32; 2],
     /// Exits `GM_EnableExit` closed, lowercased.
     pub closed_exits: std::collections::BTreeSet<String>,
     /// The running `MPHM_FlashToColor`.
@@ -1945,24 +1947,24 @@ impl LdbScene {
 
     /// How far the player's capsule (`max_payne.txt`) is from `trigger`'s sphere: 0 or less touches.
     fn capsule_gap(
+        capsule: [f32; 2],
         trigger: &SceneTrigger,
         room_origins: &BTreeMap<i32, [f32; 3]>,
         feet: [f32; 3],
     ) -> f32 {
-        const CAPSULE_TOP: f32 = 1.95;
-        const CAPSULE_RADIUS: f32 = 0.48;
+        let [capsule_radius, capsule_top] = capsule;
         let origin = room_origins
             .get(&trigger.room_id)
             .copied()
             .unwrap_or([0.0; 3]);
         let centre = [0, 1, 2].map(|k| origin[k] + trigger.pos[k]);
-        let nearest_y = centre[1].clamp(feet[1], feet[1] + CAPSULE_TOP);
+        let nearest_y = centre[1].clamp(feet[1], feet[1] + capsule_top);
         let d = [
             centre[0] - feet[0],
             centre[1] - nearest_y,
             centre[2] - feet[2],
         ];
-        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - CAPSULE_RADIUS - trigger.radius
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - capsule_radius - trigger.radius
     }
 
     /// The closest enabled action button and how far it is from reach (0 or less is in reach).
@@ -1971,11 +1973,12 @@ impl LdbScene {
         room_origins: &BTreeMap<i32, [f32; 3]>,
         feet: [f32; 3],
     ) -> Option<(String, f32)> {
+        let capsule = self.player_capsule;
         self.triggers
             .iter()
             .filter(|trigger| trigger.enabled && trigger.trigger_type == TRIGGER_ACTION_BUTTON)
             .map(|trigger| {
-                let gap = Self::capsule_gap(trigger, room_origins, feet);
+                let gap = Self::capsule_gap(capsule, trigger, room_origins, feet);
                 (trigger.name.clone(), gap)
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -1987,11 +1990,17 @@ impl LdbScene {
         room_origins: &BTreeMap<i32, [f32; 3]>,
         feet: [f32; 3],
     ) -> bool {
+        let capsule = self.player_capsule;
         let nearest = self
             .triggers
             .iter()
             .filter(|trigger| trigger.enabled && trigger.trigger_type == TRIGGER_ACTION_BUTTON)
-            .map(|trigger| (trigger, Self::capsule_gap(trigger, room_origins, feet)))
+            .map(|trigger| {
+                (
+                    trigger,
+                    Self::capsule_gap(capsule, trigger, room_origins, feet),
+                )
+            })
             .filter(|(_, gap)| *gap <= 0.0)
             .min_by(|a, b| a.1.total_cmp(&b.1));
         let Some((trigger, _)) = nearest else {
@@ -2007,6 +2016,7 @@ impl LdbScene {
         room_origins: &BTreeMap<i32, [f32; 3]>,
         feet: [f32; 3],
     ) -> bool {
+        let capsule = self.player_capsule;
         let mut entered = Vec::new();
         for trigger in &mut self.triggers {
             if !matches!(
@@ -2015,7 +2025,7 @@ impl LdbScene {
             ) {
                 continue;
             }
-            let touching = Self::capsule_gap(trigger, room_origins, feet) <= 0.0;
+            let touching = Self::capsule_gap(capsule, trigger, room_origins, feet) <= 0.0;
             if touching && !trigger.touched && trigger.enabled {
                 entered.push(strip_trigger_suffix(&trigger.name).to_string());
             }
@@ -3345,6 +3355,7 @@ pub fn parse_ldb_scene(data: &[u8]) -> Option<LdbScene> {
         slow_motion_level: None,
         character_orders: Vec::new(),
         closed_exits: Default::default(),
+        player_capsule: [0.48, 1.95],
         screen_flash: None,
         inventory: Default::default(),
         hud_prints: Vec::new(),
@@ -3579,6 +3590,7 @@ mod tests {
             slow_motion_level: None,
             character_orders: Vec::new(),
             closed_exits: Default::default(),
+            player_capsule: [0.48, 1.95],
             screen_flash: None,
             inventory: Default::default(),
             hud_prints: Vec::new(),
