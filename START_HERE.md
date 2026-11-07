@@ -1,6 +1,6 @@
 # Open Max Payne — start here
 
-**Open Max Payne** = play Max Payne 1 (Linux lab) + MAX-FX archive tools.  
+**Open Max Payne** = play Max Payne 1 on current systems, and mod it with tools for today.  
 **OpenMaxFX Studio** is the graphical front door.
 
 ## Start the Studio

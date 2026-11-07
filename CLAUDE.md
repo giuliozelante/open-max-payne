@@ -4,14 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Open Max Payne
 
-Standalone project: Max Payne 1 play + MAX-FX tools → **OpenLara-style north star**
-(native engine + native tools, BYOD — user supplies retail install at `~/Games/MaxPayne1`).
-**Baseline today:** Wine Play bridge + Rust `openras` / patcher / play. Engine = long arc.
-Product spec: `docs/specs/2026-10-30-open-max-payne.md`. Latest handoff/state: `docs/HANDOFF-CLAUDE-CODE.md`.
+Standalone project with two equal goals, BYOD (user supplies retail install at `~/Games/MaxPayne1`):
+1. **Game:** native engine playing Max Payne 1 on current OSes, faithful, with every community fix (#162-#168).
+2. **Modding:** MAX-FX tools and importers/exporters for current OSes and modelling software.
+Wine + `MaxPayne.exe` is a fallback until the engine can finish the game.
+Product spec: `docs/specs/2026-10-30-open-max-payne.md`. Current state: `docs/STATUS.md`.
 
 ## Do
 
-- Keep pillars separate: Play / Content / Author / Studio / Engine (long arc)
+- Keep pillars separate: Play / Content / Author / Studio / Engine
 - Spec + REA before claiming format or engine details (`docs/specs/`, `docs/rea/`)
 - Label REA claims **VERIFIED / STRONGLY SUPPORTED / HYPOTHESIS / UNKNOWN**, with addresses
   (PE i386, ImageBase `0x400000`). Record ruled-out paths too.
@@ -25,7 +26,7 @@ Product spec: `docs/specs/2026-10-30-open-max-payne.md`. Latest handoff/state: `
 - Commit `vendor/` (local REA reference), game installs, `*.exe`/`*.dll`/`*.ras`/`*.mpm`,
   FixPack blobs, or proprietary SDKs
 - Ship Max Payne binaries or third-party mod asset trees, or host other games’/mods’ content
-- Claim a playable native engine without a walking skeleton + REA-backed specs
+- Put invented values in engine code: behaviour comes from retail data or exe evidence
 - Conflate DO_Animate (dynamic-mesh transform curves) with KF2 vertex animation — separate
   retail paths (see `docs/rea/2026-11-01-*.md`)
 
