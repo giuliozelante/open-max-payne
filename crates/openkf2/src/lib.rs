@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 
+pub mod gltf;
+
 /// A decoded bitmap a material names.
 #[derive(Debug, Clone)]
 pub struct DecodedTexture {
