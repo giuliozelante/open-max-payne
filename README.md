@@ -2,25 +2,40 @@
 
 [![ci](https://github.com/giuliozelante/open-max-payne/actions/workflows/ci.yml/badge.svg)](https://github.com/giuliozelante/open-max-payne/actions/workflows/ci.yml)
 
-Play **Max Payne 1** and use its **MAX-FX** toolchain on modern OSes.
-You need your own retail CD / install. This project does **not** redistribute the game.
+Play **Max Payne 1** on today's Windows, Linux and macOS with every community fix built in, and mod it with
+tools that work on those systems and with today's 3D software.
+You need your own retail CD or install. This project does **not** redistribute the game.
 
-**North star (OpenLara model):** clean-room native **engine** + **MAX-FX tools** that
-read your BYOD data. Wine + original `MaxPayne.exe` is the bridge until the engine exists.
+## Goals
+
+Two goals carry equal weight:
+
+1. **The game.** A native engine that plays Max Payne 1 from your retail files, faithful to the original, and at
+   least matching every unofficial patch (issues #162 to #168).
+2. **Modding.** The MAX-FX tools and importers/exporters rebuilt for current systems and modelling software:
+   archives, particles, models, animation and levels.
+
+Behaviour comes from the game's data and from evidence in the original exe, never from invented values. Wine with
+the original `MaxPayne.exe` stays as a fallback until the engine can finish the game.
 Product spec: [docs/specs/2026-10-30-open-max-payne.md](docs/specs/2026-10-30-open-max-payne.md).
+Current state: [docs/STATUS.md](docs/STATUS.md).
 
-## Current baseline (honest)
+## What works today
 
 | Area | Status |
 |------|--------|
-| **Play (Rust)** | `maxfx-play` — Wine/`MaxPayne.exe` default; Studio checkbox / `OPENMAXFX_PLAY=native` → `maxfx-engine --window` 3D textured + lightmapped walkthrough |
-| **1.05 patcher** | `maxfx-patcher` — HTTPS + SHA-256 allowlist; refuses SFX installers |
-| **`openras` (Rust)** | **Complete** — RASMaker `-x/-v/-a/-m/-p/-c` + `RA->` 12-byte LZSS header (`rl.dll` `0x10012fa0`); extracts all retail `x_level*.ras` |
-| **`openpfx` (Rust)** | **Alpha** — `dump-pse`, `dump-rps`, `export-root` (`export`), `validate-rps` (`PS_ParticleSystem` `0x60`/`5` gates) |
-| **`maxfx-engine`** | **3D Walkthrough + Tools** — 100% `.ldb` scene decoder (textures, `256²` lightmaps, rooms, portals, static & dynamic meshes, FSMs, triggers, items, characters), interactive 3D walkthrough (`--window`; `--renderer hw` wgpu hardware renderer by default, `--renderer sw` software fallback), headless single-frame PPM render (`--frame out.ppm [--camera NAME.DO]`), and `.kf2`/`.skd` chunk inspector |
-| **Studio (Tauri)** | Native GUI front door: **RASMaker**, **Play**, **MaxED 3D**, **ParticleFX**, and **ActorFX** tabs |
-| **`.sh` runtime** | Linux convenience only — not required on Windows |
-| **Blender KF2** | Specification / early architecture (stub add-on) |
+| **Engine: Tutorial** | Plays start to finish from retail data: movement, rolls and dives, weapons, HUD, sound, snow and particles, scripted enemies, health, painkillers, falling damage |
+| **Engine: enemies** | They appear, take hits and die, but do not shoot back or find paths yet |
+| **Engine: New Game** | Starts the intro and early levels; the full game has not been played through |
+| **Engine: fixes** | Tracked in issues #162 to #168; widescreen, settings and saves are still open |
+| **Wine fallback** | `maxfx-play` runs the original `MaxPayne.exe`; `OPENMAXFX_PLAY=native` picks the engine |
+| **1.05 patcher** | `maxfx-patcher`: HTTPS and a SHA-256 allowlist; refuses SFX installers |
+| **`openras`** | Complete RASMaker replacement for RAS/MPM archives |
+| **`openpfx`** | Reads and repacks `.rps`; PSE to RPS export is partial |
+| **Studio (Tauri)** | GUI over the crates: RASMaker, Play, MaxED 3D, ParticleFX, ActorFX tabs |
+| **Blender add-on** | Stub: it lists names from KF2/SKD/KFS files and imports no geometry yet |
+| **Level editing** | Levels can be read and viewed; no editor or `.ldb` writer yet |
+| **`.sh` runtime** | Linux convenience only; not required on Windows |
 
 ## Quick start (Linux)
 
@@ -46,14 +61,15 @@ Guide: [START_HERE.md](START_HERE.md) · Play notes: [docs/PLAY_LINUX.md](docs/P
 
 ```
 crates/openras/       # RAS/MPM + RASMaker-compatible CLI
-crates/openpfx/       # ParticleFX PSE dump (draft)
-crates/maxfx-engine/  # Native engine skeleton (BYOD archive open)
-crates/maxfx-play/    # Wine/native Play bridge
+crates/openpfx/       # ParticleFX PSE and RPS tools
+crates/maxfx-engine/  # Native engine: levels, rendering, gameplay, audio
+crates/maxfx-play/    # Picks the native engine or the Wine fallback
 crates/maxfx-patcher/  # 1.05 drop-in apply
 studio/               # Tauri Studio
 runtime/              # CD install, Wine bootstrap, localized-safe stack
-tools/blender_io_kf2/ # Blender KF2 (early)
-docs/specs/           # clean-room format notes
+tools/blender_io_kf2/ # Blender add-on (stub)
+docs/specs/           # format notes and plans
+docs/rea/             # reverse-engineering notes with addresses
 vendor/               # local-only REA reference (gitignored — never commit)
 ```
 
