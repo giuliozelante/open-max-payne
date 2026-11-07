@@ -80,7 +80,6 @@ struct EnemyState {
     health: f32,
     /// The skin's `MaximumHealth` times `EnemyHealthMultiplier` (0x691bd0).
     max_health: f32,
-    hit_flash: f32,
     rig_index: usize,
     pursues: bool,
     invulnerable: bool,
@@ -185,7 +184,6 @@ pub fn run_3d_walkthrough(
             walk_phase: 0.0,
             health: if ch.starts_dead() { 0.0 } else { max_health },
             max_health,
-            hit_flash: 0.0,
             rig_index,
             pursues: ch.pursues(),
             invulnerable,
@@ -1255,7 +1253,6 @@ pub fn run_3d_walkthrough(
         // Update Enemy AI (turn toward Max Payne and advance along floor when within 24m)
         let player_feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
         for en in &mut enemies {
-            en.hit_flash = (en.hit_flash - base_dt).max(0.0);
             if let Some((clip, time, played)) = &mut en.death {
                 let before = *time;
                 *time += world_dt;
@@ -1470,7 +1467,6 @@ pub fn run_3d_walkthrough(
                         &erig.mesh,
                         &verts,
                         en.world_pos,
-                        en.hit_flash > 0.0,
                         &frame_lights,
                         scene.ambient,
                     );
@@ -1487,8 +1483,7 @@ pub fn run_3d_walkthrough(
                 .into_iter()
                 .chain(placed_flyers(&flyers, &flyer_models))
             {
-                let light =
-                    character_vertex_light(mesh, &verts, at, false, &frame_lights, scene.ambient);
+                let light = character_vertex_light(mesh, &verts, at, &frame_lights, scene.ambient);
                 characters.push(crate::gpu::GpuCharacter {
                     mesh,
                     verts,
@@ -1513,7 +1508,6 @@ pub fn run_3d_walkthrough(
                     &prig.mesh,
                     &verts,
                     player_feet,
-                    false,
                     &frame_lights,
                     scene.ambient,
                 );
@@ -1537,7 +1531,6 @@ pub fn run_3d_walkthrough(
                         weapon,
                         &verts,
                         player_feet,
-                        false,
                         &frame_lights,
                         scene.ambient,
                     );
@@ -1614,7 +1607,6 @@ pub fn run_3d_walkthrough(
                     &verts,
                     en.world_pos,
                     dead,
-                    en.hit_flash > 0.0,
                     &frame_lights,
                     scene.ambient,
                     cam_pos,
@@ -1638,7 +1630,6 @@ pub fn run_3d_walkthrough(
                 mesh,
                 &verts,
                 at,
-                false,
                 false,
                 &frame_lights,
                 scene.ambient,
@@ -1678,7 +1669,6 @@ pub fn run_3d_walkthrough(
                         &verts,
                         player_feet,
                         two_sided,
-                        false,
                         &frame_lights,
                         scene.ambient,
                         cam_pos,
@@ -3998,7 +3988,6 @@ fn flight_contact(
 fn hurt_enemy(en: &mut EnemyState, damage: i32, scene: &mut LdbScene, clips: usize) -> bool {
     let alive = en.health > 0.0;
     en.health -= damage as f32;
-    en.hit_flash = 0.25;
     println!(
         "  3D Engine: Hit {}! (health={})",
         en.name,
@@ -4331,18 +4320,14 @@ pub(crate) fn character_face_normal(
 }
 
 /// Per-vertex diffuse of a posed character: the retail point-light selection and D3D diffuse
-/// (#37), or a flat 1.35 while a hit flash lasts.
+/// (#37).
 pub(crate) fn character_vertex_light(
     mesh: &crate::kf2::KfsMesh,
     world: &[[f32; 3]],
     world_pos: [f32; 3],
-    hit_flash: bool,
     lights: &[ScenePointLight],
     ambient: [f32; 3],
 ) -> Vec<[f32; 3]> {
-    if hit_flash {
-        return vec![[1.35; 3]; world.len()];
-    }
     let normals = smooth_normals(world, &mesh.faces);
     let radius = world
         .iter()
@@ -4371,7 +4356,6 @@ fn render_kfs_character(
     world: &[[f32; 3]],
     world_pos: [f32; 3],
     two_sided: bool,
-    hit_flash: bool,
     lights: &[ScenePointLight],
     ambient: [f32; 3],
     cam_pos: [f32; 3],
@@ -4398,7 +4382,7 @@ fn render_kfs_character(
         cam_pts.push([cx, cy_c, cz]);
     }
 
-    let vertex_light = character_vertex_light(mesh, world, world_pos, hit_flash, lights, ambient);
+    let vertex_light = character_vertex_light(mesh, world, world_pos, lights, ambient);
     let mut tris = Vec::new();
     for face in &mesh.faces {
         let [i0, i1, i2] = face.indices;
@@ -5208,7 +5192,6 @@ pub(crate) fn test_software_dynamic(
 pub(crate) fn test_software_character(
     rig: &CharacterRig,
     pos: [f32; 3],
-    hit_flash: bool,
     (cam, right, up, fwd): crate::gpu::GpuView,
 ) -> (Vec<u32>, Vec<f32>) {
     let mut fb = vec![0u32; W * H];
@@ -5219,7 +5202,6 @@ pub(crate) fn test_software_character(
         &verts,
         pos,
         false,
-        hit_flash,
         &[],
         [0.0; 3],
         cam,
@@ -5663,7 +5645,6 @@ mod tests {
             walk_phase: 0.0,
             health: 100.0,
             max_health: 80.0,
-            hit_flash: 0.0,
             rig_index: 0,
             pursues: false,
             invulnerable: false,
@@ -5700,7 +5681,6 @@ mod tests {
             walk_phase: 0.0,
             health: 10.0,
             max_health: 10.0,
-            hit_flash: 0.0,
             rig_index: 0,
             pursues: false,
             invulnerable: false,
@@ -6163,12 +6143,12 @@ mod tests {
             parts: Vec::new(),
         };
         let verts = vec![[0.0, 0.0, 0.0]];
-        let dark = character_vertex_light(&rig, &verts, [0.0; 3], false, &[], [0.0; 3]);
+        let dark = character_vertex_light(&rig, &verts, [0.0; 3], &[], [0.0; 3]);
         assert_eq!(dark[0], [0.0, 0.0, 0.0]);
-        let lit = character_vertex_light(&rig, &verts, [0.0; 3], false, &[], [140.0, 135.0, 110.0]);
+        let lit = character_vertex_light(&rig, &verts, [0.0; 3], &[], [140.0, 135.0, 110.0]);
         assert_eq!(lit[0], [140.0 / 255.0, 135.0 / 255.0, 110.0 / 255.0]);
         let near = [light([0.0, 0.1, 0.0], 255.0, 10.0, 1.0)];
-        let sat = character_vertex_light(&rig, &verts, [0.0; 3], false, &near, [300.0, 0.0, 0.0]);
+        let sat = character_vertex_light(&rig, &verts, [0.0; 3], &near, [300.0, 0.0, 0.0]);
         assert_eq!(sat[0], [1.0, 0.0, 0.0]);
     }
 

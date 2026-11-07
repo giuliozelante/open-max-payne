@@ -2166,8 +2166,8 @@ mod tests {
         let front = crate::render3d::test_view([0.0, 1.0, -3.0], [0.0, 0.0, 1.0]);
         let back = crate::render3d::test_view([0.0, 1.0, 3.0], [0.0, 0.0, -1.0]);
         let covered = |zb: &[f32]| zb.iter().filter(|z| z.is_finite()).count();
-        let (_, sw_front) = crate::render3d::test_software_character(&rig, [0.0; 3], false, front);
-        let (_, sw_back) = crate::render3d::test_software_character(&rig, [0.0; 3], false, back);
+        let (_, sw_front) = crate::render3d::test_software_character(&rig, [0.0; 3], front);
+        let (_, sw_back) = crate::render3d::test_software_character(&rig, [0.0; 3], back);
         assert!(covered(&sw_front) > 1000, "software front");
         assert_eq!(covered(&sw_back), 0, "software back");
         let scene = crate::render3d::test_empty_scene();
@@ -2202,19 +2202,12 @@ mod tests {
         let rig = quad_rig();
         let view = crate::render3d::test_view([0.0, 1.0, -3.0], [0.0, 0.0, 1.0]);
         let (w, h) = (crate::render3d::FRAME_W, crate::render3d::FRAME_H);
-        for hit_flash in [false, true] {
-            let (sw_fb, sw_zb) =
-                crate::render3d::test_software_character(&rig, [0.0; 3], hit_flash, view);
+        {
+            let (sw_fb, sw_zb) = crate::render3d::test_software_character(&rig, [0.0; 3], view);
             let verts =
                 crate::render3d::character_world_verts(&rig, [0.0; 3], 0.0, 0.0, false, false);
-            let light = crate::render3d::character_vertex_light(
-                &rig.mesh,
-                &verts,
-                [0.0; 3],
-                hit_flash,
-                &[],
-                [0.0; 3],
-            );
+            let light =
+                crate::render3d::character_vertex_light(&rig.mesh, &verts, [0.0; 3], &[], [0.0; 3]);
             let character = GpuCharacter {
                 mesh: &rig.mesh,
                 verts,
@@ -2243,7 +2236,7 @@ mod tests {
                 .unwrap_or(0);
             assert!(
                 channel_gap <= 1,
-                "shade {hit_flash}: {:06x} vs {:06x}",
+                "shade: {:06x} vs {:06x}",
                 fb[center],
                 sw_fb[center]
             );
