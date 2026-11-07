@@ -2641,6 +2641,7 @@ dependencies = [
  "bytemuck",
  "jpeg-decoder",
  "minifb",
+ "openkf2",
  "openpfx",
  "openras",
  "pollster",
@@ -3358,6 +3359,10 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
 ]
+
+[[package]]
+name = "openkf2"
+version = "0.1.0"
 
 [[package]]
 name = "openpfx"

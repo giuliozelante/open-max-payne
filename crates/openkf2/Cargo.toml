@@ -1,0 +1,10 @@
+[package]
+name = "openkf2"
+version = "0.1.0"
+edition = "2021"
+description = "Clean-room ActorFX KF2/SKD/KFS tooling for Max Payne 1"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "openkf2"
+path = "src/lib.rs"

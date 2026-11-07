@@ -32,15 +32,15 @@ Product spec: `docs/specs/2026-10-30-open-max-payne.md`. Current state: `docs/ST
 
 ## Commands
 
-Cargo workspace root `Cargo.toml`; members: `openras`, `openpfx`, `maxfx-patcher`,
+Cargo workspace root `Cargo.toml`; members: `openras`, `openpfx`, `openkf2`, `maxfx-patcher`,
 `maxfx-play`, `maxfx-engine` (under `crates/`) and `studio/src-tauri` (package
 `open-max-payne-studio`). Use `--offline` when deps already fetched.
 
 ```bash
 # What CI runs (.github/workflows/ci.yml, RUSTFLAGS=-Dwarnings)
 cargo fmt --all -- --check
-cargo clippy -p openras -p openpfx -p maxfx-patcher -p maxfx-play -p maxfx-engine --all-targets -- -D warnings
-cargo test   -p openras -p openpfx -p maxfx-patcher -p maxfx-play -p maxfx-engine
+cargo clippy -p openras -p openpfx -p openkf2 -p maxfx-patcher -p maxfx-play -p maxfx-engine --all-targets -- -D warnings
+cargo test   -p openras -p openpfx -p openkf2 -p maxfx-patcher -p maxfx-play -p maxfx-engine
 cargo check  -p open-max-payne-studio          # needs webkit2gtk-4.1 / gtk3 dev libs
 shellcheck -x runtime/*.sh openmaxfx
 
@@ -60,7 +60,7 @@ cd studio && bun install && ./build.sh          # build.sh sources rust-env.sh (
 
 ## Architecture
 
-- **Content crates** (`openras`, `openpfx`): format libs + thin CLIs. `openras` = RAS/MPM archives
+- **Content crates** (`openras`, `openpfx`, `openkf2`): format libs + thin CLIs. `openras` = RAS/MPM archives
   (crypto + `RA->` 12-byte LZSS header, RASMaker CLI in `cli_rasmaker.rs`). `openpfx` = ParticleFX
   PSE dump / PSE→RPS export. Format specs: `docs/specs/{ras,rps,kf2}_format.md`.
 - **`maxfx-engine`**: lib + bin. `scene.rs` decodes level `.ldb` (textures, lightmaps, rooms,
