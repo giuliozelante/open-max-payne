@@ -1127,6 +1127,12 @@ pub fn run_3d_walkthrough(
                     .reload_sound
                     .clone()
                     .map(|cue| (def.reload_sound_delay, cue));
+                // The pump shotgun's sound is in Max's clip, not in the weapon file.
+                let rate = def.reload_clip.as_ref().and_then(|clip| clip.bones.first());
+                let rate = rate.map_or(1.0, |bone| bone.fps);
+                action_messages = player_clips.table.get(&index).map_or(Vec::new(), |clip| {
+                    crate::player::reload_clip_sounds(clip, rate)
+                });
             }
         }
         reload_seen = scene.inventory.reload_clips;
