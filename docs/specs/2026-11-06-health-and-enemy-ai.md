@@ -67,7 +67,7 @@ Each phase is its own PR series and is usable alone.
 below did not show: machines are plain rule tables. Enemies also run on the player's input interface, so the engine's
 character should take the same inputs from either the keyboard or a machine. Proposed order:
 
-1. Read the machine evaluator and enemy perception.
+1. Read enemy perception. The machine evaluator is done.
 2. Give enemies a shared character step: move, turn, shoot from inputs.
 3. Carry `StandAndShoot` and `StandAndShootStatic`, then fire with the projectile path Max uses.
 4. Decode `.ai`, then `RunWalkAndShoot` and `MobsterCombat`.

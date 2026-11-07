@@ -20,9 +20,12 @@ symbolic pass over the disassembly recovers them with no gaps in the machines re
 | `0x4f8ae0(when, do, until, ...)` | a rule that runs a sub-machine |
 | `0x4f8e30`, `0x4f91e0`, `0x4f93d0`, `0x4f95d0`, `0x4f97e0`, `0x4f9a00` | a state from 1, 3, 4, 5 or more rules |
 
-**STRONGLY SUPPORTED:** the operator numbers 38, 39 and 40 and the rule's three parts come from how they read in
-`StandAndShoot`, not from the code that evaluates them. The evaluator of `MaxPayne_AIStateMachine` (vtable `0x7cfcac`) is
-unread, so rule priority and the exact use of `until` are **UNKNOWN**.
+**VERIFIED (`0x4fa280`, `MaxPayne_AIStateMachine`, vtable `0x7cfcac`):** a state holds its rules in order, the first
+having priority. Each update tests the running rule's `until`. If it holds, every rule may take over; if not, only
+rules well above it may. The first rule whose `when` holds becomes current, with the old rule left and the new one
+entered and its timer reset. Otherwise the running rule goes on. Rule timers advance by the frame time.
+
+**STRONGLY SUPPORTED:** operators 38, 39 and 40 come from how they read in `StandAndShoot`, not from their code.
 
 ## Actions
 
@@ -63,13 +66,13 @@ The others are unnamed.
 
 ## What the Tutorial uses
 
-`StandAndShoot` keeps a set of rules: shoot, turn toward the target and shoot, and when the enemy is perceived but not
-seen, action 28 until seen. With no perceived enemy it waits. `RunWalkAndShoot` adds distance bands: around 1.2 m it
+`StandAndShoot`, in priority order: with no perceived enemy, wait until one is perceived; perceived but not seen, action 28
+until seen; target to one side, turn and shoot; to the other, turn and shoot; otherwise shoot. `RunWalkAndShoot` adds distance bands: around 1.2 m it
 walks and shoots, closer it backs away, and past about 6 m it runs. `MobsterCombat` picks sub-machines by distance
 with limits of 1, 4, 9.6 and 100 m, through `0x4f8ae0`.
 
 ## Open
 
-- The machine evaluator, and how `until` ends a rule.
 - Conditions 5, 6, 9 to 13, 15 to 23, 27, 28, 31, 32.
-- Enemy perception: the update of `+0x3ad` and `+0x3af` from `[AI]`.
+- Enemy perception: the update of `+0x3ad` and `+0x3af` from the skin's `[AI]` keys (`VisualPerceivingRadius`,
+  `GeneralPerceivingRadius`, `ShootingCone`, `EnemyInterestTime`).
