@@ -117,7 +117,8 @@ pub fn run_3d_walkthrough(
         .filter(|id| !id.is_empty())
         .and_then(|id| load_skin_body(level_path, id).map(|body| body.rig))
         .or(catalog_player);
-    let sky = world_sphere.and_then(|name| load_world_sphere(level_path, name));
+    let background = sky_background(scene.fog.as_ref());
+    let sky = world_sphere.and_then(|name| load_world_sphere(level_path, name, background));
 
     let mut room_origins: BTreeMap<i32, [f32; 3]> = BTreeMap::new();
     for r in &scene.rooms {
@@ -4843,6 +4844,15 @@ fn raster_band(t: &QueuedTri, fb: &mut [u32], zb: &mut [f32], y0: usize, y1: usi
     }
 }
 
+/// What shows where a world sphere has no mesh. Retail's sky there measures the level's
+/// `FogColor` in the owner's recording: (25, 23, 24) against (24, 24, 24) in the Tutorial.
+fn sky_background(fog: Option<&crate::scene::LevelFog>) -> u32 {
+    fog.map_or(0, |fog| {
+        let [r, g, b] = fog.color.map(|c| c.round() as u32);
+        0xff00_0000 | r << 16 | g << 8 | b
+    })
+}
+
 /// One mesh of a world sphere and its bitmaps, for [`bake_sky`].
 pub(crate) struct SkyLayer<'a> {
     mesh: &'a crate::kf2::SkyMesh,
@@ -4855,13 +4865,18 @@ const SKY_SIZE: (u32, u32) = (2048, 1024);
 
 /// Paints the world sphere's meshes, in order, onto one latitude-longitude image (`sky_uv`), so
 /// both renderers draw any sphere the same way and need no mesh pass of their own.
-pub(crate) fn bake_sky(layers: &[SkyLayer], width: u32, height: u32) -> DecodedTexture {
+pub(crate) fn bake_sky(
+    layers: &[SkyLayer],
+    width: u32,
+    height: u32,
+    background: u32,
+) -> DecodedTexture {
     let mut sky = DecodedTexture {
         path: String::new(),
         flag: 4,
         width,
         height,
-        pixels: vec![0; (width * height) as usize],
+        pixels: vec![background; (width * height) as usize],
     };
     for layer in layers {
         for tri in layer.mesh.indices.as_chunks::<3>().0 {
@@ -5050,7 +5065,7 @@ fn read_ci(dirs: &[std::path::PathBuf], name: &str) -> Option<Vec<u8>> {
     None
 }
 
-fn load_world_sphere(level_path: &Path, name: &str) -> Option<DecodedTexture> {
+fn load_world_sphere(level_path: &Path, name: &str, background: u32) -> Option<DecodedTexture> {
     let roots = world_sphere_roots(level_path);
     let catalog = read_ci(&roots, "worldspheres.txt")
         .or_else(|| crate::kf2::load_bytes_from_ras(level_path, &["worldspheres.txt"]))?;
@@ -5088,7 +5103,7 @@ fn load_world_sphere(level_path: &Path, name: &str) -> Option<DecodedTexture> {
             })
         })
         .collect();
-    Some(bake_sky(&layers, SKY_SIZE.0, SKY_SIZE.1))
+    Some(bake_sky(&layers, SKY_SIZE.0, SKY_SIZE.1, background))
 }
 
 fn draw_line(fb: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, col: u32) {
@@ -6826,6 +6841,19 @@ mod tests {
     }
 
     #[test]
+    fn a_sky_with_no_mesh_shows_the_fog_colour() {
+        let fog = crate::scene::LevelFog {
+            color: [24.0, 25.0, 26.0],
+            start: 5.0,
+            end: 100.0,
+        };
+        let background = sky_background(Some(&fog));
+        assert_eq!(background, 0xff18_191a);
+        assert_eq!(sky_background(None), 0);
+        assert_eq!(bake_sky(&[], 4, 2, background).pixels, [background; 8]);
+    }
+
+    #[test]
     fn a_sky_triangle_paints_only_the_directions_it_covers() {
         let mesh = sky_triangle([0.0, 0.0]);
         let colour = flat_texture(vec![0x00ff_0000]);
@@ -6834,7 +6862,7 @@ mod tests {
             colour: &colour,
             opacity: None,
         };
-        let sky = bake_sky(&[layer], 256, 128);
+        let sky = bake_sky(&[layer], 256, 128, 0);
         assert_eq!(baked_at(&sky, [0.0, 0.0, 1.0]), 0x00ff_0000);
         assert_eq!(baked_at(&sky, [0.0, 0.0, -1.0]), 0);
         assert_eq!(baked_at(&sky, [1.0, 0.0, 0.0]), 0);
@@ -6856,7 +6884,7 @@ mod tests {
             colour: &colour,
             opacity: None,
         };
-        let sky = bake_sky(&[layer], 256, 128);
+        let sky = bake_sky(&[layer], 256, 128, 0);
         assert_eq!(baked_at(&sky, [0.0, 0.0, 1.0]), 4);
     }
 
@@ -6881,6 +6909,7 @@ mod tests {
             ],
             256,
             128,
+            0,
         );
         assert_eq!(baked_at(&sky, [0.0, 0.0, 1.0]), 0x007f_0080);
     }
@@ -6891,7 +6920,7 @@ mod tests {
         if !catalog.is_file() {
             return;
         }
-        let tex = load_world_sphere(Path::new("/tmp/omp-xdata-ref"), "sunset").expect("sunset");
+        let tex = load_world_sphere(Path::new("/tmp/omp-xdata-ref"), "sunset", 0).expect("sunset");
         assert_eq!((tex.width, tex.height), SKY_SIZE);
         assert!(tex.pixels.iter().any(|px| *px != 0));
     }

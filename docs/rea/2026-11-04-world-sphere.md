@@ -20,7 +20,7 @@ Goal: explain why the intro showed the Manhattan skyline behind the chopper, whe
 
 `kf2::parse_world_sphere` reads the meshes and `render3d::bake_sky` paints them at load, in file order, onto a
 2048 x 1024 latitude-longitude image, about 0.25 s per sky in a dev build. Both renderers keep their single sky pass and
-sample that image through `sky_uv`. Directions the mesh does not cover stay black. In the intro the water hides them.
+sample that image through `sky_uv`. Directions the mesh does not cover show the level's `FogColor`, as retail measures in the Tutorial.
 
 The old code took the first bitmap and stretched it around the horizon, which put `intro`'s skyline toward −x and
 left +z, where retail has the glow behind the city, nearly empty.
