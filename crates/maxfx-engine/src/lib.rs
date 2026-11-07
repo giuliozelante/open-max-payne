@@ -4857,6 +4857,8 @@ mod tests {
         let weapons = load_weapon_defs(&game);
         assert_eq!(weapons["beretta"].slot, Some(1));
         assert_eq!(weapons["pumpshotgun"].slot, Some(2));
+        assert_eq!(weapons["sniper"].scope_fov, Some(0.1));
+        assert_eq!(weapons["beretta"].scope_fov, None);
         assert_eq!(load_player_capsule(&game), Some([0.48, 1.95]));
         let config = read_game_bytes(&game, r"\data\globalconfig.txt").expect("globalconfig.txt");
         let config = String::from_utf8_lossy(&config);
@@ -4868,6 +4870,7 @@ mod tests {
         let strip = &assets.layout.weapon_strip;
         assert_eq!(strip.slots.len(), 6);
         assert!(assets.bitmaps.contains_key(&strip.sheet.file));
+        assert!(assets.bitmaps.contains_key(&assets.layout.scope.sheet.file));
         assert!(weapons["pumpshotgun"].auto_aim);
         assert!(!weapons["sniper"].auto_aim);
         assert_eq!(difficulty.player_health, 1.0);
