@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/openras",
   "crates/openpfx",
+  "crates/openkf2",
   "crates/maxfx-patcher",
   "crates/maxfx-play",
   "crates/maxfx-engine",

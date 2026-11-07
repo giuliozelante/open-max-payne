@@ -9,15 +9,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-#[derive(Debug, Clone)]
-pub struct DecodedTexture {
-    pub path: String,
-    pub flag: u8,
-    pub width: u32,
-    pub height: u32,
-    /// Packed `0x00RRGGBB` pixels (`width * height`).
-    pub pixels: Vec<u32>,
-}
+pub use openkf2::DecodedTexture;
 
 #[derive(Debug, Clone)]
 pub struct DecodedLightmap {
