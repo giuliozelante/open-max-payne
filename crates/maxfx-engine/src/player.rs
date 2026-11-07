@@ -840,6 +840,13 @@ mod tests {
     }
 
     #[test]
+    fn a_clips_messages_come_with_their_seconds() {
+        let said = clips().timed_messages("CHARANIM_SHOOTDODGEFORWARD");
+        assert_eq!(said, [(0.1, "this->C_Reload();".to_string())]);
+        assert!(clips().timed_messages("CHARANIM_NOTHING").is_empty());
+    }
+
+    #[test]
     fn a_dodge_needs_a_direction() {
         let c = Controls {
             dodge: Some(DodgeKind::Dive),
