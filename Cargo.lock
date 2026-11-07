@@ -3363,6 +3363,10 @@ dependencies = [
 [[package]]
 name = "openkf2"
 version = "0.1.0"
+dependencies = [
+ "clap",
+ "jpeg-decoder",
+]
 
 [[package]]
 name = "openpfx"

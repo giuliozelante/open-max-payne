@@ -5,6 +5,14 @@ edition = "2021"
 description = "Clean-room ActorFX KF2/SKD/KFS tooling for Max Payne 1"
 license = "MIT OR Apache-2.0"
 
+[[bin]]
+name = "openkf2"
+path = "src/main.rs"
+
 [lib]
 name = "openkf2"
 path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+jpeg-decoder = "0.3"
