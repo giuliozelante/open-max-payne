@@ -203,7 +203,6 @@ pub fn run_3d_walkthrough(
     let mut third_person = true;
     let mut scoped = false;
     let mut bullet_time = false;
-    let mut right_was_down = false;
     let mut shot_timer: f32 = 0.0;
     // Seconds into the player's shot or reload clip.
     let mut level_end = LevelEnd::Closed;
@@ -232,7 +231,7 @@ pub fn run_3d_walkthrough(
     let mut last_mouse: Option<(f32, f32)> = None;
     let mut anim_clock = 0.0f32;
     println!(
-        "  3D Engine: Spawned ({} actors, {} skins, player={}, sky={}) | WASD move, Mouse/Arrows look, F/Ctrl shoot, B/RightClick Bullet-Time, E interact, V 3rd/1st person, Tab next spawn, G fly/walk",
+        "  3D Engine: Spawned ({} actors, {} skins, player={}, sky={}) | game keys from your Max Payne bindings (retail defaults otherwise); debug: V 3rd/1st person, F1 wireframe, F2 next jumppoint, F3 fly, L lightmaps",
         enemies.len(),
         skin_cache.len(),
         player_skin.unwrap_or("max_payne"),
@@ -358,6 +357,7 @@ pub fn run_3d_walkthrough(
         .map(|text| crate::hud::parse_string_table(&text))
         .unwrap_or_default();
     let bindings = crate::input::load_bindings(&game_root);
+    let mut actions = crate::input::ActionInput::new(bindings.clone());
     let key_names = crate::input::load_key_names(&game_root);
     let mut print_log = crate::hud::HudPrintLog::default();
     let mut tip_log = crate::hud::HudPrintLog::default();
@@ -451,27 +451,27 @@ pub fn run_3d_walkthrough(
         if window.is_key_pressed(Key::V, KeyRepeat::No) {
             third_person = !third_person;
         }
-        let right_down = window.get_mouse_down(MouseButton::Right);
-        let right_pressed = right_down && !right_was_down;
-        right_was_down = right_down;
-        let key = |key| i32::from(window.is_key_down(key) && scene.player_controls);
-        let (forward_keys, right_keys) = (key(Key::W) - key(Key::S), key(Key::D) - key(Key::A));
+        use crate::input::slot;
+        actions.begin_frame(window);
+        let bullet_time_pressed = actions.pressed(window, slot::BULLET_TIME, 0);
+        let gated = |axis: i32| if scene.player_controls { axis } else { 0 };
+        let forward_keys = gated(-actions.axis(window, slot::RUN));
+        let right_keys = gated(actions.axis(window, slot::STRAFE));
         let held = forward_keys != 0 || right_keys != 0;
         // A direction turns the button into a dodge; a dive takes a weapon and gauge that allow it.
-        let dodge = (right_pressed && held && !fly_mode && motion.can_dodge(grounded)).then(|| {
-            let weapon = scene.inventory.current.as_ref();
-            let allowed = weapon
-                .and_then(|name| scene.inventory.defs.get(name))
-                .is_some_and(|def| def.dive_allowed);
-            if allowed && slow_motion.pay_for_dive() {
-                crate::player::DodgeKind::Dive
-            } else {
-                crate::player::DodgeKind::Roll
-            }
-        });
-        let pressed = (window.is_key_pressed(Key::B, KeyRepeat::No) || right_pressed)
-            && dodge.is_none()
-            && !motion.dodging();
+        let dodge =
+            (bullet_time_pressed && held && !fly_mode && motion.can_dodge(grounded)).then(|| {
+                let weapon = scene.inventory.current.as_ref();
+                let allowed = weapon
+                    .and_then(|name| scene.inventory.defs.get(name))
+                    .is_some_and(|def| def.dive_allowed);
+                if allowed && slow_motion.pay_for_dive() {
+                    crate::player::DodgeKind::Dive
+                } else {
+                    crate::player::DodgeKind::Roll
+                }
+            });
+        let pressed = bullet_time_pressed && dodge.is_none() && !motion.dodging();
         let was_slow = slow_motion.active;
         let asked = pressed && !bullet_time;
         bullet_time = slow_motion.switch(bullet_time, pressed, base_dt);
@@ -506,11 +506,10 @@ pub fn run_3d_walkthrough(
             fly_mode = !fly_mode;
             vel_y = 0.0;
         }
-        if scene.player_controls && window.is_key_pressed(Key::G, KeyRepeat::No) {
+        if scene.player_controls && actions.pressed(window, slot::BEST_WEAPON, 0) {
             scene.inventory.take_best_loaded();
         }
-        let pill_key = window.is_key_pressed(Key::Tab, KeyRepeat::No)
-            || window.is_key_pressed(Key::Backspace, KeyRepeat::No);
+        let pill_key = actions.pressed(window, slot::PAINKILLER, 0);
         let hurt = player_health
             .as_ref()
             .is_some_and(|max| max.health < max.max);
@@ -540,22 +539,14 @@ pub fn run_3d_walkthrough(
         }
 
         // Interact (`E`): the action button trigger in reach
-        if scene.player_controls && window.is_key_pressed(Key::R, KeyRepeat::No) {
+        if scene.player_controls && actions.pressed(window, slot::RELOAD, 0) {
             scene.inventory.start_reload();
         }
         if scene.player_controls {
-            // The Tutorial's tip names keys 1-6, and `SLOTID_*` runs 0 to 5.
-            let keys = [
-                Key::Key1,
-                Key::Key2,
-                Key::Key3,
-                Key::Key4,
-                Key::Key5,
-                Key::Key6,
-            ];
-            for (slot, key) in (0..).zip(keys) {
-                if window.is_key_pressed(key, KeyRepeat::No) {
-                    scene.inventory.select_slot(slot);
+            // `#SELECTWEAPONSLOT0#` to `#SELECTWEAPONSLOT10#`; `SLOTID_*` counts from 0.
+            for weapon_slot in 0..=10 {
+                if actions.pressed(window, slot::SELECT_WEAPON + weapon_slot, 0) {
+                    scene.inventory.select_slot(weapon_slot as u32);
                 }
             }
             let wheel = window.scroll();
@@ -571,7 +562,7 @@ pub fn run_3d_walkthrough(
             scoped = false;
             scene.fov_multiplier.set(1.0, scope_seconds);
         }
-        if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
+        if scene.player_controls && actions.pressed(window, slot::USE, 0) {
             let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
             if let Some((name, gap)) = scene.nearest_action_trigger(&room_origins, feet) {
                 println!("  3D Engine: use: {name} is {gap:.2} m out of reach");
@@ -601,20 +592,11 @@ pub fn run_3d_walkthrough(
             }
         }
 
-        // Look controls (Arrows + left-mouse drag)
+        // Look: the aim slots' keys (none by default), then the mouse.
         let turn_speed = 2.2 * base_dt;
-        if window.is_key_down(Key::Left) {
-            yaw -= turn_speed;
-        }
-        if window.is_key_down(Key::Right) {
-            yaw += turn_speed;
-        }
-        if window.is_key_down(Key::Up) {
-            pitch = (pitch + turn_speed).min(1.25);
-        }
-        if window.is_key_down(Key::Down) {
-            pitch = (pitch - turn_speed).max(-1.25);
-        }
+        yaw += actions.axis(window, slot::AIM_LEFT_RIGHT) as f32 * turn_speed;
+        pitch = (pitch - actions.axis(window, slot::AIM_UP_DOWN) as f32 * turn_speed)
+            .clamp(-1.25, 1.25);
         let hard_mouse = window.mouse_motion();
         if let Some(motion) = look_motion(hard_mouse, scene.player_controls) {
             let slowed = if scoped {
@@ -651,23 +633,9 @@ pub fn run_3d_walkthrough(
         };
         let right = [cy, 0.0, -sy];
         let mut mv = [0.0f32; 3];
-        if window.is_key_down(Key::W) {
-            mv[0] += fwd[0];
-            mv[1] += fwd[1];
-            mv[2] += fwd[2];
-        }
-        if window.is_key_down(Key::S) {
-            mv[0] -= fwd[0];
-            mv[1] -= fwd[1];
-            mv[2] -= fwd[2];
-        }
-        if window.is_key_down(Key::D) {
-            mv[0] += right[0];
-            mv[2] += right[2];
-        }
-        if window.is_key_down(Key::A) {
-            mv[0] -= right[0];
-            mv[2] -= right[2];
+        let (ahead, aside) = (forward_keys as f32, right_keys as f32);
+        for k in 0..3 {
+            mv[k] += fwd[k] * ahead + right[k] * aside;
         }
         if !scene.player_controls {
             mv = [0.0; 3];
@@ -675,8 +643,8 @@ pub fn run_3d_walkthrough(
         let controls = crate::player::Controls {
             forward: forward_keys,
             right: right_keys,
-            jump: window.is_key_pressed(Key::Space, KeyRepeat::No) && scene.player_controls,
-            crouch: window.is_key_down(Key::C) && scene.player_controls,
+            jump: actions.pressed(window, slot::JUMP, 0) && scene.player_controls,
+            crouch: actions.down(window, slot::CROUCH, 0) && scene.player_controls,
             dodge,
             two_handed: player_rig.as_ref().is_some_and(|rig| rig.two_handed),
             grounded,
@@ -701,10 +669,10 @@ pub fn run_3d_walkthrough(
         anim_clock += player_dt;
 
         if fly_mode {
-            if window.is_key_down(Key::Space) {
+            if actions.down(window, slot::JUMP, 0) {
                 mv[1] += 1.0;
             }
-            if window.is_key_down(Key::C) {
+            if actions.down(window, slot::CROUCH, 0) {
                 mv[1] -= 1.0;
             }
             player_pos[0] += mv[0] * fly_speed * player_dt;
@@ -786,12 +754,9 @@ pub fn run_3d_walkthrough(
             scene.inventory.auto_reload();
         }
 
-        // Shoot (left mouse, `F` or `LeftCtrl` / `RightCtrl`)
+        // Shoot: the `#SHOOT#` slot.
         // No weapon file marks a gun automatic, so held fire repeats for all of them.
-        let fire_held = window.get_mouse_down(MouseButton::Left)
-            || window.is_key_down(Key::F)
-            || window.is_key_down(Key::LeftCtrl)
-            || window.is_key_down(Key::RightCtrl);
+        let fire_held = actions.down(window, slot::SHOOT, 0);
         if fire_held && scene.player_controls && shot_timer <= 0.0 {
             let def = scene.inventory.current.as_ref();
             let def = def.and_then(|name| scene.inventory.defs.get(name)).cloned();

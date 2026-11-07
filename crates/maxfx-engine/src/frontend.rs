@@ -63,6 +63,7 @@ struct InputState {
     pressed: BTreeSet<u32>,
     mouse_left: bool,
     mouse_right: bool,
+    mouse_middle: bool,
     cursor: Option<(f64, f64)>,
     size: (u32, u32),
     /// Relative mouse motion since the last pump.
@@ -120,6 +121,7 @@ impl ApplicationHandler for InputState {
                 match button {
                     winit::event::MouseButton::Left => self.mouse_left = down,
                     winit::event::MouseButton::Right => self.mouse_right = down,
+                    winit::event::MouseButton::Middle => self.mouse_middle = down,
                     _ => {}
                 }
             }
@@ -232,7 +234,7 @@ impl Frontend for WinitFrontend {
         match button {
             MouseButton::Left => self.input.mouse_left,
             MouseButton::Right => self.input.mouse_right,
-            MouseButton::Middle => false,
+            MouseButton::Middle => self.input.mouse_middle,
         }
     }
     fn get_mouse_pos(&self, _mode: MouseMode) -> Option<(f32, f32)> {
@@ -427,7 +429,7 @@ impl Frontend for Screen {
     }
 }
 
-/// winit physical key → the minifb key the walkthrough checks.
+/// winit physical key → minifb key: every key a binding can name.
 pub(crate) fn minifb_key(code: KeyCode) -> Option<Key> {
     Some(match code {
         KeyCode::KeyA => Key::A,
@@ -437,11 +439,57 @@ pub(crate) fn minifb_key(code: KeyCode) -> Option<Key> {
         KeyCode::KeyE => Key::E,
         KeyCode::KeyF => Key::F,
         KeyCode::KeyG => Key::G,
+        KeyCode::KeyH => Key::H,
+        KeyCode::KeyI => Key::I,
+        KeyCode::KeyJ => Key::J,
+        KeyCode::KeyK => Key::K,
         KeyCode::KeyL => Key::L,
+        KeyCode::KeyM => Key::M,
+        KeyCode::KeyN => Key::N,
+        KeyCode::KeyO => Key::O,
+        KeyCode::KeyP => Key::P,
+        KeyCode::KeyQ => Key::Q,
         KeyCode::KeyR => Key::R,
         KeyCode::KeyS => Key::S,
+        KeyCode::KeyT => Key::T,
+        KeyCode::KeyU => Key::U,
         KeyCode::KeyV => Key::V,
         KeyCode::KeyW => Key::W,
+        KeyCode::KeyX => Key::X,
+        KeyCode::KeyY => Key::Y,
+        KeyCode::KeyZ => Key::Z,
+        KeyCode::Digit0 => Key::Key0,
+        KeyCode::Digit1 => Key::Key1,
+        KeyCode::Digit2 => Key::Key2,
+        KeyCode::Digit3 => Key::Key3,
+        KeyCode::Digit4 => Key::Key4,
+        KeyCode::Digit5 => Key::Key5,
+        KeyCode::Digit6 => Key::Key6,
+        KeyCode::Digit7 => Key::Key7,
+        KeyCode::Digit8 => Key::Key8,
+        KeyCode::Digit9 => Key::Key9,
+        KeyCode::F1 => Key::F1,
+        KeyCode::F2 => Key::F2,
+        KeyCode::F3 => Key::F3,
+        KeyCode::F4 => Key::F4,
+        KeyCode::F5 => Key::F5,
+        KeyCode::F6 => Key::F6,
+        KeyCode::F7 => Key::F7,
+        KeyCode::F8 => Key::F8,
+        KeyCode::F9 => Key::F9,
+        KeyCode::F10 => Key::F10,
+        KeyCode::F11 => Key::F11,
+        KeyCode::F12 => Key::F12,
+        KeyCode::Numpad0 => Key::NumPad0,
+        KeyCode::Numpad1 => Key::NumPad1,
+        KeyCode::Numpad2 => Key::NumPad2,
+        KeyCode::Numpad3 => Key::NumPad3,
+        KeyCode::Numpad4 => Key::NumPad4,
+        KeyCode::Numpad5 => Key::NumPad5,
+        KeyCode::Numpad6 => Key::NumPad6,
+        KeyCode::Numpad7 => Key::NumPad7,
+        KeyCode::Numpad8 => Key::NumPad8,
+        KeyCode::Numpad9 => Key::NumPad9,
         KeyCode::ArrowUp => Key::Up,
         KeyCode::ArrowDown => Key::Down,
         KeyCode::ArrowLeft => Key::Left,
@@ -451,19 +499,42 @@ pub(crate) fn minifb_key(code: KeyCode) -> Option<Key> {
         KeyCode::Backspace => Key::Backspace,
         KeyCode::Tab => Key::Tab,
         KeyCode::Escape => Key::Escape,
-        KeyCode::F1 => Key::F1,
-        KeyCode::F2 => Key::F2,
-        KeyCode::F3 => Key::F3,
-        KeyCode::Digit1 => Key::Key1,
-        KeyCode::Digit2 => Key::Key2,
-        KeyCode::Digit3 => Key::Key3,
-        KeyCode::Digit4 => Key::Key4,
-        KeyCode::Digit5 => Key::Key5,
-        KeyCode::Digit6 => Key::Key6,
         KeyCode::ShiftLeft => Key::LeftShift,
         KeyCode::ShiftRight => Key::RightShift,
         KeyCode::ControlLeft => Key::LeftCtrl,
         KeyCode::ControlRight => Key::RightCtrl,
+        KeyCode::AltLeft => Key::LeftAlt,
+        KeyCode::AltRight => Key::RightAlt,
+        KeyCode::SuperLeft => Key::LeftSuper,
+        KeyCode::SuperRight => Key::RightSuper,
+        KeyCode::ContextMenu => Key::Menu,
+        KeyCode::Minus => Key::Minus,
+        KeyCode::Equal => Key::Equal,
+        KeyCode::BracketLeft => Key::LeftBracket,
+        KeyCode::BracketRight => Key::RightBracket,
+        KeyCode::Semicolon => Key::Semicolon,
+        KeyCode::Quote => Key::Apostrophe,
+        KeyCode::Backquote => Key::Backquote,
+        KeyCode::Backslash => Key::Backslash,
+        KeyCode::Comma => Key::Comma,
+        KeyCode::Period => Key::Period,
+        KeyCode::Slash => Key::Slash,
+        KeyCode::CapsLock => Key::CapsLock,
+        KeyCode::NumLock => Key::NumLock,
+        KeyCode::ScrollLock => Key::ScrollLock,
+        KeyCode::Pause => Key::Pause,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::Insert => Key::Insert,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::NumpadEnter => Key::NumPadEnter,
+        KeyCode::NumpadAdd => Key::NumPadPlus,
+        KeyCode::NumpadSubtract => Key::NumPadMinus,
+        KeyCode::NumpadMultiply => Key::NumPadAsterisk,
+        KeyCode::NumpadDivide => Key::NumPadSlash,
+        KeyCode::NumpadDecimal => Key::NumPadDot,
         _ => return None,
     })
 }
@@ -516,7 +587,9 @@ mod tests {
         assert!(keys.iter().all(Option::is_some));
         assert_eq!(minifb_key(KeyCode::KeyW), Some(Key::W));
         assert_eq!(minifb_key(KeyCode::ControlRight), Some(Key::RightCtrl));
-        assert_eq!(minifb_key(KeyCode::KeyZ), None);
+        assert_eq!(minifb_key(KeyCode::KeyZ), Some(Key::Z));
+        assert_eq!(minifb_key(KeyCode::Numpad1), Some(Key::NumPad1));
+        assert_eq!(minifb_key(KeyCode::Fn), None);
         assert_eq!(minifb_key(KeyCode::Digit1), Some(Key::Key1));
         assert_eq!(minifb_key(KeyCode::Digit6), Some(Key::Key6));
     }

@@ -77,5 +77,6 @@ names. PE i386, ImageBase `0x400000`; VA = file string offset + `0x400000`.
 
 ## Not covered here
 
-The engine's own controls still use fixed keys; they move to this table in the next change. Saving bindings, and
-reading them on Windows (the registry) rather than from a Wine prefix's `user.reg`, are also later work.
+The engine's game controls read this table. Keyboard aim (slots 11 and 12, unbound by default) still turns at
+2.2 rad/s, a value with no retail source. Saving bindings, reading them on Windows (the registry) rather than from a
+Wine prefix's `user.reg`, and the analog sources (mouse look and wheel stay as they were) are later work.

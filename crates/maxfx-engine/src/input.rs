@@ -403,6 +403,214 @@ pub fn expand_tokens(text: &str, bindings: &Bindings, names: &KeyNames) -> Strin
         })
 }
 
+/// Slots the game loop reads, from the token order of `0x4cce80`.
+pub mod slot {
+    /// Direction 0 runs, 1 walks back.
+    pub const RUN: usize = 0;
+    /// Direction 0 strafes left, 1 right.
+    pub const STRAFE: usize = 1;
+    pub const SHOOT: usize = 2;
+    pub const RELOAD: usize = 3;
+    pub const JUMP: usize = 4;
+    pub const CROUCH: usize = 5;
+    /// Direction 0 aims up, 1 down.
+    pub const AIM_UP_DOWN: usize = 11;
+    /// Direction 0 aims left, 1 right.
+    pub const AIM_LEFT_RIGHT: usize = 12;
+    pub const USE: usize = 13;
+    /// Weapon slot `n` is `SELECT_WEAPON + n`, up to 10.
+    pub const SELECT_WEAPON: usize = 14;
+    pub const BEST_WEAPON: usize = 25;
+    pub const PAINKILLER: usize = 28;
+    pub const BULLET_TIME: usize = 31;
+}
+
+/// The window key for a DirectInput scan code; `None` for codes the window cannot report.
+pub fn scan_key(code: u32) -> Option<minifb::Key> {
+    use minifb::Key::*;
+    // Set 1 scan codes, as DirectInput's `DIK_*` constants number them.
+    let key = match code {
+        0x01 => Escape,
+        0x02 => Key1,
+        0x03 => Key2,
+        0x04 => Key3,
+        0x05 => Key4,
+        0x06 => Key5,
+        0x07 => Key6,
+        0x08 => Key7,
+        0x09 => Key8,
+        0x0a => Key9,
+        0x0b => Key0,
+        0x0c => Minus,
+        0x0d => Equal,
+        0x0e => Backspace,
+        0x0f => Tab,
+        0x10 => Q,
+        0x11 => W,
+        0x12 => E,
+        0x13 => R,
+        0x14 => T,
+        0x15 => Y,
+        0x16 => U,
+        0x17 => I,
+        0x18 => O,
+        0x19 => P,
+        0x1a => LeftBracket,
+        0x1b => RightBracket,
+        0x1c => Enter,
+        0x1d => LeftCtrl,
+        0x1e => A,
+        0x1f => S,
+        0x20 => D,
+        0x21 => F,
+        0x22 => G,
+        0x23 => H,
+        0x24 => J,
+        0x25 => K,
+        0x26 => L,
+        0x27 => Semicolon,
+        0x28 => Apostrophe,
+        0x29 => Backquote,
+        0x2a => LeftShift,
+        0x2b => Backslash,
+        0x2c => Z,
+        0x2d => X,
+        0x2e => C,
+        0x2f => V,
+        0x30 => B,
+        0x31 => N,
+        0x32 => M,
+        0x33 => Comma,
+        0x34 => Period,
+        0x35 => Slash,
+        0x36 => RightShift,
+        0x37 => NumPadAsterisk,
+        0x38 => LeftAlt,
+        0x39 => Space,
+        0x3a => CapsLock,
+        0x3b => F1,
+        0x3c => F2,
+        0x3d => F3,
+        0x3e => F4,
+        0x3f => F5,
+        0x40 => F6,
+        0x41 => F7,
+        0x42 => F8,
+        0x43 => F9,
+        0x44 => F10,
+        0x45 => NumLock,
+        0x46 => ScrollLock,
+        0x47 => NumPad7,
+        0x48 => NumPad8,
+        0x49 => NumPad9,
+        0x4a => NumPadMinus,
+        0x4b => NumPad4,
+        0x4c => NumPad5,
+        0x4d => NumPad6,
+        0x4e => NumPadPlus,
+        0x4f => NumPad1,
+        0x50 => NumPad2,
+        0x51 => NumPad3,
+        0x52 => NumPad0,
+        0x53 => NumPadDot,
+        0x57 => F11,
+        0x58 => F12,
+        0x9c => NumPadEnter,
+        0x9d => RightCtrl,
+        0xb5 => NumPadSlash,
+        0xb8 => RightAlt,
+        0xc5 => Pause,
+        0xc7 => Home,
+        0xc8 => Up,
+        0xc9 => PageUp,
+        0xcb => Left,
+        0xcd => Right,
+        0xcf => End,
+        0xd0 => Down,
+        0xd1 => PageDown,
+        0xd2 => Insert,
+        0xd3 => Delete,
+        0xdb => LeftSuper,
+        0xdc => RightSuper,
+        0xdd => Menu,
+        _ => return None,
+    };
+    Some(key)
+}
+
+const MOUSE: [minifb::MouseButton; 3] = [
+    minifb::MouseButton::Left,
+    minifb::MouseButton::Right,
+    minifb::MouseButton::Middle,
+];
+
+/// The bindings, read against a window each frame.
+#[derive(Debug, Clone)]
+pub struct ActionInput {
+    pub bindings: Bindings,
+    mouse: [bool; 3],
+    mouse_was: [bool; 3],
+}
+
+impl ActionInput {
+    pub fn new(bindings: Bindings) -> Self {
+        Self {
+            bindings,
+            mouse: [false; 3],
+            mouse_was: [false; 3],
+        }
+    }
+
+    /// Read the mouse buttons once per frame, so a press is seen on one frame only.
+    pub fn begin_frame(&mut self, window: &dyn crate::frontend::Frontend) {
+        self.mouse_was = self.mouse;
+        self.mouse = MOUSE.map(|button| window.get_mouse_down(button));
+    }
+
+    fn buttons(&self, slot: usize, direction: usize) -> impl Iterator<Item = Button> + '_ {
+        let buttons = &self.bindings.slots[slot].buttons;
+        [buttons[direction], buttons[direction + 2]]
+            .into_iter()
+            .flatten()
+    }
+
+    /// A button of `slot`'s `direction` is held.
+    pub fn down(
+        &self,
+        window: &dyn crate::frontend::Frontend,
+        slot: usize,
+        direction: usize,
+    ) -> bool {
+        self.buttons(slot, direction).any(|button| match button {
+            Button::Key(code) => scan_key(code).is_some_and(|key| window.is_key_down(key)),
+            Button::Mouse(index) => self.mouse.get(index as usize) == Some(&true),
+        })
+    }
+
+    /// A button of `slot`'s `direction` went down this frame.
+    pub fn pressed(
+        &self,
+        window: &dyn crate::frontend::Frontend,
+        slot: usize,
+        direction: usize,
+    ) -> bool {
+        self.buttons(slot, direction).any(|button| match button {
+            Button::Key(code) => {
+                scan_key(code).is_some_and(|key| window.is_key_pressed(key, minifb::KeyRepeat::No))
+            }
+            Button::Mouse(index) => {
+                let index = index as usize;
+                self.mouse.get(index) == Some(&true) && self.mouse_was.get(index) == Some(&false)
+            }
+        })
+    }
+
+    /// 1 when direction 1 is held, -1 for direction 0, 0 for both or neither.
+    pub fn axis(&self, window: &dyn crate::frontend::Frontend, slot: usize) -> i32 {
+        i32::from(self.down(window, slot, 1)) - i32::from(self.down(window, slot, 0))
+    }
+}
+
 fn latin1(bytes: Vec<u8>) -> String {
     bytes.into_iter().map(char::from).collect()
 }
@@ -445,6 +653,94 @@ mod tests {
 
     fn names() -> KeyNames {
         KeyNames::parse(INPUT, DEFINES)
+    }
+
+    use minifb::{Key, KeyRepeat, MouseButton, MouseMode};
+
+    #[derive(Default)]
+    struct FakeWindow {
+        down: Vec<Key>,
+        pressed: Vec<Key>,
+        mouse: Vec<MouseButton>,
+    }
+
+    impl crate::frontend::Frontend for FakeWindow {
+        fn is_open(&self) -> bool {
+            true
+        }
+        fn is_key_down(&self, key: Key) -> bool {
+            self.down.contains(&key)
+        }
+        fn is_key_pressed(&self, key: Key, _repeat: KeyRepeat) -> bool {
+            self.pressed.contains(&key)
+        }
+        fn get_mouse_down(&self, button: MouseButton) -> bool {
+            self.mouse.contains(&button)
+        }
+        fn get_mouse_pos(&self, _mode: MouseMode) -> Option<(f32, f32)> {
+            None
+        }
+        fn scroll(&self) -> f32 {
+            0.0
+        }
+    }
+
+    #[test]
+    fn scan_codes_name_window_keys() {
+        assert_eq!(scan_key(0x11), Some(Key::W));
+        assert_eq!(scan_key(0x39), Some(Key::Space));
+        assert_eq!(scan_key(0xc8), Some(Key::Up));
+        assert_eq!(scan_key(0x9d), Some(Key::RightCtrl));
+        assert_eq!(scan_key(0x4f), Some(Key::NumPad1));
+        assert_eq!(scan_key(0x00), None);
+    }
+
+    #[test]
+    fn either_bound_key_holds_an_action() {
+        let input = ActionInput::new(Bindings::retail_defaults());
+        let window = FakeWindow {
+            down: vec![Key::Up],
+            ..Default::default()
+        };
+        assert!(input.down(&window, slot::RUN, 0));
+        assert!(!input.down(&window, slot::RUN, 1));
+        assert_eq!(input.axis(&window, slot::RUN), -1);
+    }
+
+    #[test]
+    fn strafing_right_is_direction_one() {
+        let input = ActionInput::new(Bindings::retail_defaults());
+        let window = FakeWindow {
+            down: vec![Key::D],
+            ..Default::default()
+        };
+        assert_eq!(input.axis(&window, slot::STRAFE), 1);
+    }
+
+    #[test]
+    fn a_mouse_press_lasts_one_frame() {
+        let mut input = ActionInput::new(Bindings::retail_defaults());
+        let window = FakeWindow {
+            mouse: vec![MouseButton::Right],
+            ..Default::default()
+        };
+        input.begin_frame(&window);
+        assert!(input.pressed(&window, slot::BULLET_TIME, 0));
+        assert!(input.down(&window, slot::BULLET_TIME, 0));
+        input.begin_frame(&window);
+        assert!(!input.pressed(&window, slot::BULLET_TIME, 0));
+        assert!(input.down(&window, slot::BULLET_TIME, 0));
+    }
+
+    #[test]
+    fn a_key_press_comes_from_the_window() {
+        let input = ActionInput::new(Bindings::retail_defaults());
+        let window = FakeWindow {
+            pressed: vec![Key::Enter],
+            ..Default::default()
+        };
+        assert!(input.pressed(&window, slot::USE, 0));
+        assert!(!input.pressed(&window, slot::RELOAD, 0));
     }
 
     #[test]
