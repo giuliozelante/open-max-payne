@@ -2762,6 +2762,14 @@ pub fn load_difficulty(game_dir: &Path) -> Option<health::Difficulty> {
     health::Difficulty::parse(&String::from_utf8_lossy(&text))
 }
 
+/// `CapsuleRadius` and `CapsuleTop` of `max_payne.txt`.
+pub fn load_player_capsule(game_dir: &Path) -> Option<[f32; 2]> {
+    let skin = read_game_bytes(game_dir, r"\data\database\skins\max_payne.txt")?;
+    let sections = hud::parse_sections(&String::from_utf8_lossy(&skin));
+    let key = |key: &str| sections.iter().find_map(|section| section.number(key));
+    Some([key("capsuleradius")?, key("capsuletop")?])
+}
+
 /// Max at full health, from `max_payne.txt` and the difficulty.
 pub fn load_player_health(game_dir: &Path) -> Option<health::PlayerHealth> {
     let difficulty = load_difficulty(game_dir)?;
@@ -4849,6 +4857,7 @@ mod tests {
         let weapons = load_weapon_defs(&game);
         assert_eq!(weapons["beretta"].slot, Some(1));
         assert_eq!(weapons["pumpshotgun"].slot, Some(2));
+        assert_eq!(load_player_capsule(&game), Some([0.48, 1.95]));
         let config = read_game_bytes(&game, r"\data\globalconfig.txt").expect("globalconfig.txt");
         let config = String::from_utf8_lossy(&config);
         assert!(health::Falling::parse(&config).is_some());
