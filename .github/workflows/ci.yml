@@ -39,7 +39,7 @@ jobs:
       - name: cargo clippy (libs)
         run: >
           cargo clippy
-          -p openras -p openpfx -p maxfx-patcher -p maxfx-play -p maxfx-engine
+          -p openras -p openpfx -p openkf2 -p maxfx-patcher -p maxfx-play -p maxfx-engine
           --all-targets -- -D warnings
 
   check-studio:
@@ -100,4 +100,4 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
 
       - name: cargo test (library crates)
-        run: cargo test -p openras -p openpfx -p maxfx-patcher -p maxfx-play -p maxfx-engine
+        run: cargo test -p openras -p openpfx -p openkf2 -p maxfx-patcher -p maxfx-play -p maxfx-engine
