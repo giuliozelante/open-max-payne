@@ -203,6 +203,7 @@ pub fn run_3d_walkthrough(
     let mut vel_y: f32 = 0.0;
     let mut walk_phase: f32 = 0.0;
     let mut third_person = true;
+    let mut scoped = false;
     let mut bullet_time = false;
     let mut right_was_down = false;
     let mut shot_timer: f32 = 0.0;
@@ -313,6 +314,8 @@ pub fn run_3d_walkthrough(
     let config = crate::read_game_bytes(&game_root, r"\data\globalconfig.txt").unwrap_or_default();
     let config = String::from_utf8_lossy(&config);
     let falling = crate::health::Falling::parse(&config);
+    // `SniperZoomInSpeed` is "in jounis"; HYPOTHESIS: seconds.
+    let (scope_offset, scope_seconds) = crate::hud::scope_camera(&config);
     let damage_flash = crate::health::DamageFlash::parse(&config);
     let death_clips = crate::load_death_clips(&game_root);
     let player_clips = crate::load_character_clips(&game_root, player_skin.unwrap_or("max_payne"));
@@ -560,6 +563,14 @@ pub fn run_3d_walkthrough(
                 scene.inventory.step_weapon(wheel.signum() as i32);
             }
         }
+        let held = scene.inventory.current.as_ref();
+        let scope_fov = held
+            .and_then(|name| scene.inventory.defs.get(name))
+            .and_then(|def| def.scope_fov);
+        if scoped && scope_fov.is_none() {
+            scoped = false;
+            scene.fov_multiplier.set(1.0, scope_seconds);
+        }
         if scene.player_controls && window.is_key_pressed(Key::E, KeyRepeat::No) {
             let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
             if let Some((name, gap)) = scene.nearest_action_trigger(&room_origins, feet) {
@@ -583,6 +594,10 @@ pub fn run_3d_walkthrough(
                     &room_origins,
                     listener,
                 );
+            } else if scope_fov.is_some() {
+                scoped = !scoped;
+                let target = scope_fov.filter(|_| scoped).unwrap_or(1.0);
+                scene.fov_multiplier.set(target, scope_seconds);
             }
         }
 
@@ -602,7 +617,12 @@ pub fn run_3d_walkthrough(
         }
         let hard_mouse = window.mouse_motion();
         if let Some(motion) = look_motion(hard_mouse, scene.player_controls) {
-            (yaw, pitch) = mouse_look(yaw, pitch, motion);
+            let slowed = if scoped {
+                scene.fov_multiplier.value
+            } else {
+                1.0
+            };
+            (yaw, pitch) = mouse_look(yaw, pitch, (motion.0 * slowed, motion.1 * slowed));
         } else if hard_mouse.is_none() && window.get_mouse_down(MouseButton::Left) {
             if let Some((mx, my)) = window.get_mouse_pos(MouseMode::Pass) {
                 if let Some((lx, ly)) = last_mouse {
@@ -861,7 +881,7 @@ pub fn run_3d_walkthrough(
             }
             // The dot marks the view's centre, so a bullet leaves from the camera. A blow leaves
             // from Max.
-            let (aim_from, aim) = if third_person && !fly_mode && reach.is_none() {
+            let (aim_from, aim) = if third_person && !scoped && !fly_mode && reach.is_none() {
                 let eye = chase_view(&scene, &room_origins, &chase_rig, player_pos, aim_dir);
                 (eye, chase_look(&chase_rig, player_pos, aim_dir, eye).2)
             } else {
@@ -1377,7 +1397,16 @@ pub fn run_3d_walkthrough(
         let mut cam_up = [-sy * sp, cp, -cy * sp];
         let mut cam_fwd = [sy * cp, sp, cy * cp];
         let mut cam_pos = player_pos;
-        if third_person && !fly_mode {
+        if scoped {
+            let [right, up, forward] = scope_offset;
+            let flat = [sy, 0.0, cy];
+            cam_pos = std::array::from_fn(|c| {
+                player_pos[c]
+                    + [cy, 0.0, -sy][c] * right
+                    + [0.0, 1.0, 0.0][c] * up
+                    + flat[c] * forward
+            });
+        } else if third_person && !fly_mode {
             cam_pos = chase_view(&scene, &room_origins, &chase_rig, player_pos, cam_fwd);
             (cam_right, cam_up, cam_fwd) = chase_look(&chase_rig, player_pos, cam_fwd, cam_pos);
         }
@@ -1467,7 +1496,9 @@ pub fn run_3d_walkthrough(
                     light,
                 });
             }
-            if let (true, false, Some(prig)) = (third_person, fly_mode, player_rig.as_ref()) {
+            if let (true, false, Some(prig)) =
+                (third_person && !scoped, fly_mode, player_rig.as_ref())
+            {
                 let time =
                     player_clip_time(prig, player_moving, walk_phase, anim_clock, action_time);
                 let verts = character_world_verts(
@@ -1623,7 +1654,7 @@ pub fn run_3d_walkthrough(
         }
 
         // 4. Render Player (`Payne_Max_L0.KFS`) in 3rd-person view
-        if third_person && !fly_mode && cpu_characters {
+        if third_person && !scoped && !fly_mode && cpu_characters {
             if let Some(ref prig) = player_rig {
                 let time =
                     player_clip_time(prig, player_moving, walk_phase, anim_clock, action_time);
@@ -1725,9 +1756,12 @@ pub fn run_3d_walkthrough(
                 slow_motion: &slow_motion,
                 inventory: &scene.inventory,
                 weapon_strip: strip_visible,
+                scoped,
             };
             target.draw_hud(assets, &state);
-            target.draw_crosshair(&scene.inventory);
+            if !scoped {
+                target.draw_crosshair(&scene.inventory);
+            }
             target.draw_prints(&assets.font, &assets.layout.tip, &tip_log);
             target.draw_prints(&assets.font, &assets.layout.print, &print_log);
         }

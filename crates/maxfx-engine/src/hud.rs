@@ -265,6 +265,46 @@ impl WeaponStrip {
     }
 }
 
+/// `[Overlay]` of `[Weapons]`: the sniper scope, a quarter circle mirrored four ways and black pads.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScopeOverlay {
+    /// `[Image]`, as a sprite so it loads like the others.
+    pub sheet: HudSprite,
+    pub windows: Vec<StripSprite>,
+}
+
+impl ScopeOverlay {
+    fn parse(sections: &[Section]) -> Self {
+        let mut scope = Self::default();
+        for section in sections {
+            match section.path.as_str() {
+                "weapons/overlay/image" => {
+                    scope.sheet.file = section.file("filename").unwrap_or_default();
+                    scope.sheet.alpha_file = section.file("alphafilename").unwrap_or_default();
+                }
+                "weapons/overlay/spritewindow" => scope.windows.extend(section.strip()),
+                _ => {}
+            }
+        }
+        scope
+    }
+}
+
+/// `SniperOffset` (right, up, forward) and `SniperZoomInSpeed` of `globalconfig.txt`.
+pub fn scope_camera(globalconfig: &str) -> ([f32; 3], f32) {
+    let sections = parse_sections(globalconfig);
+    let key = |key: &str| sections.iter().find_map(|section| section.text(key));
+    let offset = key("sniperoffset").map_or([0.0; 3], |text| {
+        let mut parts = text.trim_matches(['(', ')', ' ']).split(',');
+        std::array::from_fn(|_| {
+            let part = parts.next().unwrap_or_default().trim();
+            part.parse().unwrap_or_default()
+        })
+    });
+    let speed = key("sniperzoominspeed").and_then(|text| text.parse().ok());
+    (offset, speed.unwrap_or_default())
+}
+
 /// The parts of `hud.txt` the engine draws.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct HudLayout {
@@ -275,6 +315,7 @@ pub struct HudLayout {
     pub painkiller_icon: HudSprite,
     pub painkiller_count: HudText,
     pub weapon_strip: WeaponStrip,
+    pub scope: ScopeOverlay,
     pub ammo_in_clip: HudText,
     pub ammo_in_pocket: HudText,
     /// `[ActiveWeapon]` sprites by `id`, such as `WEAPONID_BERETTA`.
@@ -650,6 +691,7 @@ impl HudLayout {
             painkiller_icon: sprite("weapons/painkiller/sprite")?,
             painkiller_count: anchor("weapons/painkiller/amounttext")?,
             weapon_strip: WeaponStrip::parse(&sections),
+            scope: ScopeOverlay::parse(&sections),
             ammo_in_clip: anchor("weapons/ammoinclipstext")?,
             ammo_in_pocket: anchor("weapons/ammoinpockettext")?,
             weapons,
@@ -854,6 +896,8 @@ pub struct WeaponDef {
     pub dive_allowed: bool,
     /// `AutoAimingAllowed`.
     pub auto_aim: bool,
+    /// `FOVMultiplier` below 1: the weapon has a scope.
+    pub scope_fov: Option<f32>,
     /// What one shot or melee blow creates.
     pub projectiles: Vec<ProjectileDef>,
     /// What a `WEAPONANIM_SHOOT_NOEFFECTS` round creates.
@@ -906,6 +950,9 @@ impl WeaponDef {
             dive_allowed: key("shootdodgeallowed")
                 .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
             auto_aim: key("autoaimingallowed").is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
+            scope_fov: key("fovmultiplier")
+                .and_then(|value| value.parse().ok())
+                .filter(|fov: &f32| *fov < 1.0),
             two_handed: key("twohandedanimation")
                 .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
             projectiles: Vec::new(),
@@ -1588,6 +1635,7 @@ impl HudAssets {
             &layout.hourglass,
             &layout.painkiller_icon,
             &layout.weapon_strip.sheet,
+            &layout.scope.sheet,
         ];
         let bitmaps = sprites
             .into_iter()
@@ -1610,6 +1658,8 @@ pub struct HudState<'a> {
     pub inventory: &'a PlayerInventory,
     /// `[WeaponInventory]`'s visibility, 0..1.
     pub weapon_strip: f32,
+    /// Looking through the sniper scope.
+    pub scoped: bool,
 }
 
 /// A frame to draw on, `width` x `height`, showing the 640x480 HUD space.
@@ -1672,6 +1722,13 @@ impl HudTarget<'_> {
     pub fn draw_hud(&mut self, assets: &HudAssets, state: &HudState) {
         let layout = &assets.layout;
         let bitmap = |sprite: &HudSprite| assets.bitmaps.get(&sprite.file);
+        if let Some(sheet) = bitmap(&layout.scope.sheet).filter(|_| state.scoped) {
+            for sprite in &layout.scope.windows {
+                let [x, y] = top_left(sprite.reference, sprite.position, sprite.size);
+                let area = [x, y, x + sprite.size[0], y + sprite.size[1]];
+                self.blit(area, sprite.uv, sheet, [255; 4]);
+            }
+        }
         if state.weapon_strip > 0.0 {
             if let Some(sheet) = bitmap(&layout.weapon_strip.sheet) {
                 self.draw_weapon_strip(&layout.weapon_strip, sheet, state);
@@ -2374,6 +2431,26 @@ mod tests {
         UVUpperLeft = ( 0, 0, 0 );\nUVLowerRight = ( 1, 1, 0 );\n}\n}\n";
 
     #[test]
+    fn the_scope_camera_comes_from_the_config() {
+        let text =
+            "[camera]\nSniperOffset = ( 0.0, 0.0, 0.80 );\nSniperZoomInSpeed = 0.7; // jounis\n";
+        assert_eq!(scope_camera(text), ([0.0, 0.0, 0.8], 0.7));
+    }
+
+    #[test]
+    fn the_scope_reads_its_image_and_windows() {
+        let text =
+            "#define DOWNRIGHT 6\n[Weapons]\n{\n[Overlay]\n{\n[Image]\nFilename = \"a.jpg\";\n\
+            AlphaFilename = \"a.pcx\";\n[SpriteWindow]\nReferencePoint = DOWNRIGHT;\n\
+            Position = ( 320, 240, 0 );\nWidth = 220;\nHeight = 220;\n\
+            UVUpperLeft = ( 1.0, 0.0, 0 );\nUVLowerRight = ( 0.0, 1.0, 0 );\n}\n}\n";
+        let scope = ScopeOverlay::parse(&parse_sections(text));
+        assert_eq!(scope.sheet.file, "a.jpg");
+        assert_eq!(scope.windows.len(), 1);
+        assert_eq!(scope.windows[0].uv, [1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
     fn the_weapon_strip_reads_its_slots_and_fades() {
         let strip = WeaponStrip::parse(&parse_sections(STRIP));
         assert_eq!(strip.sheet.file, r"bitmaps\WeaponHUD.pcx");
@@ -2879,6 +2956,7 @@ mod tests {
             slow_motion: slow,
             inventory,
             weapon_strip: 0.0,
+            scoped: false,
         };
         target.draw_hud(&test_assets(), &state);
         pixels
