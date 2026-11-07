@@ -261,6 +261,69 @@ impl ScopeOverlay {
 }
 
 /// `SniperOffset` (right, up, forward) and `SniperZoomInSpeed` of `globalconfig.txt`.
+/// The sniper scope's sway (`0x68e820`): every `ShakeLength` seconds a new point within the
+/// strength is drawn, and the view follows a Catmull-Rom curve through the last four.
+#[derive(Debug, Clone, Default)]
+pub struct ScopeShake {
+    xs: [f32; 4],
+    ys: [f32; 4],
+    timer: f32,
+    length: f32,
+}
+
+impl ScopeShake {
+    /// Advance `seconds`; `crouch` is 0 standing, 1 crouched. `random` gives 0..1. Returns the
+    /// horizontal and vertical offset as tangents.
+    pub fn step(
+        &mut self,
+        shake: &[f32; 6],
+        seconds: f32,
+        crouch: f32,
+        mut random: impl FnMut() -> f32,
+    ) -> [f32; 2] {
+        self.timer += seconds;
+        if self.timer >= self.length {
+            self.timer = 0.0;
+            let blend = |stand: f32, crouched: f32| {
+                if crouch > 0.0 {
+                    stand + (crouched - stand) * crouch
+                } else {
+                    stand
+                }
+            };
+            self.length = blend(shake[0], shake[3]);
+            let x = blend(shake[1], shake[4]) * 0.0004;
+            let y = blend(shake[2], shake[5]) * 0.0004;
+            self.xs.rotate_left(1);
+            self.ys.rotate_left(1);
+            // `strength - rand() * strength * 2 / 32767`: uniform in ±strength.
+            self.xs[3] = x - random() * x * 2.0;
+            self.ys[3] = y - random() * y * 2.0;
+        }
+        let t = if self.length == 0.0 {
+            0.0
+        } else {
+            self.timer / self.length
+        };
+        let basis = catmull_rom(t);
+        let along = |p: &[f32; 4]| (0..4).map(|k| basis[k] * p[k]).sum();
+        [along(&self.xs), along(&self.ys)]
+    }
+}
+
+/// The weights of four points at `t` between the middle two: `[t³, t², t, 1]` times the matrix
+/// `0x68e8a2` writes to `0x8b4bc8`.
+fn catmull_rom(t: f32) -> [f32; 4] {
+    const BASIS: [[f32; 4]; 4] = [
+        [-0.5, 1.5, -1.5, 0.5],
+        [1.0, -2.5, 2.0, -0.5],
+        [-0.5, 0.0, 0.5, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+    ];
+    let powers = [t * t * t, t * t, t, 1.0];
+    std::array::from_fn(|k| (0..4).map(|row| powers[row] * BASIS[row][k]).sum())
+}
+
 pub fn scope_camera(globalconfig: &str) -> ([f32; 3], f32) {
     let sections = parse_sections(globalconfig);
     let key = |key: &str| sections.iter().find_map(|section| section.text(key));
@@ -868,6 +931,9 @@ pub struct WeaponDef {
     pub auto_aim: bool,
     /// `FOVMultiplier` below 1: the weapon has a scope.
     pub scope_fov: Option<f32>,
+    /// `ShakeLength`, `ShakeStrengthX`, `ShakeStrengthY`, then the `Crouching*` three. Strength
+    /// is "cm / 25m"; `0x53b5d1` scales it by 0.0004 into a tangent.
+    pub shake: [f32; 6],
     /// What one shot or melee blow creates.
     pub projectiles: Vec<ProjectileDef>,
     /// What a `WEAPONANIM_SHOOT_NOEFFECTS` round creates.
@@ -923,6 +989,15 @@ impl WeaponDef {
             scope_fov: key("fovmultiplier")
                 .and_then(|value| value.parse().ok())
                 .filter(|fov: &f32| *fov < 1.0),
+            shake: [
+                "shakelength",
+                "shakestrengthx",
+                "shakestrengthy",
+                "crouchingshakelength",
+                "crouchingshakestrengthx",
+                "crouchingshakestrengthy",
+            ]
+            .map(|name| key(name).and_then(|v| v.parse().ok()).unwrap_or(0.0)),
             two_handed: key("twohandedanimation")
                 .is_some_and(|flag| flag.eq_ignore_ascii_case("yes")),
             projectiles: Vec::new(),
@@ -3168,6 +3243,54 @@ Width = 200;
 	}
 }
 "#;
+
+    const SNIPER_SHAKE: [f32; 6] = [0.8, 7.5, 15.0, 0.8, 1.5, 3.0];
+
+    #[test]
+    fn a_shake_starts_still() {
+        let mut shake = ScopeShake::default();
+        assert_eq!(shake.step(&SNIPER_SHAKE, 0.0, 0.0, || 0.0), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_new_point_lies_within_the_scaled_strength() {
+        let mut shake = ScopeShake::default();
+        // rand() at 0 gives +strength (`0x68ea7f` subtracts from it).
+        shake.step(&SNIPER_SHAKE, 0.01, 0.0, || 0.0);
+        assert_eq!(shake.xs[3], 7.5 * 0.0004);
+        assert_eq!(shake.ys[3], 15.0 * 0.0004);
+        let mut shake = ScopeShake::default();
+        shake.step(&SNIPER_SHAKE, 0.01, 0.0, || 1.0);
+        assert!((shake.xs[3] + 7.5 * 0.0004).abs() < 1e-7);
+    }
+
+    #[test]
+    fn the_view_reaches_a_point_two_lengths_after_it_was_drawn() {
+        let mut shake = ScopeShake::default();
+        shake.step(&SNIPER_SHAKE, 0.01, 0.0, || 0.0);
+        shake.step(&SNIPER_SHAKE, 0.8, 0.0, || 0.5);
+        let at = shake.step(&SNIPER_SHAKE, 0.8, 0.0, || 0.5);
+        assert!((at[0] - 7.5 * 0.0004).abs() < 1e-6, "{at:?}");
+    }
+
+    #[test]
+    fn crouching_blends_to_the_crouching_strength() {
+        let mut shake = ScopeShake::default();
+        shake.step(&SNIPER_SHAKE, 0.01, 1.0, || 0.0);
+        assert_eq!(shake.xs[3], 1.5 * 0.0004);
+        let mut shake = ScopeShake::default();
+        shake.step(&SNIPER_SHAKE, 0.01, 0.5, || 0.0);
+        assert!((shake.ys[3] - 9.0 * 0.0004).abs() < 1e-7);
+    }
+
+    #[test]
+    fn a_weapon_reads_its_shake() {
+        let text = "[Weapon]\nWeaponID = sniper;\nInventoryID = sniper;\nClipSize = 5;\nPocketSize = 60;\nReloadAmount = -1;\nShakeLength = 0.8;\nShakeStrengthX = 7.5;\n\
+                    ShakeStrengthY = 15.0;\nCrouchingShakeLength = 0.8;\n\
+                    CrouchingShakeStrengthX = 1.5;\nCrouchingShakeStrengthY = 3.0;\n";
+        let def = WeaponDef::parse("", text).unwrap();
+        assert_eq!(def.shake, SNIPER_SHAKE);
+    }
 
     fn tip_style() -> HudPrintStyle {
         HudPrintStyle {

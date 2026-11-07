@@ -202,6 +202,9 @@ pub fn run_3d_walkthrough(
     let mut walk_phase: f32 = 0.0;
     let mut third_person = true;
     let mut scoped = false;
+    let mut scope_shake = crate::hud::ScopeShake::default();
+    let mut shake_applied = [0.0f32; 2];
+    let mut shake_seed: u32 = 0x9e37_79b9;
     let mut bullet_time = false;
     let mut shot_timer: f32 = 0.0;
     // Seconds into the player's shot or reload clip.
@@ -617,7 +620,32 @@ pub fn run_3d_walkthrough(
             last_mouse = None;
         }
 
-        // Movement controls (WASD)
+        // The scope sways; leaving it takes the sway back out of the view.
+        let shake = scene
+            .inventory
+            .current
+            .as_ref()
+            .and_then(|name| scene.inventory.defs.get(name))
+            .map(|def| def.shake)
+            .filter(|_| scoped);
+        let sway = match shake {
+            Some(shake) => {
+                let crouch = if motion.crouching() { 1.0 } else { 0.0 };
+                let random = || crate::particles::random(&mut shake_seed);
+                scope_shake
+                    .step(&shake, base_dt, crouch, random)
+                    .map(f32::atan)
+            }
+            None => {
+                scope_shake = crate::hud::ScopeShake::default();
+                [0.0; 2]
+            }
+        };
+        yaw += sway[0] - shake_applied[0];
+        pitch += sway[1] - shake_applied[1];
+        shake_applied = sway;
+
+        // Movement controls
         let fly_speed = if window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift)
         {
             11.0
