@@ -1,8 +1,8 @@
 //! KF2 models as binary glTF 2.0.
 
 use crate::{
-    compose_world, invert_rt, mat_to_quat, sample_locals, BoneWeight, DecodedTexture, Kf2Anim,
-    KfsMesh, SkdSkin,
+    compose_world, invert_rt, mat_to_quat, sample_locals, AnimBone, BoneWeight, DecodedTexture,
+    Kf2Anim, KfsMesh, SkdSkin,
 };
 use std::collections::BTreeMap;
 
@@ -29,6 +29,22 @@ pub struct Joint {
     pub inverse_bind: [f32; 16],
 }
 
+/// One joint's keys in a clip, in glTF axes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Channel {
+    pub joint: usize,
+    /// Seconds, strictly increasing.
+    pub times: Vec<f32>,
+    pub translations: Vec<[f32; 3]>,
+    pub rotations: Vec<[f32; 4]>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Animation {
+    pub name: String,
+    pub channels: Vec<Channel>,
+}
+
 /// A model in glTF axes.
 #[derive(Debug, Clone)]
 pub struct Model {
@@ -36,6 +52,7 @@ pub struct Model {
     pub primitives: Vec<Primitive>,
     pub joints: Vec<Joint>,
     pub textures: Vec<Option<DecodedTexture>>,
+    pub animations: Vec<Animation>,
 }
 
 /// Max-FX is left-handed with a character facing +z, as `max_payne`'s `toe-l` and `hand-l` show.
@@ -145,6 +162,48 @@ pub fn model(mesh: &KfsMesh, rig: Option<(&SkdSkin, &Kf2Anim)>) -> Model {
         primitives: primitives.into_values().collect(),
         joints,
         textures: mesh.material_textures.clone(),
+        animations: Vec::new(),
+    }
+}
+
+/// `clip` as an animation of `model`'s joints.
+pub fn animation(model: &Model, name: &str, clip: &Kf2Anim) -> Animation {
+    let joint_of = |bone: &AnimBone| {
+        let name = &bone.name;
+        model
+            .joints
+            .iter()
+            .position(|j| j.name.eq_ignore_ascii_case(name))
+    };
+    let channels = clip.bones.iter().filter_map(|bone| {
+        let mut channel = Channel {
+            joint: joint_of(bone)?,
+            times: Vec::with_capacity(bone.keys.len()),
+            translations: Vec::with_capacity(bone.keys.len()),
+            rotations: Vec::with_capacity(bone.keys.len()),
+        };
+        let mut last_frame = None;
+        for key in &bone.keys {
+            if last_frame.is_some_and(|frame| key.frame <= frame) {
+                continue;
+            }
+            last_frame = Some(key.frame);
+            let mut rotation = mat_to_quat(mirror_rotation(key.mat));
+            if let Some(previous) = channel.rotations.last() {
+                let dot: f32 = (0..4).map(|k| previous[k] * rotation[k]).sum();
+                if dot < 0.0 {
+                    rotation = rotation.map(|v| 0.0 - v);
+                }
+            }
+            channel.times.push(key.frame as f32 / bone.fps);
+            channel.translations.push(mirror(key.pos));
+            channel.rotations.push(rotation);
+        }
+        Some(channel)
+    });
+    Animation {
+        name: name.to_string(),
+        channels: channels.collect(),
     }
 }
 
@@ -209,8 +268,13 @@ impl Buffers {
         self.accessors.len() - 1
     }
 
-    fn floats<const N: usize>(&mut self, values: &[[f32; N]], kind: &str, bounds: &str) -> usize {
-        let target = (N < 16).then_some(ARRAY_BUFFER);
+    fn floats<const N: usize>(
+        &mut self,
+        values: &[[f32; N]],
+        target: Option<u32>,
+        kind: &str,
+        bounds: &str,
+    ) -> usize {
         let bytes: Vec<u8> = values
             .iter()
             .flatten()
@@ -233,8 +297,8 @@ fn position_bounds(positions: &[[f32; 3]]) -> String {
 
 fn primitive_json(prim: &Primitive, buffers: &mut Buffers) -> String {
     let bounds = position_bounds(&prim.positions);
-    let position = buffers.floats(&prim.positions, "VEC3", &bounds);
-    let uv = buffers.floats(&prim.uvs, "VEC2", "");
+    let position = buffers.floats(&prim.positions, Some(ARRAY_BUFFER), "VEC3", &bounds);
+    let uv = buffers.floats(&prim.uvs, Some(ARRAY_BUFFER), "VEC2", "");
     let mut attributes = format!(r#""POSITION":{position},"TEXCOORD_0":{uv}"#);
     if !prim.joints.is_empty() {
         let bytes: Vec<u8> = prim
@@ -246,7 +310,7 @@ fn primitive_json(prim: &Primitive, buffers: &mut Buffers) -> String {
         let count = prim.joints.len();
         let target = Some(ARRAY_BUFFER);
         let joints = buffers.accessor(&bytes, target, UNSIGNED_SHORT, count, "VEC4", "");
-        let weights = buffers.floats(&prim.weights, "VEC4", "");
+        let weights = buffers.floats(&prim.weights, Some(ARRAY_BUFFER), "VEC4", "");
         attributes.push_str(&format!(r#","JOINTS_0":{joints},"WEIGHTS_0":{weights}"#));
     }
     let bytes: Vec<u8> = prim.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
@@ -256,6 +320,34 @@ fn primitive_json(prim: &Primitive, buffers: &mut Buffers) -> String {
     format!(
         r#"{{"attributes":{{{attributes}}},"indices":{indices},"material":{}}}"#,
         prim.material
+    )
+}
+
+fn animation_json(animation: &Animation, buffers: &mut Buffers) -> String {
+    let (mut samplers, mut channels) = (Vec::new(), Vec::new());
+    for channel in &animation.channels {
+        let (first, last) = (channel.times[0], channel.times[channel.times.len() - 1]);
+        let bounds = format!(r#","min":[{first}],"max":[{last}]"#);
+        let times: Vec<[f32; 1]> = channel.times.iter().map(|&t| [t]).collect();
+        let input = buffers.floats(&times, None, "SCALAR", &bounds);
+        let translations = buffers.floats(&channel.translations, None, "VEC3", "");
+        let rotations = buffers.floats(&channel.rotations, None, "VEC4", "");
+        for (output, path) in [(translations, "translation"), (rotations, "rotation")] {
+            channels.push(format!(
+                r#"{{"sampler":{},"target":{{"node":{},"path":"{path}"}}}}"#,
+                samplers.len(),
+                channel.joint
+            ));
+            samplers.push(format!(
+                r#"{{"input":{input},"output":{output},"interpolation":"LINEAR"}}"#
+            ));
+        }
+    }
+    format!(
+        r#"{{"name":"{}","samplers":[{}],"channels":[{}]}}"#,
+        escaped(&animation.name),
+        samplers.join(","),
+        channels.join(",")
     )
 }
 
@@ -333,12 +425,20 @@ pub fn to_glb(model: &Model) -> Vec<u8> {
     let mut extra = String::new();
     if !model.joints.is_empty() {
         let inverse: Vec<[f32; 16]> = model.joints.iter().map(|j| j.inverse_bind).collect();
-        let inverse = buffers.floats(&inverse, "MAT4", "");
+        let inverse = buffers.floats(&inverse, None, "MAT4", "");
         let list: Vec<String> = (0..model.joints.len()).map(|k| k.to_string()).collect();
         extra.push_str(&format!(
             r#","skins":[{{"joints":[{}],"inverseBindMatrices":{inverse}}}]"#,
             list.join(",")
         ));
+    }
+    if !model.animations.is_empty() {
+        let animations: Vec<String> = model
+            .animations
+            .iter()
+            .map(|animation| animation_json(animation, &mut buffers))
+            .collect();
+        extra.push_str(&format!(r#","animations":[{}]"#, animations.join(",")));
     }
     if !images.is_empty() {
         extra.push_str(&format!(
@@ -445,7 +545,7 @@ fn png(texture: &DecodedTexture) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AnimBone, AnimKeyframe, KfsFace};
+    use crate::{AnimKeyframe, KfsFace};
 
     const IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
@@ -581,6 +681,83 @@ mod tests {
         let third = prim.indices[1] as usize;
         assert_eq!(prim.joints[third], [0, 0, 0, 0]);
         assert_eq!(prim.weights[third], [1.0, 0.0, 0.0, 0.0]);
+    }
+
+    fn key(frame: u32, mat: [f32; 9], pos: [f32; 3]) -> AnimKeyframe {
+        AnimKeyframe { frame, mat, pos }
+    }
+
+    fn walk() -> Kf2Anim {
+        let mut arm = bone("ARM", Some("Root"), IDENTITY, [1.0, 0.0, 0.0]);
+        arm.fps = 10.0;
+        arm.keys.push(key(5, IDENTITY, [2.0, 0.0, 3.0]));
+        Kf2Anim {
+            bones: vec![arm, bone("Tail", None, IDENTITY, [0.0; 3])],
+        }
+    }
+
+    #[test]
+    fn clip_keys_become_seconds_in_mirrored_axes() {
+        let (skin, anim) = rig();
+        let model = model(&triangle(), Some((&skin, &anim)));
+        let clip = animation(&model, "walk", &walk());
+        assert_eq!(clip.name, "walk");
+        let channel = &clip.channels[0];
+        assert_eq!(channel.joint, 1);
+        assert_eq!(channel.times, [0.0, 0.5]);
+        assert_eq!(channel.translations[1], [-2.0, 0.0, 3.0]);
+        assert_eq!(channel.rotations[1], [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_clip_bone_the_model_lacks_is_left_out() {
+        let (skin, anim) = rig();
+        let model = model(&triangle(), Some((&skin, &anim)));
+        assert_eq!(animation(&model, "walk", &walk()).channels.len(), 1);
+    }
+
+    #[test]
+    fn two_keys_on_one_frame_keep_the_first() {
+        let (skin, anim) = rig();
+        let model = model(&triangle(), Some((&skin, &anim)));
+        let mut clip = walk();
+        clip.bones[0].keys.push(key(5, IDENTITY, [9.0; 3]));
+        let channel = &animation(&model, "walk", &clip).channels[0];
+        assert_eq!(channel.times, [0.0, 0.5]);
+        assert_eq!(channel.translations[1], [-2.0, 0.0, 3.0]);
+    }
+
+    #[test]
+    fn neighbouring_rotations_stay_on_one_side_of_the_sphere() {
+        let (skin, anim) = rig();
+        let model = model(&triangle(), Some((&skin, &anim)));
+        let half_turn_about_x = [1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, -1.0];
+        let mut clip = walk();
+        clip.bones[0].keys[0].mat = half_turn_about_x;
+        clip.bones[0].keys[1].mat = [1.0, 0.0, 0.0, 0.0, -1.0, 0.01, 0.0, -0.01, -1.0];
+        let rotations = &animation(&model, "walk", &clip).channels[0].rotations;
+        let dot: f32 = (0..4).map(|k| rotations[0][k] * rotations[1][k]).sum();
+        assert!(dot > 0.0, "{rotations:?}");
+    }
+
+    #[test]
+    fn a_glb_animation_targets_translation_and_rotation_of_its_joint() {
+        let (skin, anim) = rig();
+        let mut model = model(&triangle(), Some((&skin, &anim)));
+        model.animations = vec![animation(&model, "walk", &walk())];
+        let glb = to_glb(&model);
+        let json = std::str::from_utf8(&glb[20..20 + u32_at(&glb, 12) as usize]).unwrap();
+        assert!(json.contains(r#""animations":[{"name":"walk""#), "{json}");
+        assert!(
+            json.contains(r#""target":{"node":1,"path":"translation"}"#),
+            "{json}"
+        );
+        assert!(
+            json.contains(r#""target":{"node":1,"path":"rotation"}"#),
+            "{json}"
+        );
+        assert!(json.contains(r#""interpolation":"LINEAR""#), "{json}");
+        assert!(json.contains(r#""min":[0],"max":[0.5]"#), "{json}");
     }
 
     fn u32_at(data: &[u8], at: usize) -> u32 {
