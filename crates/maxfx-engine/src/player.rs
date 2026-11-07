@@ -325,6 +325,7 @@ impl PlayerMotion {
         } else if self.state == State::Dive
             && clips.abort_dive_frame > 0
             && after * rate >= clips.abort_dive_frame as f32
+            && (c.forward != 0 || c.right != 0 || c.jump)
         {
             self.finish(c);
         }
@@ -762,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dive_on_the_ground_gets_up_at_its_abort_frame() {
+    fn a_key_held_on_the_ground_cuts_a_dive_at_its_abort_frame() {
         let clips = clips();
         let mut motion = PlayerMotion::default();
         let c = Controls {
@@ -772,7 +773,30 @@ mod tests {
         };
         motion.step(&clips, &c, 1.9);
         assert!(motion.diving());
+        let held = Controls {
+            forward: 1,
+            ..grounded()
+        };
+        motion.step(&clips, &held, 0.2);
+        assert_eq!(
+            motion.index.as_deref(),
+            Some("CHARANIM_SHOOTDODGEFORWARD_GETUP")
+        );
+    }
+
+    #[test]
+    fn with_no_key_held_a_dive_runs_past_its_abort_frame_to_its_end() {
+        let clips = clips();
+        let mut motion = PlayerMotion::default();
+        let c = Controls {
+            forward: 1,
+            dodge: Some(DodgeKind::Dive),
+            ..grounded()
+        };
+        motion.step(&clips, &c, 1.9);
         motion.step(&clips, &grounded(), 0.2);
+        assert!(motion.diving(), "frame 21 of 30 only allows an abort");
+        motion.step(&clips, &grounded(), 1.0);
         assert_eq!(
             motion.index.as_deref(),
             Some("CHARANIM_SHOOTDODGEFORWARD_GETUP")
