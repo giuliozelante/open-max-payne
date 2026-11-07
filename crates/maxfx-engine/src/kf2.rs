@@ -1,6 +1,5 @@
 //! Characters, weapons and world spheres built from the `openkf2` format reader.
 
-use crate::scene::decode_texture_blob;
 pub use openkf2::*;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

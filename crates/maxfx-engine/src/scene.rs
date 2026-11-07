@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-pub use openkf2::DecodedTexture;
+pub use openkf2::{decode_texture_blob, DecodedTexture};
 
 #[derive(Debug, Clone)]
 pub struct DecodedLightmap {
@@ -2296,112 +2296,6 @@ fn skip_color_and_bool(data: &[u8], i: &mut usize) -> Option<()> {
     }
     *i += 2;
     Some(())
-}
-
-/// Decode JPEG, uncompressed 24/32-bit TGA, or 8-bit ZSoft PCX into `0x00RRGGBB` pixels.
-pub fn decode_texture_blob(blob: &[u8]) -> Option<(u32, u32, Vec<u32>)> {
-    if blob.len() >= 2 && blob[0] == 0xff && blob[1] == 0xd8 {
-        let mut dec = jpeg_decoder::Decoder::new(blob);
-        let rgb = dec.decode().ok()?;
-        let info = dec.info()?;
-        let w = info.width as u32;
-        let h = info.height as u32;
-        let mut pixels = Vec::with_capacity((w * h) as usize);
-        match info.pixel_format {
-            jpeg_decoder::PixelFormat::RGB24 => {
-                let mut k = 0;
-                while k + 3 <= rgb.len() {
-                    pixels.push(
-                        ((rgb[k] as u32) << 16) | ((rgb[k + 1] as u32) << 8) | (rgb[k + 2] as u32),
-                    );
-                    k += 3;
-                }
-            }
-            jpeg_decoder::PixelFormat::L8 => {
-                for &g in &rgb {
-                    let v = g as u32;
-                    pixels.push((v << 16) | (v << 8) | v);
-                }
-            }
-            _ => return None,
-        }
-        return Some((w, h, pixels));
-    }
-    // Uncompressed true-color TGA (byte 2 == 2)
-    if blob.len() >= 18 && blob[1] == 0 && blob[2] == 2 {
-        let id_len = blob[0] as usize;
-        let w = u16::from_le_bytes([blob[12], blob[13]]) as u32;
-        let h = u16::from_le_bytes([blob[14], blob[15]]) as u32;
-        let bpp = blob[16];
-        let flip_y = (blob[17] & 0x20) == 0;
-        let step = (bpp / 8) as usize;
-        let start = 18 + id_len;
-        if (step == 3 || step == 4)
-            && w > 0
-            && h > 0
-            && start + (w * h) as usize * step <= blob.len()
-        {
-            let mut pixels = vec![0u32; (w * h) as usize];
-            let raw = &blob[start..];
-            for y in 0..h as usize {
-                let dst_y = if flip_y { h as usize - 1 - y } else { y };
-                for x in 0..w as usize {
-                    let off = (y * w as usize + x) * step;
-                    let b = raw[off] as u32;
-                    let g = raw[off + 1] as u32;
-                    let r = raw[off + 2] as u32;
-                    pixels[dst_y * w as usize + x] = (r << 16) | (g << 8) | b;
-                }
-            }
-            return Some((w, h, pixels));
-        }
-    }
-    // ZSoft PCX (manufacturer 0x0a, 8-bit 1-plane with 256-color VGA palette at EOF-769)
-    if blob.len() > 896 && blob[0] == 0x0a && blob[2] == 1 && blob[3] == 8 {
-        let xmin = u16::from_le_bytes([blob[4], blob[5]]) as u32;
-        let ymin = u16::from_le_bytes([blob[6], blob[7]]) as u32;
-        let xmax = u16::from_le_bytes([blob[8], blob[9]]) as u32;
-        let ymax = u16::from_le_bytes([blob[10], blob[11]]) as u32;
-        if xmax >= xmin && ymax >= ymin {
-            let w = xmax - xmin + 1;
-            let h = ymax - ymin + 1;
-            let bpl = u16::from_le_bytes([blob[66], blob[67]]) as usize;
-            let pal_pos = blob.len() - 769;
-            if blob[pal_pos] == 0x0c {
-                let pal = &blob[pal_pos + 1..];
-                let mut indices = Vec::with_capacity(bpl * h as usize);
-                let mut p = 128;
-                while indices.len() < bpl * h as usize && p < pal_pos {
-                    let b = blob[p];
-                    p += 1;
-                    if (b & 0xc0) == 0xc0 {
-                        let cnt = (b & 0x3f) as usize;
-                        let val = *blob.get(p)?;
-                        p += 1;
-                        for _ in 0..cnt {
-                            indices.push(val);
-                        }
-                    } else {
-                        indices.push(b);
-                    }
-                }
-                if indices.len() >= bpl * h as usize {
-                    let mut pixels = Vec::with_capacity((w * h) as usize);
-                    for y in 0..h as usize {
-                        for x in 0..w as usize {
-                            let idx = indices[y * bpl + x] as usize * 3;
-                            let r = pal[idx] as u32;
-                            let g = pal[idx + 1] as u32;
-                            let b = pal[idx + 2] as u32;
-                            pixels.push((r << 16) | (g << 8) | b);
-                        }
-                    }
-                    return Some((w, h, pixels));
-                }
-            }
-        }
-    }
-    None
 }
 
 fn read_point_stream_vec(data: &[u8], i: &mut usize) -> Option<Vec<(usize, [f32; 2], [f32; 2])>> {

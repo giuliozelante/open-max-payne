@@ -50,6 +50,7 @@ cargo test -p openras <test_name_substring>
 # Run tools
 cargo run -p openras -- list /path/to/mod.mpm   # RASMaker-compatible flags -x/-v/-a/-m/-p/-c
 cargo run -p openpfx -- dump-pse|dump-rps|export|validate-rps ...
+cargo run -p openkf2 -- export mesh.kfs --skin mesh.skd --pose Widepose.kf2 --clip Run.kf2 --textures DIR -o out.glb
 cargo run -p maxfx-engine -- --window [--renderer hw|sw] ...  # 3D walkthrough over BYOD .ldb (hw = wgpu)
 cargo run -p maxfx-engine -- --frame out.ppm [--camera NAME.DO] level.ldb  # headless frame for visual checks
 
