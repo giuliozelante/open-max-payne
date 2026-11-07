@@ -700,12 +700,12 @@ pub fn run_3d_walkthrough(
                 last_contact = contact;
             }
             // Strict boundary & wall check: never allow stepping off walkable floor into void!
-            if can_stand_at(&scene, &room_origins, nx, player_pos[1], nz) {
+            if can_step(&scene, &room_origins, player_pos, nx, nz) {
                 player_pos[0] = nx;
                 player_pos[2] = nz;
-            } else if can_stand_at(&scene, &room_origins, nx, player_pos[1], player_pos[2]) {
+            } else if can_step(&scene, &room_origins, player_pos, nx, player_pos[2]) {
                 player_pos[0] = nx;
-            } else if can_stand_at(&scene, &room_origins, player_pos[0], player_pos[1], nz) {
+            } else if can_step(&scene, &room_origins, player_pos, player_pos[0], nz) {
                 player_pos[2] = nz;
             }
 
@@ -1986,6 +1986,20 @@ fn frame_dt(elapsed: std::time::Duration) -> f32 {
     elapsed.as_secs_f32().min(MAX_FRAME_DT)
 }
 
+/// Whether a body at `from` may go to `(wx, wz)`. One already caught in a wall, as after landing
+/// on a railing, may always move, or it would stay there for good.
+fn can_step(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    from: [f32; 3],
+    wx: f32,
+    wz: f32,
+) -> bool {
+    let [x, y, z] = from;
+    can_stand_at(scene, rooms, wx, y, wz)
+        || (hits_wall(scene, rooms, x, y, z) && find_floor_y(scene, wx, y, wz).is_some())
+}
+
 fn can_stand_at(
     scene: &LdbScene,
     rooms: &BTreeMap<i32, [f32; 3]>,
@@ -2035,7 +2049,7 @@ fn find_floor_y(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> Option<f32> {
                     let y = v0[1]
                         - (poly.normal[0] * (wx - v0[0]) + poly.normal[2] * (wz - v0[2]))
                             / poly.normal[1];
-                    if y <= feet_y + STEP_UP && y >= feet_y - 6.0 && best.is_none_or(|b| y > b) {
+                    if y <= feet_y + STEP_UP && best.is_none_or(|b| y > b) {
                         best = Some(y);
                     }
                 }
@@ -6621,6 +6635,39 @@ mod tests {
             }],
         });
         scene
+    }
+
+    /// `wall_scene` with a floor `depth` metres under the origin.
+    fn floor_and_wall(depth: f32) -> LdbScene {
+        let mut scene = wall_scene();
+        let v = |x: f32, z: f32| SceneVertex {
+            pos: [x, -depth, z],
+            uv: [0.0; 2],
+            luv: [0.0; 2],
+        };
+        scene.static_meshes[0].polys.push(ScenePoly {
+            vertices: vec![v(-9.0, -9.0), v(9.0, -9.0), v(9.0, 9.0), v(-9.0, 9.0)],
+            normal: [0.0, 1.0, 0.0],
+            material_id: 7,
+            lightmap_id: -1,
+        });
+        scene
+    }
+
+    #[test]
+    fn a_long_drop_still_has_a_floor_to_land_on() {
+        let scene = floor_and_wall(20.0);
+        let rooms = BTreeMap::new();
+        assert_eq!(find_floor_y(&scene, 0.0, 0.0, 0.0), Some(-20.0));
+        assert!(can_step(&scene, &rooms, [0.0, 0.0, 0.0], 0.5, 0.0));
+    }
+
+    #[test]
+    fn a_body_caught_in_a_wall_can_step_out_but_a_free_one_cannot_step_in() {
+        let scene = floor_and_wall(1.65);
+        let rooms = BTreeMap::new();
+        assert!(!can_step(&scene, &rooms, [0.0, 0.0, 4.0], 0.0, 4.8));
+        assert!(can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.0, 4.5));
     }
 
     #[test]
