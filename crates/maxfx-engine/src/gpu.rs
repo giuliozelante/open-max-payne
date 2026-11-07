@@ -924,7 +924,7 @@ impl GpuRenderer {
             }],
         });
 
-        let sampler = |address, filter| {
+        let sampler = |address, filter, anisotropy_clamp| {
             device.create_sampler(&wgpu::SamplerDescriptor {
                 address_mode_u: address,
                 address_mode_v: address,
@@ -935,20 +935,21 @@ impl GpuRenderer {
                     wgpu::FilterMode::Linear => wgpu::MipmapFilterMode::Linear,
                     wgpu::FilterMode::Nearest => wgpu::MipmapFilterMode::Nearest,
                 },
+                anisotropy_clamp,
                 ..Default::default()
             })
         };
-        // Retail filters diffuse textures (`FilteringMode`: bilinear, trilinear or anisotropic; the
-        // default is not read yet). Trilinear over `mip_chain` levels.
-        let tex_sampler = sampler(wgpu::AddressMode::Repeat, wgpu::FilterMode::Linear);
+        // Retail's `Filtering Mode` setting offers bilinear, trilinear or anisotropic. The owner
+        // plays with anisotropic, and the engine has no setting yet.
+        let tex_sampler = sampler(wgpu::AddressMode::Repeat, wgpu::FilterMode::Linear, 16);
         // `render3d::sample_lightmap`: lightmaps are filtered, so their shading is smooth.
-        let lmap_sampler = sampler(wgpu::AddressMode::ClampToEdge, wgpu::FilterMode::Linear);
+        let lmap_sampler = sampler(wgpu::AddressMode::ClampToEdge, wgpu::FilterMode::Linear, 1);
         let binder = Binder {
             batch_layout,
             model_layout,
             tex_sampler,
             lmap_sampler,
-            image_sampler: sampler(wgpu::AddressMode::Repeat, wgpu::FilterMode::Nearest),
+            image_sampler: sampler(wgpu::AddressMode::Repeat, wgpu::FilterMode::Nearest, 1),
             blank: upload(&device, &queue, 1, 1, &[0xffff_ffff], false),
         };
         let textures: Vec<_> = scene
