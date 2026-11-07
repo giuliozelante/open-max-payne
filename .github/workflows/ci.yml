@@ -36,6 +36,9 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
+      - name: System deps (ALSA for rodio)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
       - name: cargo clippy (libs)
         run: >
           cargo clippy
@@ -65,7 +68,8 @@ jobs:
             librsvg2-dev \
             patchelf \
             libgtk-3-dev \
-            libssl-dev
+            libssl-dev \
+            libasound2-dev
 
       - name: cargo check studio
         run: cargo check -p open-max-payne-studio
@@ -98,6 +102,10 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+
+      - name: System deps (ALSA for rodio)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       - name: cargo test (library crates)
         run: cargo test -p openras -p openpfx -p openkf2 -p maxfx-patcher -p maxfx-play -p maxfx-engine

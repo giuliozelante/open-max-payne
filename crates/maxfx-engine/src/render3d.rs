@@ -2744,44 +2744,23 @@ struct SoundChannels {
     voices: Vec<Voice>,
 }
 
-/// One cue's player. A positional loop keeps its voice while out of range, with no player.
+/// One cue. A positional loop keeps its voice while out of range, with nothing playing.
 struct Voice {
     emitter: String,
-    wav: PathBuf,
+    wav: crate::audio::WavBytes,
     looping: bool,
     range: Option<crate::SoundRange>,
     at: Option<[f32; 3]>,
-    /// The player and the gain it was started at.
-    child: Option<(Child, f32)>,
+    sound: Option<crate::audio::Sound>,
 }
 
 impl Voice {
     fn kill(&mut self) {
-        if let Some((mut child, _)) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.sound = None;
     }
 
     fn start(&mut self, gain: f32) {
-        self.kill();
-        let volume = (gain * 100.0).round().clamp(1.0, 100.0) as u32;
-        self.child = std::process::Command::new("ffplay")
-            .args(sound_player_args(&self.wav, self.looping, volume))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()
-            .map(|child| (child, gain));
-    }
-}
-
-impl Drop for SoundChannels {
-    fn drop(&mut self) {
-        for voice in &mut self.voices {
-            voice.kill();
-        }
+        self.sound = crate::audio::Sound::play(&self.wav, self.looping, gain);
     }
 }
 
@@ -2794,42 +2773,24 @@ fn sound_gain(distance: f32, range: &crate::SoundRange) -> f32 {
     range.volume * (range.hotspot / distance).min(1.0)
 }
 
-/// What a positional voice needs this frame, given the gain it was started at (if running).
+/// What a positional voice needs this frame, given whether it is playing.
 #[derive(Debug, PartialEq)]
 enum VoiceAction {
     Keep,
-    /// Out of range: release the player (retail `0x1000bb60` stops the buffer).
+    /// Out of range: release the sound (retail `0x1000bb60` stops the buffer).
     Stop,
-    /// (Re)start at the new gain: `ffplay` cannot change volume while it plays.
     Start,
+    /// Follow the listener's distance while playing.
+    SetGain,
 }
 
-fn voice_action(running: Option<f32>, gain: f32) -> VoiceAction {
-    match running {
-        _ if gain <= 0.0 => {
-            if running.is_some() {
-                VoiceAction::Stop
-            } else {
-                VoiceAction::Keep
-            }
-        }
-        None => VoiceAction::Start,
-        Some(started) if gain > started * 2.0 || gain < started * 0.5 => VoiceAction::Start,
-        Some(_) => VoiceAction::Keep,
+fn voice_action(running: bool, gain: f32) -> VoiceAction {
+    match (running, gain > 0.0) {
+        (true, false) => VoiceAction::Stop,
+        (false, false) => VoiceAction::Keep,
+        (false, true) => VoiceAction::Start,
+        (true, true) => VoiceAction::SetGain,
     }
-}
-
-/// `ffplay` without a window at `volume` percent; `-loop 0` repeats a looping cue until it is killed.
-pub(crate) fn sound_player_args(wav: &Path, looping: bool, volume: u32) -> Vec<String> {
-    let mut args: Vec<String> = ["-nodisp", "-autoexit", "-loglevel", "quiet"]
-        .map(String::from)
-        .to_vec();
-    args.extend(["-volume".to_string(), volume.to_string()]);
-    if looping {
-        args.extend(["-loop".to_string(), "0".to_string()]);
-    }
-    args.push(wav.display().to_string());
-    args
 }
 
 /// Load the catalog of each queued cue whose category is not loaded yet, then resolve the cue.
@@ -2881,8 +2842,7 @@ fn voice_gain(
 }
 
 /// Stop what `A_StopAll3DSounds` asked for, start the queued cues, and keep positional loops at
-/// the listener's distance: a loop is released past its falloff and restarted when the gain
-/// halves or doubles (`ffplay` cannot change volume while it plays).
+/// the listener's distance: a loop is released past its falloff and follows the gain inside it.
 fn play_queued_sounds(
     scene: &mut LdbScene,
     game_dir: &Path,
@@ -2900,19 +2860,20 @@ fn play_queued_sounds(
         });
     }
     // Reap one-shots that finished.
-    sounds.voices.retain_mut(|voice| {
-        voice.looping
-            || voice
-                .child
-                .as_mut()
-                .is_some_and(|(child, _)| matches!(child.try_wait(), Ok(None)))
+    sounds.voices.retain(|voice| {
+        voice.looping || voice.sound.as_ref().is_some_and(|sound| !sound.finished())
     });
     for voice in sounds.voices.iter_mut().filter(|voice| voice.looping) {
         let gain = voice_gain(voice, scene, rooms, listener);
-        match voice_action(voice.child.as_ref().map(|(_, g)| *g), gain) {
+        match voice_action(voice.sound.is_some(), gain) {
             VoiceAction::Keep => {}
             VoiceAction::Stop => voice.kill(),
             VoiceAction::Start => voice.start(gain),
+            VoiceAction::SetGain => {
+                if let Some(sound) = &voice.sound {
+                    sound.set_gain(gain);
+                }
+            }
         }
     }
     resolve_queued_sounds(scene, game_dir);
@@ -2924,25 +2885,20 @@ fn play_queued_sounds(
         else {
             continue;
         };
-        let name = filename.replace(['\\', '/'], "_");
-        let wav = std::env::temp_dir().join(format!("omp-{}-{name}", std::process::id()));
-        if !wav.is_file() && std::fs::write(&wav, &bytes).is_err() {
-            continue;
-        }
         let mut voice = Voice {
             emitter: sound.emitter,
-            wav,
+            wav: bytes.into(),
             looping: sound.looping,
             range: sound.range,
             at: sound.at,
-            child: None,
+            sound: None,
         };
         let gain = voice_gain(&voice, scene, rooms, listener);
         if gain > 0.0 {
             voice.start(gain);
         }
         // A one-shot out of range is never heard; a loop waits for the listener.
-        if voice.looping || voice.child.is_some() {
+        if voice.looping || voice.sound.is_some() {
             sounds.voices.push(voice);
         }
     }
@@ -5846,7 +5802,7 @@ mod tests {
         // sounds/projectiles.txt with soundid.h: Hotspot 5, FallOff 15, Volume 0.4.
         let voice = Voice {
             emitter: String::new(),
-            wav: PathBuf::new(),
+            wav: std::sync::Arc::from(&[][..]),
             looping: false,
             range: Some(crate::SoundRange {
                 hotspot: 5.0,
@@ -5854,7 +5810,7 @@ mod tests {
                 volume: 0.4,
             }),
             at: Some([100.0, 0.0, 0.0]),
-            child: None,
+            sound: None,
         };
         let (scene, rooms) = (LdbScene::default(), BTreeMap::new());
         assert_eq!(voice_gain(&voice, &scene, &rooms, [101.0, 0.0, 0.0]), 0.4);
@@ -6059,14 +6015,12 @@ mod tests {
     }
 
     #[test]
-    fn a_voice_restarts_only_when_its_gain_halves_or_doubles_and_stops_out_of_range() {
-        assert_eq!(voice_action(None, 0.0), VoiceAction::Keep);
-        assert_eq!(voice_action(None, 0.3), VoiceAction::Start);
-        assert_eq!(voice_action(Some(0.3), 0.0), VoiceAction::Stop);
-        assert_eq!(voice_action(Some(0.3), 0.5), VoiceAction::Keep);
-        assert_eq!(voice_action(Some(0.3), 0.16), VoiceAction::Keep);
-        assert_eq!(voice_action(Some(0.3), 0.61), VoiceAction::Start);
-        assert_eq!(voice_action(Some(0.3), 0.14), VoiceAction::Start);
+    fn a_voice_follows_its_gain_and_stops_out_of_range() {
+        assert_eq!(voice_action(false, 0.0), VoiceAction::Keep);
+        assert_eq!(voice_action(false, 0.3), VoiceAction::Start);
+        assert_eq!(voice_action(true, 0.0), VoiceAction::Stop);
+        assert_eq!(voice_action(true, 0.61), VoiceAction::SetGain);
+        assert_eq!(voice_action(true, 0.14), VoiceAction::SetGain);
     }
 
     #[test]
@@ -6114,25 +6068,6 @@ mod tests {
             .expect("P1L0a_01 file");
         let wav = crate::read_game_bytes(&game, &crate::story_wav_win_path(&file)).expect("wav");
         assert!(wav.starts_with(b"RIFF"));
-    }
-
-    #[test]
-    fn sound_player_args_set_the_start_volume() {
-        let args = sound_player_args(std::path::Path::new("/x/s.wav"), false, 37);
-        let at = args.iter().position(|a| a == "-volume").expect("-volume");
-        assert_eq!(args[at + 1], "37");
-    }
-
-    #[test]
-    fn looping_sounds_play_until_stopped() {
-        let wav = std::path::Path::new("/x/s.wav");
-        let once = sound_player_args(wav, false, 100);
-        assert!(!once.iter().any(|a| a == "-loop"));
-        assert!(once.iter().any(|a| a == "-autoexit"));
-        let looped = sound_player_args(wav, true, 100);
-        let at = looped.iter().position(|a| a == "-loop").expect("-loop");
-        assert_eq!(looped[at + 1], "0");
-        assert_eq!(looped.last().map(String::as_str), Some("/x/s.wav"));
     }
 
     #[test]

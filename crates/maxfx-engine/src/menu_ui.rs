@@ -3,8 +3,6 @@
 use crate::frontend::{Frontend, Screen};
 use crate::{novel_input, novel_turn, MenuEntry, NovelShownPage};
 use minifb::{Key, KeyRepeat, MouseButton};
-use std::io::Write;
-use std::process::{Child, Command, Stdio};
 
 const W: usize = 960;
 const H: usize = 600;
@@ -61,13 +59,12 @@ pub fn show_novel_session(screen: &mut Screen, chrome: &[u8], pages: &[NovelShow
     screen.set_title("Open Max Payne — graphic novel");
     let mut index = 0usize;
     let mut buf = vec![0u32; W * H];
-    let mut voice: Option<Child> = None;
+    let mut voice: Option<crate::audio::Sound> = None;
     let mut shown = usize::MAX;
     let mut mouse_down = false;
     while screen.is_open() {
         screen.pump();
         if shown != index {
-            stop_voice(&mut voice);
             voice = start_voice(&pages[index].wav);
             shown = index;
         }
@@ -91,7 +88,7 @@ pub fn show_novel_session(screen: &mut Screen, chrome: &[u8], pages: &[NovelShow
             break;
         }
     }
-    stop_voice(&mut voice);
+    drop(voice);
 }
 
 /// The mode music (`a_playmusic` in `menu.txt` `[OnInit]`), looping until another cue replaces it.
@@ -99,7 +96,7 @@ pub fn show_novel_session(screen: &mut Screen, chrome: &[u8], pages: &[NovelShow
 #[derive(Default)]
 pub struct Music {
     cue: Option<String>,
-    child: Option<Child>,
+    sound: Option<crate::audio::Sound>,
 }
 
 impl Music {
@@ -120,7 +117,7 @@ impl Music {
         if self.cue.as_deref() == cue {
             return;
         }
-        stop_voice(&mut self.child);
+        self.sound = None;
         self.cue = cue.map(str::to_string);
         let Some(cue) = cue else {
             return;
@@ -134,60 +131,17 @@ impl Music {
             eprintln!("music {cue}: not found");
             return;
         };
-        let path = std::env::temp_dir().join(format!("omp-music-{}-{cue}.wav", std::process::id()));
-        if std::fs::write(&path, wav).is_err() {
-            return;
-        }
-        self.child = Command::new("ffplay")
-            .args(crate::render3d::sound_player_args(
-                &path,
-                crate::sound_cue_looping(&music_txt, cue),
-                100,
-            ))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok();
+        let looping = crate::sound_cue_looping(&music_txt, cue);
+        self.sound = crate::audio::Sound::play(&wav.into(), looping, 1.0);
     }
 }
 
-impl Drop for Music {
-    fn drop(&mut self) {
-        stop_voice(&mut self.child);
-    }
-}
-
-pub(crate) fn start_voice(wav: &[u8]) -> Option<Child> {
+/// A graphic novel page's voice-over, or `None` if it is not a WAV.
+pub(crate) fn start_voice(wav: &[u8]) -> Option<crate::audio::Sound> {
     if wav.len() < 12 || &wav[..4] != b"RIFF" {
         return None;
     }
-    let path = std::env::temp_dir().join(format!("omp-story-{}.wav", std::process::id()));
-    let mut file = std::fs::File::create(&path).ok()?;
-    file.write_all(wav).ok()?;
-    drop(file);
-    for (bin, quiet) in [("paplay", false), ("aplay", true)] {
-        let mut cmd = Command::new(bin);
-        if quiet {
-            cmd.arg("-q");
-        }
-        cmd.arg(&path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if let Ok(child) = cmd.spawn() {
-            return Some(child);
-        }
-    }
-    None
-}
-
-pub(crate) fn stop_voice(voice: &mut Option<Child>) {
-    if let Some(child) = voice.take() {
-        let mut child = child;
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+    crate::audio::Sound::play(&wav.into(), false, 1.0)
 }
 
 fn paint_novel_page(buf: &mut [u32], jpeg: &[u8], page: &str, chrome: &[u8]) {
