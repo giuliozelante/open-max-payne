@@ -38,9 +38,11 @@ records what is read so far and where the reading goes next.
 - **VERIFIED (RTTI):** the moving shapes are `X_LevelRuntimeCapsuleObjectBase` (vtable `0x7d4d64`) and
   `X_LevelRuntimeSphereObjectBase` (vtable `0x7d5008`). `MaxPayne_StartPointTestCapsule` (`0x7cd010`) derives from the
   capsule, and `CharacterTestSphere` (`0x7d5d10`), `DodgeTestSphere` and `TestSphere` from the sphere.
-- **VERIFIED:** the two bases share most slots. They differ in slot 0 (destructor), 8, 12, 17, 19, 20, 21 and 22
-  (0-based). Slot 19 is `0x63eee0` for the capsule and `0x658dd0` for the sphere; they call `0x63b410` and `0x63b1a0`.
-  Slot 21 calls `0x5c0ba0` and `0x5c05f0`; slot 22 calls `0x5bf8e0` (818 instructions) and `0x5bf2f0` (357).
+- **VERIFIED:** the two bases share most slots. In the first 31 slots they differ at 0 (destructor), 8, 12, 18,
+  20, 22, 23 and 24. Slot 19 (`+0x4c`) is `0x64ab20` on both, and that function is `ret 0x10`. Slot 20 (`+0x50`) is
+  `0x63eee0` for the capsule and `0x658dd0` for the sphere; they call `0x63b410` and `0x63b1a0`. Slot 22 (`+0x58`)
+  calls `0x5c0ba0` and `0x5c05f0`. Slot 23 (`+0x5c`) calls `0x5bf8e0` and `0x5bf2f0`. Slot 21 (`+0x54`) is shared
+  (`0x64c270`). An earlier count had these one slot low.
 - **Ruled out:** `0x646f30` and `0x645340` do little float work themselves; their helpers are getters (`0x642d40`,
   `0x642d50` = position at `+0x54`, `0x74e8e0` = `+0x30`, `0x411d90` = `+0x24`). A static walk four calls deep from
   `0x63b410`, `0x5bf8e0` and `0x5c0ba0` finds only one small float routine, `0x449400` (19 float operations, one square
@@ -73,9 +75,34 @@ records what is read so far and where the reading goes next.
 - **UNKNOWN:** the virtual callee that tests the capsule against the level, and where a step-up or a slope changes
   the target. `0x696f60` has no float immediate of its own between `0x697210` and `0x697619`.
 
+## Virtual calls
+
+- **VERIFIED:** `X_Character` (`0x7d5950`) keeps the capsule's slot 20 (`0x63eee0`), slot 22 (`0x63e280`) and slot 23
+  (`0x63e350`). It overrides slot 19 with `0x695070`. Slot 21 stays the update `0x696f60`. `MaxPayne_StartPointTestCapsule`
+  (`0x7cd010`) and `CharacterTestSphere` (`0x7d5d10`) override slot 19 with `0x4f0db0` and keep those other slots.
+- **VERIFIED:** `0x646f30` at `0x6470f0` does `mov ebx,[this]` / `call [ebx+0x4c]` with four arguments and `ecx` set back
+  to `this`. On the two shape bases that slot returns immediately. On a character it enters `0x695070`. The character's
+  flag 0 still does not enter `0x646f30`, so this call is not on that path.
+- **VERIFIED:** `0x695070` and `0x4f0db0` both call `0x649300`, then `type_info::name` (import `0x7ca34c`), then
+  `call [edx+0x48]`. `0x695070` returns at `0x69538c` (`ret 0x10`) and has no x87 instruction of its own, so it does
+  not itself change the three floats `0x646f30` compares after the call. It also calls `[reg+0x18]`, `[reg+0x1c]`,
+  `[reg+0x20]` and `[reg+0x24]`. Those callees are not read.
+- **VERIFIED:** `0x63b410` (`0x63b410`..`0x63b730`) has no vtable call. Its one indirect call is the `G_Color`
+  constructor (`0x7ca90c`, grphmfc.dll).
+- **VERIFIED:** `0x5bf8e0` returns at `0x5c0534` (`ret 0x1c`). It calls `0x449400` at `0x5c0007` and does not call
+  `0x5c2520`.
+- **VERIFIED:** `0x5c2520` calls `P_VirtualObject::getTriangleMesh(int)` (e2mfc, `0x7ca49c`) and
+  `P_TriangleMeshBase::lock` (`0x7ca58c`). It calls `0x5c2740` three times, with corner 0, 1 and 2. That helper loads
+  `ecx` from `[this+0x1c]` and calls slot `+0x30` of that object. `0x5c2760` loads `ecx` from `[this+0x18]`, calls
+  slot `+0x70`, and copies three dwords out. `P_TriangleMeshBase::unlock` (`0x7ca590`) follows. The only caller of
+  `0x5c2520` is `0x5c1f3f`, inside `0x5c1e20`.
+- **Ruled out, narrowed:** `P_CollisionBuffer` stays the renderer's visibility pass. `getTriangleMesh` is a different
+  e2mfc entry.
+- **UNKNOWN:** the class at a triangle mesh's `+0x18` and `+0x1c`, and whether slot 23 reaches `0x5c1e20`.
+
 ## Next
 
-1. Resolve the virtual calls inside `0x63b410`, `0x5bf8e0` and `0x646f30` (for example `[ebx+0x4c]` in `0x646f30`).
-   Identify each receiver's class from how the object is built, then read its vtable, as done above.
-2. Alternatively, trace it at run time: run retail under Wine with a debugger (`winedbg`) and break on `0x647660`
-   while Max walks into a wall. That gives the real call chain in one session.
+1. Close the caller chain from slot 23 (`0x63e350` / `0x5bf8e0`) to `0x5c1e20`, or break on `getTriangleMesh` under
+   Wine while Max walks into a wall.
+2. Read the virtual callees inside `0x695070` (`[reg+0x18]`, `+0x1c`, `+0x20`, `+0x24`, `+0x48`) only if that chain
+   shows they are the ones that move Max.
