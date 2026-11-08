@@ -29,7 +29,11 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read `0x654fa0`: the float-heavy core, expected to be the capsule–triangle or sphere–triangle test.
-2. Read `0x646f30` and `0x645340`: expected to be the broad phase (rooms or cells) and the response (slide).
-3. Find the character update's call into `0x647660` (one of the five callers) to see the per-frame step and how a
+- **STRONGLY SUPPORTED (ruled out):** `0x654fa0` is not the collision core. It copies two 3x4 blocks of the object
+  (`+0x38` through `0x4f84f0`, and `+0x68`) and multiplies them, so it rebuilds the object's world transform after
+  the move.
+
+1. Read `0x646f30` and `0x645340`, the two largest float users left: expected to hold the test against level
+   geometry and the response (slide).
+2. Find the character update's call into `0x647660` (one of the five callers) to see the per-frame step and how a
    step-up or a slope is handled.
