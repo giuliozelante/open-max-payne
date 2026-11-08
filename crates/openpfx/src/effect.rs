@@ -140,10 +140,36 @@ pub fn rps_effect(data: &[u8]) -> Option<RpsEffect> {
         }
         i += 1;
     }
+    share_stored_files(&mut emitters);
     Some(RpsEffect {
         max_particles,
         emitters,
     })
+}
+
+/// A file is embedded once; later frames that name it carry no bytes. Fill them from the first
+/// frame that holds the file, matching names without case.
+fn share_stored_files(emitters: &mut [RpsEmitter]) {
+    let mut stored: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
+    let frames = emitters
+        .iter_mut()
+        .flat_map(|e| e.particle.sequences.iter_mut().flatten());
+    for frame in frames {
+        let mut fill = |path: &str, bytes: &mut Vec<u8>| {
+            let key = path.to_ascii_lowercase();
+            if bytes.is_empty() {
+                if let Some(found) = stored.get(&key) {
+                    bytes.clone_from(found);
+                }
+            } else {
+                stored.entry(key).or_insert_with(|| bytes.clone());
+            }
+        };
+        fill(&frame.color_path, &mut frame.color);
+        if let Some((path, bytes)) = frame.alpha.as_mut() {
+            fill(path, bytes);
+        }
+    }
 }
 
 fn int_value(value: &RpsValue) -> Option<i32> {
@@ -450,6 +476,26 @@ mod tests {
         assert_eq!(effect.emitters[1].emission.sphere, Some([3.0, 6.0]));
         assert!(effect.emitters[1].particle.additive);
         assert_eq!(effect.emitters[1].particle.sequences, [Vec::new()]);
+    }
+
+    #[test]
+    fn a_frame_stored_once_is_shared_by_later_particles_that_name_it() {
+        // `glass_shatter_safety_window_1x2.rps`: the second emitter names the first's shard files
+        // and carries no bytes for them.
+        let shard = ("debris\\s_glass01_0000.JPG", "debris\\s_glass01_0000.PCX");
+        let data = file(&[
+            particle(1.0, &[(shard.0, b"jpg0", shard.1, b"pcx0")]),
+            emission(0.01, 0, [0.5, 1.0, 0.0], [-0.5, -1.0, 0.0]),
+            particle(1.0, &[(&shard.0.to_ascii_lowercase(), b"", shard.1, b"")]),
+            emission(0.01, 0, [0.5, 1.0, 0.0], [-0.5, -1.0, 0.0]),
+        ]);
+        let effect = rps_effect(&data).expect("effect");
+        let frame = &effect.emitters[1].particle.sequences[0][0];
+        assert_eq!(frame.color, b"jpg0");
+        assert_eq!(
+            frame.alpha.as_ref().map(|(_, b)| b.as_slice()),
+            Some(&b"pcx0"[..])
+        );
     }
 
     #[test]
