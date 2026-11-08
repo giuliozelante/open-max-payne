@@ -305,7 +305,16 @@ impl PlayerMotion {
         };
         let before = self.time;
         let after = self.time() + seconds;
-        let velocity = self.velocity(&def, length, c);
+        let velocity =
+            if matches!(self.state, State::Roll | State::Dive | State::Dead) && seconds > 1e-8 {
+                let moved = turn(
+                    path_displacement(&self.path, length, self.time(), after.min(length * 0.999)),
+                    self.heading,
+                );
+                [moved[0] / seconds, moved[1] / seconds]
+            } else {
+                self.velocity(&def, length, c)
+            };
         let mut messages = due(script, rate, before, after.min(length));
         self.time = after;
         if after >= length {
@@ -343,6 +352,18 @@ fn hands(two_handed: bool) -> &'static str {
     } else {
         ""
     }
+}
+
+/// Height and upward speed after `seconds` at constant `gravity`.
+///
+/// The step is the closed form, so splitting a jump across 30 or 240 frames
+/// covers the same height. Particles, decals and projectiles still take the
+/// semi-implicit step (`velocity += a·dt`, then move by the new velocity).
+pub fn step_fall(height: f32, velocity: f32, gravity: f32, seconds: f32) -> (f32, f32) {
+    (
+        height + velocity * seconds + 0.5 * gravity * seconds * seconds,
+        velocity + gravity * seconds,
+    )
 }
 
 /// `(x, z)` of a `(right, up, forward)` vector for a body turned `yaw`.
@@ -383,6 +404,34 @@ fn quarter_name((forward, right): (f32, f32)) -> &'static str {
     } else {
         direction_name(0, right.signum() as i32)
     }
+}
+
+/// Metres the path carries from `from` to `to`. Waypoints are evenly spaced in time,
+/// so a step that crosses one still covers that waypoint's ground.
+fn path_displacement(def: &ClipDef, length: f32, from: f32, to: f32) -> [f32; 3] {
+    let (from, to) = (from.max(0.0), to.max(0.0));
+    if to <= from || length <= 1e-8 {
+        return [0.0; 3];
+    }
+    let Some([first, second]) = def.middle else {
+        let dt = to - from;
+        return def.velocity(length).map(|c| c * dt);
+    };
+    let points = [[0.0; 3], first, second, def.end];
+    let leg = length / 3.0;
+    let mut out = [0.0; 3];
+    for i in 0..3 {
+        let start = i as f32 * leg;
+        let lo = from.max(start);
+        let hi = to.min(start + leg).min(length * 0.999);
+        if hi > lo {
+            let dt = hi - lo;
+            for c in 0..3 {
+                out[c] += (points[i + 1][c] - points[i][c]) / leg * dt;
+            }
+        }
+    }
+    out
 }
 
 /// Clip speed at `time` along the waypoints a path clip names, taken as evenly spaced in time.
@@ -690,9 +739,54 @@ mod tests {
             ..grounded()
         };
         let step = motion.step(&clips, &turned, 0.6);
-        assert!(near(step.velocity, [0.0, 3.0]));
+        // 0.5 s of the first leg (3 m/s) and 0.1 s of the next (2 m/s).
+        assert!(near(step.velocity, [0.0, 1.7 / 0.6]));
         let step = motion.step(&clips, &turned, 0.1);
         assert!(near(step.velocity, [0.0, 2.0]));
+    }
+
+    #[test]
+    fn a_dive_covers_the_same_ground_in_one_step_and_in_many() {
+        let clips = clips();
+        let once = dive_distance(&clips, 1.5, 1);
+        let many = dive_distance(&clips, 1.0 / 30.0, 45);
+        assert!((once - 4.0).abs() < 1e-3, "{once}");
+        assert!((many - once).abs() < 1e-3, "{once} vs {many}");
+    }
+
+    fn dive_distance(clips: &CharacterClips, dt: f32, steps: i32) -> f32 {
+        let mut motion = PlayerMotion::default();
+        let c = Controls {
+            forward: 1,
+            dodge: Some(DodgeKind::Dive),
+            ..grounded()
+        };
+        let mut distance = 0.0;
+        for _ in 0..steps {
+            let step = motion.step(clips, &c, dt);
+            distance += step.velocity[1] * dt;
+        }
+        distance
+    }
+
+    #[test]
+    fn a_jump_rises_the_same_at_30_60_144_and_240() {
+        let mut heights = Vec::new();
+        for rate in [30.0, 60.0, 144.0, 240.0] {
+            let dt: f32 = 1.0 / rate;
+            let mut height = 0.0;
+            let mut velocity = 7.5;
+            let mut time = 0.0;
+            while time + 1e-9 < 1.0 {
+                let step = dt.min(1.0 - time);
+                (height, velocity) = step_fall(height, velocity, -9.81, step);
+                time += step;
+            }
+            heights.push(height);
+        }
+        for height in &heights[1..] {
+            assert!((height - heights[0]).abs() < 1e-4, "{heights:?}");
+        }
     }
 
     #[test]
