@@ -33,7 +33,28 @@ records what is read so far and where the reading goes next.
   (`+0x38` through `0x4f84f0`, and `+0x68`) and multiplies them, so it rebuilds the object's world transform after
   the move.
 
-1. Read `0x646f30` and `0x645340`, the two largest float users left: expected to hold the test against level
-   geometry and the response (slide).
-2. Find the character update's call into `0x647660` (one of the five callers) to see the per-frame step and how a
+## Shape classes
+
+- **VERIFIED (RTTI):** the moving shapes are `X_LevelRuntimeCapsuleObjectBase` (vtable `0x7d4d64`) and
+  `X_LevelRuntimeSphereObjectBase` (vtable `0x7d5008`). `MaxPayne_StartPointTestCapsule` (`0x7cd010`) derives from the
+  capsule, and `CharacterTestSphere` (`0x7d5d10`), `DodgeTestSphere` and `TestSphere` from the sphere.
+- **VERIFIED:** the two bases share most slots. They differ in slot 0 (destructor), 8, 12, 17, 19, 20, 21 and 22
+  (0-based). Slot 19 is `0x63eee0` for the capsule and `0x658dd0` for the sphere; they call `0x63b410` and `0x63b1a0`.
+  Slot 21 calls `0x5c0ba0` and `0x5c05f0`; slot 22 calls `0x5bf8e0` (818 instructions) and `0x5bf2f0` (357).
+- **Ruled out:** `0x646f30` and `0x645340` do little float work themselves; their helpers are getters (`0x642d40`,
+  `0x642d50` = position at `+0x54`, `0x74e8e0` = `+0x30`, `0x411d90` = `+0x24`). A static walk four calls deep from
+  `0x63b410`, `0x5bf8e0` and `0x5c0ba0` finds only one small float routine, `0x449400` (19 float operations, one square
+  root), a length or normalisation.
+- **Ruled out:** `e2mfc.dll`'s `P_CollisionBuffer` (`collide`, `execute`, bounding spheres) is the renderer's
+  object-versus-light and visibility pass, not character movement.
+- **STRONGLY SUPPORTED:** the shape-versus-level math is reached through virtual calls (`call [reg+n]`), which the
+  static walk does not follow.
+
+## Next
+
+1. Resolve the virtual calls inside `0x63b410`, `0x5bf8e0` and `0x646f30` (for example `[ebx+0x4c]` in `0x646f30`).
+   Identify each receiver's class from how the object is built, then read its vtable, as done above.
+2. Alternatively, trace it at run time: run retail under Wine with a debugger (`winedbg`) and break on `0x647660`
+   while Max walks into a wall. That gives the real call chain in one session.
+3. Find the character update's call into `0x647660` (one of the five callers) to see the per-frame step and how a
    step-up or a slope is handled.
