@@ -76,3 +76,33 @@ with limits of 1, 4, 9.6 and 100 m, through `0x4f8ae0`.
 - Conditions 5, 6, 9 to 13, 15 to 23, 27, 28, 31, 32.
 - Enemy perception: the update of `+0x3ad` and `+0x3af` from the skin's `[AI]` keys (`VisualPerceivingRadius`,
   `GeneralPerceivingRadius`, `ShootingCone`, `EnemyInterestTime`).
+
+## Perception (first read, 2026-11-08)
+
+The conditions read three flags of the AI object: `0x4f6260` returns `+0x3ad`, `0x4f6280` returns `+0x3ae`,
+`0x4f6290` returns `+0x3af`. Condition 3 ("seen") is `+0x3ad` and condition 4 ("perceived") is `+0x3af`.
+
+- **VERIFIED:** `0x4f7440` clears `+0x3ac`, `+0x3ad`, `+0x3ae`, `+0x3af` and the float `+0x3b0`. It has three callers
+  (`0x4fecb5`, `0x4ff10a`, `0x500534`). `0x4f1604`-`0x4f1693` zero the same fields and `+0x3b4` when the object is
+  built.
+- **VERIFIED:** inside the routine that starts near `0x4f6700`, two points are transformed by 3x4 matrices
+  (`0x4f6b27`-`0x4f6bf6`), then `0x64c910` tests the segment between them. When the test reports nothing in the way,
+  `+0x3ad` and `+0x3ac` become 1; otherwise `+0x3ac` becomes 0 and `+0x3ad` keeps its value. The two points are kept
+  at `+0x3c0` and `+0x3cc`, and `+0x3b8` is set to 0.2.
+- **STRONGLY SUPPORTED:** `0x64c910` is a line-of-sight ray test against the level, and the points are the AI's eye and
+  its target. `+0x3b8 = 0.2` is the delay before the next test. Neither the eye bone nor the range and cone gates
+  before the test (`0x4f6700`-`0x4f6b16`) have been read.
+- **VERIFIED:** `0x4f6df0(stimulus, dt)` runs the "perceived" memory:
+  - `+0x3b4 -= dt` on every call.
+  - With a stimulus: if not yet perceived and `+0x3b4` has run out, it calls `0x6d73b0` on the object `0x694430(1)`
+    returns from the AI's character (`+0x3dc`). Then it sets `+0x3af = 1` and `+0x3b0 =` the skin field at `+0xdd`
+    (`0x531290`).
+  - Without one, a perceived AI counts `+0x3b0` down by `dt`. At zero `+0x3af` clears and `0x4f7470(0)` zeroes
+    `+0x3b4`. `0x4f7470(1)` instead loads `+0x3b4` from the same skin field.
+- **VERIFIED:** the skin parser copies its `[AI]` keys into the skin record (`0x5300f1`-`0x530149`, from globals
+  the key table fills): `VisualPerceivingRadius` to `+0xc1`, `GeneralPerceivingRadius` to `+0xc5`,
+  `ActivationReactionTime` to `+0xcd`, `EnemyInterestTime` to `+0xdd`. So the "perceived" memory lasts
+  `EnemyInterestTime` seconds after the last stimulus.
+- **HYPOTHESIS:** `0x6d73b0` is the AI's alert reaction, and `+0x3b4` is a cool-down before it can alert again.
+
+Not read yet: what counts as a stimulus (sight, `ShotHeardDistance`, `NearDistance`), and who calls `0x4f6df0`.
