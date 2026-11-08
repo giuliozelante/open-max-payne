@@ -25,11 +25,15 @@ alley. #201 stops a body caught in a wall from going deeper, but the cause is th
 | Which polygons block | `materials.txt` | `CharacterCollides` per material (already read) |
 | Dynamic objects | `globalconfig.txt` | `MinSpeedCharacterCollidesDynamicObject 0.01` |
 
-**VERIFIED (strings and xrefs):** the exe validates start points with `MaxPayne_StartPointTestCapsule`. Its errors
-"Startpoint above floor translation collided" (`0x4528e3`) and "Startpoint to capsule center translation collided"
-(`0x4529d4`) follow a call to `0x5e3b20`, a sweep with six callers. Other classes are `CharacterTestSphere`,
-`DodgeTestSphere` and `TestSphere`. **UNKNOWN:** the per-frame mover itself; the next step is to follow
-`0x5e3b20`'s callers from the character update.
+**VERIFIED (strings and xrefs):** the exe validates start points with `MaxPayne_StartPointTestCapsule`. Before the
+error "Startpoint above floor translation collided" (`0x4528e3`) it calls `0x647610` on a local test object
+(`[ebp-0x24c]`). That routine subtracts the object's `+0x54` from the start point and calls `0x647660`. The code then
+compares a field of the result (`[ebp-0xdc]`) with the owner returned by `0x748300` (a `+0x8` getter). It prints the
+error, with a name read through the `+0x148` getter `0x5e3b20`, when they differ. Other test classes are
+`CharacterTestSphere`, `DodgeTestSphere` and `TestSphere`.
+
+**UNKNOWN:** what `0x647660` sweeps, and the per-frame character mover. The next step is to read `0x647660` and find
+its callers in the character update. An earlier draft called `0x5e3b20` the sweep; it is a getter.
 
 ## Design
 
