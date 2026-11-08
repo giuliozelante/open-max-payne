@@ -113,21 +113,36 @@ records what is read so far and where the reading goes next.
 - **VERIFIED:** `0x6437e0` then decides `0x64f100`. The path that finds a component equal to `FLT_MAX` (`0x7d4f6c`)
   returns 0, and `0x64f100` is skipped. The other return is the byte at `[ebp-0xe]`.
 - **VERIFIED:** `0x64f100` leaves immediately unless `0x64c2b0` returns non-zero and `0x646710` returns a container
-  whose `(end-begin)` divides by 40 (`imul 0x66666667` / `sar 4`). The local at `[ebp-0x20]` is set to `(0, 0, 0)`.
-  On the first element, scalar `+0x1c` is compared with `-2` (`0x7d4f5c`) and `0.02` (`0x7d4e04`). When it is
-  greater than `-2` and less than `0.02`, the vector at element `+0x4` is multiplied by `0.015 - scalar`
-  (`0x7d4e14`). The dot of that product with the zero local, divided by the product's length squared, is `0` when
-  the product is not zero, so the `≤ 0` arm (`0x7cb8b0`) stores the product into the local. The arm for a ratio in
-  `(0, 1)` (`0x7cbdd0`) scales a second vector by `1 - ratio`. `0x64f100` has no square root. Its other branch, at
-  `0x64f307`, is not read. It calls `0x64af10` again at `0x64f3b0`.
+  whose `(end-begin)` divides by 40 (`imul 0x66666667` / `sar 4`). The same function is also called from `0x648014`.
+  The local accumulator at `[ebp-0x20]` starts at `(0, 0, 0)`. `0x64f307` is the loop tail, not another formula: it
+  adds `0x28` to the element pointer and jumps to `0x64f183` until the pointer meets the end. An element whose
+  scalar at `+0x1c` is `≤ -2` (`0x7d4f5c`) or `≥ 0.02` (`0x7d4e04`) jumps straight there and is not counted. An
+  element inside that window multiplies the vector at `+0x4` by `0.015 - scalar` (`0x7d4e14`). With `v` that
+  product and `a` the accumulator, `t = dot(v, a) / dot(v, v)`. `t ≤ 0` (`0x7cb8b0`) does `a += v`. `0 < t < 1`
+  (`0x7cbdd0`) does `a += v * (1 - t)`. `t ≥ 1` adds nothing. All three arms count the element. `0x64f100` has no
+  square root. When the count is greater than zero, it adds the accumulator to the position from `0x642d50` and
+  calls `0x64af10` at `0x64f3b0` with that sum, the global at `0x8b38e8`, and `0`. `0x654fa0` follows.
 - **VERIFIED:** `P_VirtualObject::getTriangleMesh` is not on this path. Its call sites are `0x4a8d02`, `0x5c25d3`,
   `0x5c2c0c`, `0x67c822`, `0x69871b`, `0x6dbc49`, `0x731513`, `0x7323a6` and `0x7323c4`. `0x698130`, which contains
   `0x69871b` and then calls `0x64db90`, is reached from `X_Projectile` slot 5 (`0x7097d0` at vtable `0x7d8124`) and
   from `0x6d921d`. Six direct calls up from `0x6d921d` land in `0x452cd0` / `0x44fda0`, not in `0x696f60`.
-- **UNKNOWN:** which field `+0x1c` is, and what `0x64f307` does with the same element. The capsule-versus-triangle
-  distance, if it is `0x64db90`, is not called from the flag-0 move.
+- **VERIFIED:** `0x646710` returns `this+0x90`. Begin and end of the 40-byte container are `this+0x94` and
+  `this+0x98`. When `[this+0x88]` is non-zero it rebuilds that container, then clears the byte. When the byte is
+  already zero and `[this+0x8c]` equals the global at `0x8b3d70`, it returns the container without rebuilding.
+- **VERIFIED:** on the rebuild, `0x646c80` replaces the vector at `+0x4` and the vector at `+0x10` with each vector
+  divided by its own length (`fsqrt`, then divide `1`). `0x646dd0` then erases an element when
+  `dot(position - vector_at_+0x10, vector_at_+0x4) ≤ 0`. `0x646ad0`, called before those two, dots two `+0x4`
+  vectors, clamps the dot to `[-1, 1]` (`0x7ce988`, `0x7cbdd0`), and passes it to `_CIacos` (`0x76faf8` jumps
+  through MSVCRT import `0x7ca378`). It erases the later element when `fabs` of that result is greater than the
+  dword at `0x8b3d4c`. That address is past the initialized image, so the file does not hold the threshold.
+- **STRONGLY SUPPORTED:** the record's first dword is the vtable at `0x7cce84`. Its RTTI type descriptor is
+  `.?AV?$M_Plane3Template@M@@` (complete-object locator `0x7de358`, type descriptor `0x86c3d0`). The first method,
+  `0x448bb0`, copies three floats to `this+0x4` and divides them by their length. The erase path writes that same
+  vtable back to the element.
+- **UNKNOWN:** which store writes the scalar at `+0x1c`. The normalize and the dot filter only read the two vectors.
+  The capsule-versus-triangle distance, if it is `0x64db90`, is not called from the flag-0 move.
 
 ## Next
 
-1. Read `0x64f307` and the 40-byte element `0x646710` returns, including who writes `+0x1c` and `+0x4`.
+1. Read the rebuild inside `0x646710` (the calls through `0x5c84f0` and `0x652640`) for the store to `+0x1c`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
