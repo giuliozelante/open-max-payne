@@ -1,6 +1,6 @@
 # Character collision as a capsule
 
-**Status.** Proposed 2026-11-08. Needs the owner's approval before any code.
+**Status.** Approved 2026-11-08 by the owner, as written: REA first, then the full rewrite.
 
 **Problem.** Max walks into walls and through solid props. In engine26 the owner went into the wall leaving the
 Tutorial's secret room and sank under the level, and clipped into the big trash containers at the end of the first
