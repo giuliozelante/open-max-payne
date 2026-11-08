@@ -99,8 +99,10 @@ The conditions read three flags of the AI object: `0x4f6260` returns `+0x3ad`, `
     (`0x531290`).
   - Without one, a perceived AI counts `+0x3b0` down by `dt`. At zero `+0x3af` clears and `0x4f7470(0)` zeroes
     `+0x3b4`. `0x4f7470(1)` instead loads `+0x3b4` from the same skin field.
-- **HYPOTHESIS:** the skin field at `+0xdd` is the `[AI]` interest time (`ai_ranges.h`, 30 s for mobsters), and
-  `0x6d73b0` is the AI's alert reaction. Mapping skin keys to offsets is the next read, through the skin parser that
-  fills `+0xdd`.
+- **VERIFIED:** the skin parser copies its `[AI]` keys into the skin record (`0x5300f1`-`0x530149`, from globals
+  the key table fills): `VisualPerceivingRadius` to `+0xc1`, `GeneralPerceivingRadius` to `+0xc5`,
+  `ActivationReactionTime` to `+0xcd`, `EnemyInterestTime` to `+0xdd`. So the "perceived" memory lasts
+  `EnemyInterestTime` seconds after the last stimulus.
+- **HYPOTHESIS:** `0x6d73b0` is the AI's alert reaction, and `+0x3b4` is a cool-down before it can alert again.
 
 Not read yet: what counts as a stimulus (sight, `ShotHeardDistance`, `NearDistance`), and who calls `0x4f6df0`.
