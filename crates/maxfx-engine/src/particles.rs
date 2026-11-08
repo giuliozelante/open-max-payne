@@ -151,10 +151,12 @@ impl ParticleField {
                 let Some((origin, rot)) = frame.filter(|_| run.emitting && in_cycle) else {
                     continue;
                 };
+                // A one-shot reads its curves at the middle of the time this frame emitted: a burst
+                // shorter than the frame would otherwise only see the end of its rate curve.
                 let u = if run.looping {
                     (run.time % cycle) / cycle
                 } else {
-                    (run.time / cycle).min(1.0)
+                    ((run.time - dt + emitting_for * 0.5) / cycle).clamp(0.0, 1.0)
                 };
                 let rate = between(&emission.rate.at(u), &mut seed);
                 run.owed[k] += rate * emitting_for;
@@ -517,6 +519,31 @@ mod tests {
         };
         assert_eq!(spawned(24.0), 10);
         assert_eq!(spawned(200.0), 10);
+    }
+
+    #[test]
+    fn a_burst_whose_rate_falls_to_zero_still_emits_at_sixty_frames_a_second() {
+        // `breakable/glass_shatter_safety_window_1x2.rps`: a 0.01 s cycle whose rate falls from
+        // about 12,000 to 0. Sampled only at the end of a 1/60 s frame, it emitted nothing.
+        let spawned = |fps: f32| {
+            let mut burst = effect(0.0, 5.0, 0.0);
+            burst.emitters[0].emission.cycle_length = 0.01;
+            burst.emitters[0].emission.rate = Graph {
+                channels: 2,
+                samples: vec![12000.0, 12000.0, 0.0, 0.0],
+            };
+            burst.max_particles = 1000;
+            let mut field = ParticleField::default();
+            let at = ([0.0; 3], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+            field.start_at(at, "glass".to_string(), Arc::new(burst));
+            for _ in 0..fps as usize {
+                field.step(1.0 / fps, |_| None);
+            }
+            field.sprites().len()
+        };
+        // The curve averages 6,000 over 0.01 s: 60 particles.
+        assert_eq!(spawned(60.0), 60);
+        assert_eq!(spawned(30.0), 60);
     }
 
     #[test]
