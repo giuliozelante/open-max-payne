@@ -130,8 +130,9 @@ impl ParticleField {
                 let list = &mut run.particles[k];
                 for p in list.iter_mut() {
                     for ((pos, vel), g) in p.pos.iter_mut().zip(&mut p.vel).zip(gravity) {
-                        *vel += g * dt;
-                        *pos += *vel * dt;
+                        let (next_pos, next_vel) = crate::player::step_fall(*pos, *vel, g, dt);
+                        *pos = next_pos;
+                        *vel = next_vel;
                     }
                     p.age += dt;
                 }
@@ -648,9 +649,9 @@ mod tests {
         field.step(0.1, at_origin);
         field.stop("e");
         field.step(1.0, at_origin);
-        // One step of 1 s at half of -20 m/s^2: velocity -10, moved -10 (semi-implicit).
+        // One step of 1 s at half of -20 m/s^2, from rest at y = 10: the closed form lands at 5.
         let y = field.sprites()[0].pos[1];
-        assert!((y - 0.0).abs() < 1e-3, "y = {y}");
+        assert!((y - 5.0).abs() < 1e-3, "y = {y}");
     }
 
     #[test]

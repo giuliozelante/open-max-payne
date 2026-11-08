@@ -356,14 +356,30 @@ fn hands(two_handed: bool) -> &'static str {
 
 /// Height and upward speed after `seconds` at constant `gravity`.
 ///
-/// The step is the closed form, so splitting a jump across 30 or 240 frames
-/// covers the same height. Particles, decals and projectiles still take the
-/// semi-implicit step (`velocity += a·dt`, then move by the new velocity).
+/// The step is the closed form, so splitting the same fall across 30 or 240
+/// frames covers the same height. Particles, droplets and projectiles use it too.
 pub fn step_fall(height: f32, velocity: f32, gravity: f32, seconds: f32) -> (f32, f32) {
     (
         height + velocity * seconds + 0.5 * gravity * seconds * seconds,
         velocity + gravity * seconds,
     )
+}
+
+/// [`step_fall`] on each axis.
+pub fn step_fall_vec(
+    pos: [f32; 3],
+    vel: [f32; 3],
+    accel: [f32; 3],
+    seconds: f32,
+) -> ([f32; 3], [f32; 3]) {
+    let mut next_pos = pos;
+    let mut next_vel = vel;
+    for c in 0..3 {
+        let (p, v) = step_fall(pos[c], vel[c], accel[c], seconds);
+        next_pos[c] = p;
+        next_vel[c] = v;
+    }
+    (next_pos, next_vel)
 }
 
 /// `(x, z)` of a `(right, up, forward)` vector for a body turned `yaw`.
