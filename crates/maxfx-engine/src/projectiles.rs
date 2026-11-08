@@ -207,10 +207,12 @@ impl Flyer {
         if self.resting {
             return Flight::Flying;
         }
-        self.vel = std::array::from_fn(|c| self.vel[c] + gravity[c] * def.gravity * seconds);
-        let delta = self.vel.map(|c| c * seconds);
+        let accel = gravity.map(|c| c * def.gravity);
+        let (pos, vel) = crate::player::step_fall_vec(self.pos, self.vel, accel, seconds);
+        let delta = std::array::from_fn(|c| pos[c] - self.pos[c]);
+        self.vel = vel;
         let Some((t, normal)) = surface(self.pos, delta) else {
-            self.pos = std::array::from_fn(|c| self.pos[c] + delta[c]);
+            self.pos = pos;
             return Flight::Flying;
         };
         let hit: [f32; 3] = std::array::from_fn(|c| self.pos[c] + delta[c] * t);
@@ -406,6 +408,24 @@ mod tests {
         assert_eq!(flight, Flight::Flying);
         assert!((thrown.vel[1] + 1.0).abs() < 1e-5);
         assert!((thrown.pos[2] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_flight_lands_in_the_same_place_in_one_step_and_in_many() {
+        let def = grenade();
+        let once = fly_for(&def, 1.0, 1);
+        let many = fly_for(&def, 1.0 / 30.0, 30);
+        for c in 0..3 {
+            assert!((once[c] - many[c]).abs() < 1e-3, "{once:?} vs {many:?}");
+        }
+    }
+
+    fn fly_for(def: &FlyingDef, dt: f32, steps: i32) -> [f32; 3] {
+        let mut thrown = flyer([0.0, 0.0, 10.0]);
+        for _ in 0..steps {
+            thrown.step(def, [0.0, -20.0, 0.0], dt, |_, _| None);
+        }
+        thrown.pos
     }
 
     #[test]

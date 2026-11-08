@@ -130,9 +130,10 @@ impl Droplet {
     /// Advance `seconds`, returning the distance and unit direction just flown.
     pub fn step(&mut self, seconds: f32) -> (f32, [f32; 3]) {
         self.age += seconds;
-        self.vel = std::array::from_fn(|c| self.vel[c] + self.gravity[c] * seconds);
-        let delta = self.vel.map(|c| c * seconds);
-        self.pos = std::array::from_fn(|c| self.pos[c] + delta[c]);
+        let (pos, vel) = crate::player::step_fall_vec(self.pos, self.vel, self.gravity, seconds);
+        let delta = std::array::from_fn(|c| pos[c] - self.pos[c]);
+        self.pos = pos;
+        self.vel = vel;
         let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
         (length, normalize(delta))
     }
@@ -383,12 +384,37 @@ mod tests {
             age: 0.0,
         };
         let (length, dir) = drop.step(0.1);
-        // Semi-implicit, as particles: velocity (8, -2, 0), then moved by it.
+        // Closed form: velocity (8, -2, 0), moved by the velocity it had plus half the kick.
         assert_eq!(drop.vel, [8.0, -2.0, 0.0]);
-        assert!((drop.pos[0] - 0.8).abs() < 1e-5 && (drop.pos[1] - 1.8).abs() < 1e-5);
-        assert!((length - 0.8246).abs() < 1e-3, "{length}");
+        assert!((drop.pos[0] - 0.8).abs() < 1e-5 && (drop.pos[1] - 1.9).abs() < 1e-5);
+        assert!((length - 0.8062).abs() < 1e-3, "{length}");
         assert!(dir[1] < 0.0 && dir[0] > 0.9);
         assert_eq!(drop.age, 0.1);
+    }
+
+    #[test]
+    fn a_droplet_falls_the_same_distance_at_30_and_240() {
+        let fall = |rate: f32| {
+            let mut drop = Droplet {
+                pos: [0.0, 2.0, 0.0],
+                vel: [8.0, 0.0, 0.0],
+                gravity: [0.0, -20.0, 0.0],
+                decal: "blood_small".to_string(),
+                age: 0.0,
+            };
+            let dt = 1.0 / rate;
+            let mut time = 0.0;
+            while time + 1e-9 < 1.0 {
+                drop.step(dt.min(1.0 - time));
+                time += dt;
+            }
+            drop.pos
+        };
+        let slow = fall(30.0);
+        let fast = fall(240.0);
+        for c in 0..3 {
+            assert!((slow[c] - fast[c]).abs() < 1e-3, "{slow:?} vs {fast:?}");
+        }
     }
 
     #[test]
