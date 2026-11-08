@@ -50,11 +50,32 @@ records what is read so far and where the reading goes next.
 - **STRONGLY SUPPORTED:** the shape-versus-level math is reached through virtual calls (`call [reg+n]`), which the
   static walk does not follow.
 
+## Who moves a character
+
+- **VERIFIED:** `X_Character` (RTTI `.?AVX_Character@@`, type descriptor `0x8684c8`, vtable `0x7d5950`) slot `+0x54`
+  is `0x696f60`. That method calls the shared query `0x64af10` at `0x6971fd` with the flag argument `0`, then the
+  line-of-sight test `0x64c910` at `0x697210`. Later, at `0x697619`, it calls `0x647b90`. When that returns non-zero
+  it subtracts two vectors and calls the wrapper `0x647610` at `0x697689`.
+- **VERIFIED:** `0x647b90` is the same early-out as the top of `0x647660`: each axis of `target - position(+0x54)`
+  is compared with `±FLT_MIN` (`0x7d4ec8`, `0x7cefb8`). The wrapper `0x647610` pushes flag `0` into `0x647660`.
+- **VERIFIED:** none of the five direct callers of `0x647660` is this character method. The other callers of the
+  wrapper are the start-point check `0x4524d0`, the camera path `0x672150` (`X_CameraImplementation`, vtable slot
+  `0x7d5718`, string "Absolute camera path collides to level" at `0x672410`), `0x6d80c0` (class not read), and the
+  projectile path `0x7079b0` (reached from `0x705980`; projectile strings at `0x89ee90`).
+- **VERIFIED:** `0x64af10` is not character-only. It is also called from `0x4f5ff0`, `0x4f6135`, `0x4f69bd`,
+  `0x500eae`, `0x50442d`, `0x648471`, `0x64aef4`, `0x64f3b0` and `0x71a0b3`.
+- **VERIFIED:** `0x64af10` calls `0x645340` at `0x64b2ba`, then `0x645ca0` at `0x64b2d4` (`0x645ca0` has no other
+  caller). `0x646f30` runs only when `ebp+0x10` is non-zero (`0x64b2d9`). The character passes `0`, so that call
+  skips `0x646f30`. Inside `0x647660` the character's flag `0` likewise skips `0x645340` at `0x647885`. `0x646f30`
+  still reaches `0x645340` at `0x6472fc` when some other caller enters it.
+- **VERIFIED:** `0x64fda0`, called from `0x645340` at `0x6454f6`, indexes a container with `imul 0x51eb851f` / `sar 5`
+  (divide by 100). The element is 100 bytes. What it holds is not read.
+- **UNKNOWN:** the virtual callee that tests the capsule against the level, and where a step-up or a slope changes
+  the target. `0x696f60` has no float immediate of its own between `0x697210` and `0x697619`.
+
 ## Next
 
 1. Resolve the virtual calls inside `0x63b410`, `0x5bf8e0` and `0x646f30` (for example `[ebx+0x4c]` in `0x646f30`).
    Identify each receiver's class from how the object is built, then read its vtable, as done above.
 2. Alternatively, trace it at run time: run retail under Wine with a debugger (`winedbg`) and break on `0x647660`
    while Max walks into a wall. That gives the real call chain in one session.
-3. Find the character update's call into `0x647660` (one of the five callers) to see the per-frame step and how a
-   step-up or a slope is handled.
