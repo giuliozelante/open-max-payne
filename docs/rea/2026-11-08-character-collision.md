@@ -70,10 +70,8 @@ records what is read so far and where the reading goes next.
   caller). `0x646f30` runs only when `ebp+0x10` is non-zero (`0x64b2d9`). The character passes `0`, so that call
   skips `0x646f30`. Inside `0x647660` the character's flag `0` likewise skips `0x645340` at `0x647885`. `0x646f30`
   still reaches `0x645340` at `0x6472fc` when some other caller enters it.
-- **VERIFIED:** `0x64fda0`, called from `0x645340` at `0x6454f6`, indexes a container with `imul 0x51eb851f` / `sar 5`
-  (divide by 100). The element is 100 bytes. What it holds is not read.
-- **UNKNOWN:** the virtual callee that tests the capsule against the level, and where a step-up or a slope changes
-  the target. `0x696f60` has no float immediate of its own between `0x697210` and `0x697619`.
+- **VERIFIED:** `0x64fda0`, called from `0x645340` at `0x6454f6`, is an insert. `imul 0x51eb851f` / `sar 5` divides
+  by 100, and the copy loop steps `0x64` through `0x6521f0`. The bytes inside one element are not read.
 
 ## Virtual calls
 
@@ -100,9 +98,36 @@ records what is read so far and where the reading goes next.
   e2mfc entry.
 - **UNKNOWN:** the class at a triangle mesh's `+0x18` and `+0x1c`, and whether slot 23 reaches `0x5c1e20`.
 
+## What runs for flag 0
+
+- **VERIFIED:** in `0x647660`, `[ebp+0x10]` is the flag. Zero jumps from `0x647719` to `0x6478e9`, so the call to
+  `0x645340` at `0x647885` does not run. `0x64af10` has already called `0x645340` at `0x64b2ba` before that.
+- **VERIFIED:** from `0x6478e9` the move subtracts the target (`edi+0xc`) from the position (`0x642d50`). `0x64bd90`
+  returns immediately when that delta's length squared is at most `FLT_MIN` (`0x7cefb8`). Otherwise it multiplies the
+  delta by the 3×3 from `0x642d40` / `0x63a900` and calls `0x64be70` with the local delta and `this+0xc0`.
+- **VERIFIED:** `0x64be70` walks the list at `this+0xc0` (sentinel `0x8b3d84`). For a node whose `+0xc` object passes
+  `0x642a80` and fails `0x64dae0`, it multiplies the delta by the 3×3 from `0x642d70` and calls that object's slot
+  `+0x6c` with the character and the product. Slot `+0x6c` is `ret 0x8` (`0x755fa0`) on the capsule, the sphere, the
+  start-point capsule and `CharacterTestSphere`. `X_Character` overrides it with `0x696e90`. `X_Projectile` (`0x7d8110`)
+  overrides it with `0x704ef0`.
+- **VERIFIED:** `0x6437e0` then decides `0x64f100`. The path that finds a component equal to `FLT_MAX` (`0x7d4f6c`)
+  returns 0, and `0x64f100` is skipped. The other return is the byte at `[ebp-0xe]`.
+- **VERIFIED:** `0x64f100` leaves immediately unless `0x64c2b0` returns non-zero and `0x646710` returns a container
+  whose `(end-begin)` divides by 40 (`imul 0x66666667` / `sar 4`). The local at `[ebp-0x20]` is set to `(0, 0, 0)`.
+  On the first element, scalar `+0x1c` is compared with `-2` (`0x7d4f5c`) and `0.02` (`0x7d4e04`). When it is
+  greater than `-2` and less than `0.02`, the vector at element `+0x4` is multiplied by `0.015 - scalar`
+  (`0x7d4e14`). The dot of that product with the zero local, divided by the product's length squared, is `0` when
+  the product is not zero, so the `≤ 0` arm (`0x7cb8b0`) stores the product into the local. The arm for a ratio in
+  `(0, 1)` (`0x7cbdd0`) scales a second vector by `1 - ratio`. `0x64f100` has no square root. Its other branch, at
+  `0x64f307`, is not read. It calls `0x64af10` again at `0x64f3b0`.
+- **VERIFIED:** `P_VirtualObject::getTriangleMesh` is not on this path. Its call sites are `0x4a8d02`, `0x5c25d3`,
+  `0x5c2c0c`, `0x67c822`, `0x69871b`, `0x6dbc49`, `0x731513`, `0x7323a6` and `0x7323c4`. `0x698130`, which contains
+  `0x69871b` and then calls `0x64db90`, is reached from `X_Projectile` slot 5 (`0x7097d0` at vtable `0x7d8124`) and
+  from `0x6d921d`. Six direct calls up from `0x6d921d` land in `0x452cd0` / `0x44fda0`, not in `0x696f60`.
+- **UNKNOWN:** which field `+0x1c` is, and what `0x64f307` does with the same element. The capsule-versus-triangle
+  distance, if it is `0x64db90`, is not called from the flag-0 move.
+
 ## Next
 
-1. Close the caller chain from slot 23 (`0x63e350` / `0x5bf8e0`) to `0x5c1e20`, or break on `getTriangleMesh` under
-   Wine while Max walks into a wall.
-2. Read the virtual callees inside `0x695070` (`[reg+0x18]`, `+0x1c`, `+0x20`, `+0x24`, `+0x48`) only if that chain
-   shows they are the ones that move Max.
+1. Read `0x64f307` and the 40-byte element `0x646710` returns, including who writes `+0x1c` and `+0x4`.
+2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
