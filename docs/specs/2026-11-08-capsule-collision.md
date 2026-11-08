@@ -37,7 +37,7 @@ its callers in the character update. An earlier draft called `0x5e3b20` the swee
 
 ## Design
 
-1. **REA first.** Read `0x5e3b20` and the character update that calls it. Record in `docs/rea/` how the capsule is
+1. **REA first.** Read `0x647660` and the character update that calls it. Record in `docs/rea/` how the capsule is
    swept, how it slides, how it rides steps and slopes, and how a dodge's test sphere is used. The steps below are the
    expected shape and change with what the exe shows.
 2. **Capsule from data.** Use `scene.player_capsule` (already loaded from the skin) for radius, bottom and top. Delete
