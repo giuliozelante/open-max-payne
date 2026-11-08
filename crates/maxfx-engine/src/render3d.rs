@@ -2017,7 +2017,7 @@ fn frame_dt(elapsed: std::time::Duration) -> f32 {
 }
 
 /// Whether a body at `from` may go to `(wx, wz)`. One already caught in a wall, as after landing
-/// on a railing, may always move, or it would stay there for good.
+/// on a railing, may move along or away from it, but never deeper into or through it.
 fn can_step(
     scene: &LdbScene,
     rooms: &BTreeMap<i32, [f32; 3]>,
@@ -2027,7 +2027,65 @@ fn can_step(
 ) -> bool {
     let [x, y, z] = from;
     can_stand_at(scene, rooms, wx, y, wz)
-        || (hits_wall(scene, rooms, x, y, z) && find_floor_y(scene, wx, y, wz).is_some())
+        || (hits_wall(scene, rooms, x, y, z)
+            && find_floor_y(scene, wx, y, wz).is_some()
+            && !presses_into_wall(scene, from, wx, wz))
+}
+
+/// The static walls near `(x, z)`, each as its signed distance from the body's centre.
+fn wall_distances(scene: &LdbScene, x: f32, y: f32, z: f32, reach: f32) -> Vec<f32> {
+    let (body_min_y, body_max_y) = (y - EYE_HEIGHT + 0.35, y - 0.10);
+    let mut out = Vec::new();
+    for sm in &scene.static_meshes {
+        let o = sm.world_origin;
+        for poly in &sm.polys {
+            if poly.normal[1].abs() > 0.45
+                || poly.vertices.len() < 3
+                || !blocks_character(scene, poly.material_id)
+            {
+                out.push(f32::NAN);
+                continue;
+            }
+            let world: Vec<[f32; 3]> = poly
+                .vertices
+                .iter()
+                .map(|v| [v.pos[0] + o[0], v.pos[1] + o[1], v.pos[2] + o[2]])
+                .collect();
+            let (lo, hi) = world
+                .iter()
+                .fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| {
+                    (
+                        std::array::from_fn(|k| lo[k].min(p[k])),
+                        std::array::from_fn(|k| hi[k].max(p[k])),
+                    )
+                });
+            let near = body_max_y >= lo[1]
+                && body_min_y <= hi[1]
+                && (lo[0] - reach..=hi[0] + reach).contains(&x)
+                && (lo[2] - reach..=hi[2] + reach).contains(&z);
+            out.push(if near {
+                (x - world[0][0]) * poly.normal[0] + (z - world[0][2]) * poly.normal[2]
+            } else {
+                f32::NAN
+            });
+        }
+    }
+    out
+}
+
+/// A step from `from` to `(wx, wz)` that ends closer to a wall it touches, or on its far side.
+fn presses_into_wall(scene: &LdbScene, from: [f32; 3], wx: f32, wz: f32) -> bool {
+    const RADIUS: f32 = 0.38;
+    let [x, y, z] = from;
+    let reach = RADIUS + (wx - x).hypot(wz - z);
+    let before = wall_distances(scene, x, y, z, reach);
+    let after = wall_distances(scene, wx, y, wz, reach);
+    before.iter().zip(&after).any(|(&a, &b)| {
+        if a.is_nan() || b.is_nan() || a.abs() >= RADIUS {
+            return false;
+        }
+        a.signum() != b.signum() || b.abs() < a.abs() - 1e-4
+    })
 }
 
 fn can_stand_at(
@@ -6637,6 +6695,17 @@ mod tests {
         let rooms = BTreeMap::new();
         assert!(!can_step(&scene, &rooms, [0.0, 0.0, 4.0], 0.0, 4.8));
         assert!(can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.0, 4.5));
+    }
+
+    #[test]
+    fn a_body_caught_in_a_wall_cannot_go_deeper_or_through_it() {
+        // The wall stands at z = 5. Caught at 4.8, Max may not push on to 5.0 or past it.
+        let scene = floor_and_wall(1.65);
+        let rooms = BTreeMap::new();
+        assert!(!can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.0, 4.9));
+        assert!(!can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.0, 5.1));
+        // Sliding along it at the same depth is allowed, or a body on a railing stays stuck.
+        assert!(can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.3, 4.8));
     }
 
     #[test]
