@@ -752,8 +752,12 @@ pub fn run_3d_walkthrough(
                     None => {}
                 }
             }
-            vel_y += particle_sprites.field.gravity[1] * player_dt;
-            player_pos[1] += vel_y * player_dt;
+            (player_pos[1], vel_y) = crate::player::step_fall(
+                player_pos[1],
+                vel_y,
+                particle_sprites.field.gravity[1],
+                player_dt,
+            );
             if let Some(floor_y) = find_floor_y(&scene, player_pos[0], player_pos[1], player_pos[2])
             {
                 if player_pos[1] <= floor_y + EYE_HEIGHT {
