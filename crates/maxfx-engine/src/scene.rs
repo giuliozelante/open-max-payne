@@ -1667,7 +1667,8 @@ impl LdbScene {
         }
     }
 
-    /// Startup weapon and music messages, in order, once the weapon definitions are loaded.
+    /// Startup weapon, music and HUD print messages, in order, once the weapon definitions are
+    /// loaded. The Tutorial's `Start_FSM` prints `TIP_01` this way.
     pub fn apply_startup_player_scripts(&mut self) {
         let is_weapon = |act: &String| {
             let verb = Message::parse(act).map(|msg| msg.verb.to_ascii_lowercase());
@@ -1679,6 +1680,11 @@ impl LdbScene {
                         | "c_pickupammo"
                         | "c_setinfiniteammo"
                         | "a_playmusic"
+                        | "mphm_print"
+                        | "mphm_printdirect"
+                        | "mphm_printtip"
+                        | "mphm_printtipalways"
+                        | "mphm_printtipnym"
                 )
             })
         };
@@ -4978,6 +4984,18 @@ mod tests {
             scene.music_request.as_deref(),
             Some("elevated_city_ambience")
         );
+    }
+
+    #[test]
+    fn a_startup_tip_is_printed() {
+        // `Tutorial.ldb` `Start_FSM` ends with the welcome tip.
+        let mut scene = door_fsm_scene();
+        scene.fsms[0].startup_actions = vec![
+            "maxpayne_gamemode->a_playmusic(elevated_city_ambience);".into(),
+            "maxpayne_hudmode->mphm_printtipalways(TIP_01);".into(),
+        ];
+        scene.apply_startup_player_scripts();
+        assert_eq!(scene.hud_prints, [(true, "TIP_01".to_string())]);
     }
 
     #[test]
