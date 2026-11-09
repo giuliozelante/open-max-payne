@@ -414,7 +414,12 @@ records what is read so far and where the reading goes next.
   then `0x7d2f38`, then `0x7d2f00`, and leaves vtable `0x7d2ec8` at `0x5f1f6f`. COL `0x7ef108` names
   `.?AVX_LevelDBMeshPolygonContainer@@`. `0x5f2b52` stores that pointer at `[staticMesh+0x58]`. Slot 0 of
   the mesh calls slot 0 of that object, `0x5f22c0`, with the memory file. The base vtable `0x7d2f38` is
-  not the finished object. What the container stores was not read.
+  not the finished object.
+- **VERIFIED:** `0x5f22c0` calls `0x5f4380` with the memory file, then casts `[record+4]` to
+  `.?AVX_LevelDBMeshPolygon@@` (`0x886bd8`, both sides). It then reads an int through IAT `0x7ca980`
+  and an `M_Vector3Template<M>` through IAT `0x7caafc`. `0x5f57a0` inserts that pair into the map at
+  `this+0x34`. `0x5f54c0` copies the int and the three floats onto the node at `+0xc`. One int and one
+  vector are not a triangle.
 - **VERIFIED:** `0x5e1fe0` inserts one 20-byte record. `0x5e2310` copies `[source+0x10]` to
   `[dest+0x10]` at `0x5e2457`. `0x5e0a40`, slot 0 of vtable `0x7d27ac`, stores the `__RTDynamicCast`
   return of `.?AVX_LevelDBMaterialCategory@@` (`0x8876d0`) at that offset and passes the record to
@@ -501,5 +506,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `[staticMesh+0x58]` is an `X_LevelDBMeshPolygonContainer`. Its slot 0 is `0x5f22c0`, called with the memory file. Read what that function stores before calling a record a triangle. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, or `0x5f1e40`. The records at `+0xc` are `M_Vector3Template<M>` values, not triangles.
+1. Slot 0 of `X_LevelDBMeshPolygon` is `0x5f1cb0` (vtable `0x7d2eac`). Read what it stores before calling the polygon a triangle. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, or `0x5f22c0`. The map at the container's `+0x34` holds one int and one vector, not a triangle.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
