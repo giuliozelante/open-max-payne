@@ -219,6 +219,13 @@ records what is read so far and where the reading goes next.
   first crossed with `this+0x18`. `0x5b6190` returns 1 only when all three components compare equal. `0x5b5990`
   returns 1 when the first record's first double is greater and -1 when it is less. On a tie it compares the second
   doubles the other way. The append then reads the records from the last toward the first.
+- **VERIFIED:** slot 0 of the vtable at `0x7d1fa4` is `0x5e9080`. It reads an unsigned count through the import at
+  `0x7cab1c`, then calls the import at `0x7caafc` that many times and appends each 12-byte result to `this+0x8`.
+  The same import then writes `this+0x18`, and the import at `0x7caaf0` writes `this+0x24`. Slot 2 of that vtable
+  is `0x5b58f0`, the only caller of the copy into `this+0x88`.
+- **STRONGLY SUPPORTED:** the complete-object locator at `0x7ed4b0` names `.?AVX_LevelDBImportExit@@`. The import
+  at `0x7caafc` is `R_MemoryFile`'s extractor for `M_Vector3Template`, `0x7cab1c` extracts an unsigned int, and
+  `0x7caaf0` extracts `M_Matrix4x3Template`.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -300,5 +307,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read what writes the vec3 container at `this+0x8`. `0x5b5ad0` only copies from it. `0x5f96c0`, the virtual call just before that copy, is unread.
+1. Read whether the child passed to slot 23 has vtable `0x7d1fa4`. That is the class whose slot 0 appends the vec3s and whose slot 2 copies them to `+0x88`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
