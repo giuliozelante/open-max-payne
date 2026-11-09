@@ -206,6 +206,12 @@ records what is read so far and where the reading goes next.
   The kept `t` writes `arg2 - t*arg1` to `0x8b0c28` and returns 1 only when `0x5f70e0` on that point returns 0.
   On the calls before the point stores, `arg1` is the rotated `this+0x130` and `arg2` is the position. On the later
   calls, `arg2` is `0x8b08d0` or `0x8b08c0` and `arg1` is the vec3 `0x5ca330` wrote.
+- **VERIFIED:** when the absolute dot is not above `0.001`, `0x5f70e0` walks `count = [this+0x18]` vec3s. A count of 0 or
+  less returns 0. Element `i` is at `[[[this+0x10]+4] + ([this+0x14] + i) * 12]`. The first pair uses element
+  `count - 1`, then each element pairs with the one before it. The edge is current minus previous, crossed with
+  `this+0x24`, then divided by its length (`fsqrt`, no zero test). If the dot of `argument - current` with that
+  unit is greater than `0.001`, it returns 1. This compare is not an absolute value. If none are, it returns 0.
+  `[this+0x18]` is the dword `0x5ca5c0` increments, and `[this+0x14]` is the vec3 count saved at the first append.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -287,5 +293,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read the loop in `0x5f70e0` that returns 0 at `0x5f7337`. `0x5bafa0` returns 1 only when that call returns 0.
+1. Read what writes the vec3 array `0x5b5eb0` reads at `child+0x88`. Those are the elements `0x5bf1b0` appends and `0x5f70e0` walks.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
