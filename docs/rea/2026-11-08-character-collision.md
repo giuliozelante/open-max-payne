@@ -372,6 +372,13 @@ records what is read so far and where the reading goes next.
 - **VERIFIED:** slot 20 (`0x5cfa90`) builds the rooms through `0x5cfe20` (size `0x18c`, constructor `0x5cf900`).
   `0x421a60` stores `[parent+0x2c]` at each new room's `+4`. The map then sits at `[[[room+4]+0x14]+4]`.
   Neither call writes `[record+4]`.
+- **VERIFIED:** `0x5f5ee0` appends one 8-byte record. Begin is `[this+4]`, end `[this+8]`, capacity `[this+0xc]`.
+  Slot 0 of vtable `0x7d2f38` (`0x5f4380`) and slot 2 (`0x5f4620`) call it. The second dword is the
+  `__RTDynamicCast` return whose type is `.?AVX_LevelDBMeshPolygon@@` (`0x886bd8`). The first dword is what
+  IAT `0x7ca980` writes. That vtable is `X_LevelDBObjectContainerBase` of `X_LevelDBMeshPolygon` with
+  `std::less<int>`. A sibling container for `X_LevelDBStaticMesh` is vtable `0x7d3018`. The room searches
+  the same record shape. This does not show that `[[importRoom+4]+0x14]` is vtable `0x7d2f38`. The polygon
+  constructor writes separate dwords at `+0xc`, `+0x10`, and `+0x14`. Those are not the point vector.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -452,5 +459,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `[record+4]` is the dword copied into the vector at `[importRoom+0xc]`. The record is 8 bytes, key then value, in the array at `[[[importRoom+4]+0x14]+4]`. `[importRoom+4]` is `[parent+0x2c]`, stored by `0x5cfa90`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, or `0x5cb8d0`. Read the append of that 8-byte record before naming the element. The points at its `+0xc` are not a mesh.
+1. The polygon container at vtable `0x7d2f38` appends an `X_LevelDBMeshPolygon*` as the second dword of an 8-byte record. The room's array is at `[[[importRoom+4]+0x14]+4]`. Read that object's vtable before naming the element. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, or `0x5f5ee0`. A static-mesh container is vtable `0x7d3018`. The points at the element's `+0xc` are not a mesh.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
