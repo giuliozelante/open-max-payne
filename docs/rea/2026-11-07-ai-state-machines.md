@@ -112,4 +112,9 @@ The conditions read three flags of the AI object: `0x4f6260` returns `+0x3ad`, `
   at the caller's argument `+0x4` (`0x5e53d0` is `fld [ecx+4]; ret`). `0x4feb3c` passes stimulus `1` and the value
   in `ebp`. `0x4fec9a` passes stimulus `1` and `0`, with `ecx` set to `this+0x157`.
 
-Not read yet: the range and cone tests before the line-of-sight ray, and what the local byte at `0x4f6c80` means.
+- **VERIFIED:** `0x4f62a0` is the sight update. `0x4f18a0` writes a vector from the two characters at `+0x3d8` and `+0x3dc` when `0x642d40` returns the same value for both. The sum of squares of that vector is turned into a length by the `1.5` / `0.5` table iteration (`0x3fc00000`, `0x3f000000`) and stored at `[ebp-0x1c]`.
+- **VERIFIED:** `0x6841c5` copies `VisualPerceivingRadius` (`skin+0xc1`, getter `0x531220`) to `+0x9e` through `0x6d72a0`, and `GeneralPerceivingRadius` (`skin+0xc5`, `0x531230`) to `+0xa2` through `0x6d72c0`. The sight test reads those with `0x6d7290` and `0x6d72b0`.
+- **VERIFIED:** when `0x4f17b0` returns nonzero, a radius greater than the length sets the local byte at `[ebp-0x74]`. The radius is `PerceivingGroupOneRadius` (`+0xd1`) when the target's byte `+0x2` is set (`0x6d73e0`), else group two (`+0xd5`, byte `+0x3`), else group three (`+0xd9`, byte `+0x4` via `0x421800`), else `+0xa2` when `+0x3ae` is clear. `0x4f17b0` returns 1 when `0x642d40` matches for the two characters.
+- **VERIFIED:** the line-of-sight block runs only after `+0x3b8` has counted down to 0, `0x4f17b0` was nonzero, the dot of the two vectors is greater than 0, and `+0x9e` is greater than the length. `ShootingCone` (`+0xc9`) is not loaded in `0x4f62a0`. The local byte at `0x4f6c80` is `[ebp-0x74]`, OR-ed with `+0x3ad`, and passed to `0x4f6df0` as the stimulus.
+
+Not read yet: the body of `0x4f18a0` when the two `0x642d40` results differ, and where `ShootingCone` is applied.
