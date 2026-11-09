@@ -171,11 +171,11 @@ records what is read so far and where the reading goes next.
   shrinks it through `0x5cac20` and `0x5c84c0`. At this call the container is the global `0x8b3b88`. The caller
   ignores the count and calls `0x64b660`.
 - **VERIFIED:** `0x4f84f0` writes a 3×4. It copies `other+0x30` (`0x4f8601`) and multiplies each of its three rows by the 3×3 of `0x63fc40`'s third argument (`0x4f865f`, three passes). The translation it writes is that argument's `+0x24` (`0x4f870c`). `0x43dfc0` returns the identity at `0x8b82e0` (`1,0,0 / 0,1,0 / 0,0,1`); `0x4f84f0` copies it onto the destination and then replaces it with this product (`0x4f87f8`).
-- **UNKNOWN:** which call enters `X_Character` slot 25 (`0x6954f0`) while Max moves. The move's object is the
-  crosshair subobject, and that slot is a different function. `0x64db90` is not called from the flag-0 move.
+- **VERIFIED:** `0x6954f0` returns with `ret 0xc` (`0x6957fa`). Its `eax` on the empty path is the begin pointer at `[arg+4]` (`0x6957e3`). Inside it, `0x695752` subtracts `0x1e` from its `this` and calls `0x695490`, which adds `0x1e` back before `0x63fc40`. The only dword in the image equal to `0x6954f0` is the vtable slot at `0x7d59b4`.
+- **Ruled out:** none of the 56 `call [reg+0x64]` sites in `.text` is within 80 bytes of an `lea` or `add` of `+0x1e`. `0x49b0a4` and `0x49b723` push no argument. `0x684c08`, like `0x684cdb`, reads `[return+0x1c]` as a string. The call at `0x6982b6` is inside `X_Character` method `0x697cd0`, on the mesh object.
+- **UNKNOWN:** which of the remaining `call [reg+0x64]` sites has an `X_Character` in `ecx` while Max moves. `0x64db90` is not called from the flag-0 move.
 
 ## Next
 
-1. Find a caller of `X_Character` slot 25 (`0x6954f0`). The move's slot 25 is `0x64b4f0`, and it does not build the
-   plane.
+1. Separate the remaining `call [reg+0x64]` sites by the vtable of `ecx`. The move's own slot 25 is `0x64b4f0`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
