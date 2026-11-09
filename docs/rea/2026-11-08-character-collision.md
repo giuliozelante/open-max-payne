@@ -354,6 +354,12 @@ records what is read so far and where the reading goes next.
   direct caller, `0x67a9d7`, walks the pointer vector at `this+0x5ec` and passes `[element+0x6c]`.
   `0x67a9b0` returns 1 if any of those bytes is non-zero, otherwise 0. Its only direct caller is
   `0x44ecf7`, with `ecx = [esi+0x1074]`.
+- **VERIFIED:** a non-zero result at `0x44ecf7` is not a collision test. `0x44ed00` calls `0x6da420` on
+  `esi+0x12d2`. That returns 0 when `[this]` is 0 and 1 otherwise. Only the 1 path saves
+  `P_Material::getRuntimeFogEnable` (`0x7ca5b8`), calls `setRuntimeFogEnable` (`0x7ca558`) with `cl`
+  cleared, and calls `0x60de40` with the string `Rendering` (`0x888dbc`). `0x7482e0` returns `[ecx+4]`
+  and `0x748300` returns `[ecx+8]`; the stack values are arguments of `0x60de40` (`ret 0x14`). The saved
+  fog value is restored at `0x44ed6b`. A zero flag skips this block and joins at `0x44ed75`.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -434,5 +440,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `[room+0xda]` is 1 when the byte at `[[record+0x40]+0x29]` is non-zero. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, or `0x542130`. The only reader returns that byte to `0x44ecf7`. Read `0x44ed00` before treating a non-zero result as collision. The 12-byte points are still not a mesh.
+1. `0x44ed00` calls `0x60de40` with `Rendering` while fog is forced off. It is not collision. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, or `0x44ed00`. The 12-byte points at `[element+0xc]` are still not a mesh. Read the writer of the vector at `[importRoom+0xc]` before naming that element.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
