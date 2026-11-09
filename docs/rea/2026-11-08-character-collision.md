@@ -314,6 +314,11 @@ records what is read so far and where the reading goes next.
   differs from `+0x30`, else 0. `0x5e3a50` advances the cursor at `[room+8]+0x160` by 4. Each
   non-zero dword is passed to `0x76f96a` with `.?AVX_LevelDBExit@@` (`0x875ed8`) and
   `.?AVX_LevelDBImportExit@@` (`0x875ef8`).
+- **VERIFIED:** `0x76f96a` is `jmp [0x7ca344]`, MSVCRT `__RTDynamicCast`. The call at `0x639f89`
+  passes the source dword, a vf delta of 0, `X_LevelDBExit`, `X_LevelDBImportExit`, and
+  `isReference` 0, so a failed cast stores 0. The call at `0x6561c3` casts the return of slot 9
+  (`call [eax+0x24]`) from `.?AVX_LevelDBRoom@@` (`0x876148`) to `.?AVX_LevelDBImportRoom@@`
+  (`0x876168`). That return is the first argument of `0x639bd0` and is already stored at `[room+8]`.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -394,5 +399,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The room vector at `+0x10` receives the return of `0x76f96a` once per element of `[[room+8]+0x2c]`. The call at `0x639f89` passes `.?AVX_LevelDBExit@@` and `.?AVX_LevelDBImportExit@@`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, or `0x63ce30`. Read `0x76f96a` before naming the stored pointer.
+1. Each dword at `[room+0x10]` is an `X_LevelDBImportExit`, or 0 when the cast fails. `[room+8]` is an `X_LevelDBImportRoom`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, or `0x76f96a`. After the loop, `0x639fb4` calls `0x5e39e0` on `[room+8]` and then `0x5f2be0`. Read `0x5f2be0` before treating the 9-dword copy at `[room+0x80]` as a mesh.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
