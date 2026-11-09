@@ -258,7 +258,12 @@ records what is read so far and where the reading goes next.
   which then writes vtable `0x7d2264` (`.?AVX_LevelDBImportRoom@@`) and the return of `0x5cc300` at
   `+0x188`. `0x5cfe20` builds those rooms in an array whose elements are `0x18c` bytes. The name
   lookup reads `[[[element+8]+0x148]+4]`, so this constructor does not show that the element is the room.
-- **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
+- **VERIFIED:** `0x6d99e0` passes its first stack argument to `0x642ed0`, which stores it at the crosshair's
+  `+0x60`. `0x691180` forwards its own first argument there, and also to `0x642a90` on the capsule at
+  `character+0x1e`. `0x687fce` passes `[character+0x6d8]`. The non-zero store of that field is `0x69aef8`:
+  it calls `0x642d40` on `[ebp-0x1c]`, then `0x63a280` on that result. `0x63a280` calls `0x76f96a`, reads
+  `[return+0x184]`, and returns `0x656600` of the container at `[this+4]` for that index. `0x683915` and
+  `0x688047` write 0 to `+0x6d8`. None of these stores writes `[element+8]` or advances `[element+0x14]`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -339,5 +344,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The writer of the pointer array is still unread. `X_LevelDBRoom`'s constructor zeros `[this+0x10]` and `[this+0x14]` but never writes `+8`, and the name lookup reads `[[[element+8]+0x148]+4]`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, or `0x5e3490`. Next, find the store of a pointer at `[element+8]` and the store that advances `[element+0x14]`.
+1. The writer of the pointer array is still unread. `0x63a280` indexes the container at `[element+4]` and does not write `[element+8]` or `[element+0x14]`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, or `0x63a280`. Next, find the function that pushes an element into the container `0x656600` indexes. That push is next to the constructor that stores `[element+8]` and advances `[element+0x14]`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
