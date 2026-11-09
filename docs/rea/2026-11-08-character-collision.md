@@ -330,6 +330,13 @@ records what is read so far and where the reading goes next.
   end at `+0xc`, stride 8, and compares `[record+4]` with the element. A match returns its index. No
   match returns the count, and an empty range returns 0. The caller stores that index and `0x63a1d0`
   calls `0x5644a0` with `ecx = room+0x28`, the dword at `[room+0x30]`, and the address of the index.
+- **VERIFIED:** `0x5644a0` (`ret 8`) appends that index to the vector at `room+0x28`. Begin is
+  `[room+0x2c]`, end is `[room+0x30]`, and capacity is `[room+0x34]`. `0x639bff` stores 0 at all three,
+  so the first call has no free slot. Argument 0 is the current end and argument 1 is the address of
+  the index. `0x43f390` asks `0x76f5b6` for `count*4` bytes. `0x661290` writes the index into that
+  buffer, `0x56457e` stores the buffer at `[room+0x2c]`, and `0x564587` stores `buffer+4` at
+  `[room+0x30]`. When a slot remains, `0x56a6d0` writes the index at the current end and `0x56461b`
+  adds 4. A miss still appends the count `0x63d9f0` returned.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -410,5 +417,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `0x63d9f0` returns an index into the vector at `[[importLevel+0x14]+8]`. It does not append. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, or `0x63d9f0`. Read `0x5644a0` before treating the call at `0x63a1d0` as an append onto `room+0x28`.
+1. `[room+0x2c]` receives the index, including the count when `0x63d9f0` finds no match. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, or `0x5644a0`. After the walk, `0x63a1e0` calls `0x63a480` on the room. Read that before looking for another array.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
