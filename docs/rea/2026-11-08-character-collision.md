@@ -139,10 +139,19 @@ records what is read so far and where the reading goes next.
   `.?AV?$M_Plane3Template@M@@` (complete-object locator `0x7de358`, type descriptor `0x86c3d0`). The first method,
   `0x448bb0`, copies three floats to `this+0x4` and divides them by their length. The erase path writes that same
   vtable back to the element.
-- **UNKNOWN:** which store writes the scalar at `+0x1c`. The normalize and the dot filter only read the two vectors.
-  The capsule-versus-triangle distance, if it is `0x64db90`, is not called from the flag-0 move.
+- **VERIFIED:** `0x640d10` is the store into `+0x1c`. It copies its second argument there and its third argument to
+  `+0x24`, and copies two vectors from its first argument. Its only caller is `0x640cc2`, inside `0x63fc40`. The
+  value it stores is the float left in `[ebp+0x8]` by `fst` at `0x640af7`. `0x63fc40` does not call `0x640d10` when
+  that float is greater than `0.02` (`0x7d4e04`, compare at `0x640afa`, jump at `0x640b05`).
+- **VERIFIED:** `0x63fc40`'s only caller is `0x6954d8`, in `0x695490`. That function's only caller is `0x695755`, in
+  `0x6954f0`. `0x6954f0` has no direct caller. The dword at `0x7d59b4` is `0x6954f0`, which is slot 25 of
+  `X_Character` (`0x7d5950`). `0x652640` and `0x5c84f0`, reached from the container rebuild, copy records of 40 bytes.
+  They do not compute `+0x1c`.
+- **UNKNOWN:** which virtual call enters slot 25 while Max moves. The flag-0 move's direct calls do not. The
+  bit-level approximation that feeds `0x640af7` is not named. The capsule-versus-triangle distance, if it is
+  `0x64db90`, is not called from the flag-0 move.
 
 ## Next
 
-1. Read the rebuild inside `0x646710` (the calls through `0x5c84f0` and `0x652640`) for the store to `+0x1c`.
+1. Find the call through `X_Character` slot 25 (`[reg+0x64]` → `0x6954f0`) and name the float at `0x640af7`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
