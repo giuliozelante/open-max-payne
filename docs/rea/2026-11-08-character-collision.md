@@ -96,7 +96,7 @@ records what is read so far and where the reading goes next.
   `0x5c2520` is `0x5c1f3f`, inside `0x5c1e20`.
 - **Ruled out, narrowed:** `P_CollisionBuffer` stays the renderer's visibility pass. `getTriangleMesh` is a different
   e2mfc entry.
-- **UNKNOWN:** the class at a triangle mesh's `+0x18` and `+0x1c`, and whether slot 23 reaches `0x5c1e20`.
+- **UNKNOWN:** the class at a triangle mesh's `+0x18` and `+0x1c`. Slot 23's body `0x63e350` does not call `0x5c1e20`.
 
 ## What runs for flag 0
 
@@ -123,6 +123,24 @@ records what is read so far and where the reading goes next.
   `[this+0x70] - [this+0x6c]` is outside `0..63` (`test ecx, 0xffffffc0` at `0x646224`). Otherwise it calls
   `0x646020` with the dword from `0x642d40`, the position, and global `0x8b82a0`, then stores that dword at
   `+0x84` and the position at `+0x78`.
+- **VERIFIED:** `0x646020` (`ret 0xc`) calls `0x64c950`, which inserts one element into the container at `this+0x68`
+  (begin `this+0x6c`, end `this+0x70`, stride 64 via `sar 6`). The inserted pointer is the return of `0x659c70`,
+  called with the dword from `0x642d40` and global `0x8b82a0`. It then stores 1 at `[arg0+0xdb]` (`0x63c3c0`).
+  The child count is `([arg0+0x14] - [arg0+0x10]) / 4`, or 0 when `[arg0+0x10]` is 0 (`0x63aa20`); a count of 0
+  returns. Child `i` is `[[arg0+0x10] + i*4]` (`0x63aa10`). The dword at `[[child+0x80]+0x184]` indexes the pointer
+  array at `[[arg0+4]+8]` (`0x63a2c0`, `0x656600`). A looked-up object whose byte at `+0xdb` is not zero is skipped
+  (`0x63c3d0`). Otherwise slot 23 of `this` is called with `[arg0+8]`, the child, and the position pointer twice.
+  On both capsule vtables that slot is `0x63e350` (`ret 0x10`). Only a return of exactly 1 continues. `0x4f84f0`
+  then writes a 3×4 into a local with `child+0x24` (`0x411d90`) as its stack argument. The position is multiplied
+  by the 3×4 at `child+0x24`, including the translation at `+0x24` of that block. `0x646020` calls itself with the
+  looked-up object, that product, and the local 3×4. `this` stays the original object.
+- **VERIFIED:** `0x63e350` multiplies `this+0x130` (`0x63e070`) by the 3×3 at `this+0x30` (`0x74e8e0`) and does not
+  add a translation. It passes that product, `this+0x12c`, both position pointers, and `[0x5f2c10(child)+4]` to
+  `0x5f2c20` on the child, then passes that return to `0x5b5d80`, then calls `0x5bf8e0` on `[[arg0]+0x188]`. The
+  value compared with 1 is that return. `0x5bf8e0` returns 0 at `0x5bfc04` when the compare at `0x5bfbf7` does not
+  take `test ah, 0x41`, and returns 1 at `0x5c051d` only when `0x5ba5b0` returns non-zero. The loop that ends at
+  `0x5c0519` returns 0. `0x63e350` does not call `0x5c1e20`. The direct callers of `0x5c1e20` are `0x5c1d3c`,
+  `0x5c1fd9`, `0x5c2350`, `0x5c2391`, `0x5c23d2` and `0x5c2413`.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -204,5 +222,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read `0x646020`. `0x6461c0` calls it after `0x696e90` re-enters `0x64af10`, when the cached position at `+0x78` does not match.
+1. Read `0x5ba5b0`. `0x5bf8e0` returns 1 only when that call returns non-zero, and `0x646020` recurses only when the return is 1.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
