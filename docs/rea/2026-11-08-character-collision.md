@@ -226,6 +226,10 @@ records what is read so far and where the reading goes next.
 - **STRONGLY SUPPORTED:** the complete-object locator at `0x7ed4b0` names `.?AVX_LevelDBImportExit@@`. The import
   at `0x7caafc` is `R_MemoryFile`'s extractor for `M_Vector3Template`, `0x7cab1c` extracts an unsigned int, and
   `0x7caaf0` extracts `M_Matrix4x3Template`.
+- **VERIFIED:** `0x642d40` returns `[ecx+0x60]`. The call at `0x64636c` pushes that pointer as `arg0` of `0x646020`.
+  The child passed to slot 23 is `[[arg0+0x10] + i*4]`. `0x646020` does not load that element's first dword.
+  It does read `[element+0x80]` through `0x40e420`. The constructor that writes vtable `0x7d1fa4` stores 0 at
+  `+0x80` and does not write that field again.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -307,5 +311,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read whether the child passed to slot 23 has vtable `0x7d1fa4`. That is the class whose slot 0 appends the vec3s and whose slot 2 copies them to `+0x88`.
+1. Read who writes the pointer array at `[[object+0x60]+0x10]`. Those pointers are the children slot 23 receives. The vtable at `0x7d1fa4` was not loaded on this path.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
