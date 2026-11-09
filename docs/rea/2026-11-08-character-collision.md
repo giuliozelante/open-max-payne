@@ -325,6 +325,11 @@ records what is read so far and where the reading goes next.
   treats `[room+0x5c]` as a 3x3, divides the cofactors by the determinant (`fdivr` of `1.0` at
   `0x7cbdd0`), and `0x63a14b` writes that result back over `[room+0x5c]`. `[room+0x80]` keeps the
   original 9 dwords. That is not a mesh.
+- **VERIFIED:** `0x63d9f0` (`ret 4`) does not write. `0x735570` is `mov eax, [ecx+0x14]; ret`, called on
+  the `X_LevelDBImportLevel` at `[ebp-0x28]`. The search walks that object's vector, begin at `+8` and
+  end at `+0xc`, stride 8, and compares `[record+4]` with the element. A match returns its index. No
+  match returns the count, and an empty range returns 0. The caller stores that index and `0x63a1d0`
+  calls `0x5644a0` with `ecx = room+0x28`, the dword at `[room+0x30]`, and the address of the index.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -405,5 +410,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `[room+0x80]` keeps the 3x3 from the first element's `+0x28`, and `[room+0x5c]` is overwritten with its cofactors divided by the determinant. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, or `0x5f2be0`. The same vector is walked again at `0x63a1a7`. Read `0x63d9f0`, called at `0x63a1bd` with that element, before looking for another array.
+1. `0x63d9f0` returns an index into the vector at `[[importLevel+0x14]+8]`. It does not append. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, or `0x63d9f0`. Read `0x5644a0` before treating the call at `0x63a1d0` as an append onto `room+0x28`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
