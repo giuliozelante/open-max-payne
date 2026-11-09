@@ -454,6 +454,11 @@ records what is read so far and where the reading goes next.
   pointer is stored at `+0x30`. `0x5f1ae0` returns the byte at record `+0x18`, stored at `+0x3c`.
   `0x5acfc0` passes that block to `0x5ae3c0`, and `0x5b09d2` divides the container by 64, so the block
   is one 64-byte element. No instruction in `.text` loads `0x8b0178` except its store.
+- **VERIFIED:** `0x5acfa0` returns the container begin plus the index times 64. `0x5a953d` loads
+  `[element+0x28]` and `0x5a9548` loads `[element+0x2c]`. That container is the second stack argument of
+  `0x5a8b90`, loaded at `0x5a8e15`. The calls at `0x5a803e`, `0x5a8097`, and `0x5a80f5` pass `0x8b02e8`.
+  `0x5abf40` loads both dwords with `fld` and returns 1 when each component is within the immediate
+  `0x3b03126f` (0.002) of the other pair.
 - **VERIFIED:** `0x5e1fe0` inserts one 20-byte record. `0x5e2310` copies `[source+0x10]` to
   `[dest+0x10]` at `0x5e2457`. `0x5e0a40`, slot 0 of vtable `0x7d27ac`, stores the `__RTDynamicCast`
   return of `.?AVX_LevelDBMaterialCategory@@` (`0x8876d0`) at that offset and passes the record to
@@ -540,5 +545,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Record `+0xc` and record `+0x10` are copied to `+0x28` and `+0x2c` of a 64-byte element. The container is the object at `0x8b02e8`. Read one load of that element's `+0x28` before naming the dword. The byte at record `+0x18` is a separate field. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, `0x5f22c0`, `0x5f1cb0`, `0x5a70a0`, `0x5f19b0`, `0x5f1930`, `0x5f2250`, `0x5f22b0`, `0x5ac930`, `0x5f37e0`, `0x5f19d0`, `0x5b3c10`, `0x5ada30`, `0x5adb50`, `0x5f19f0`, `0x5f1ae0`, `0x5acfc0`, `0x5ae3c0`, or `0x5b09c0`.
+1. The dwords at record `+0xc` and `+0x10` are floats. The 25-byte record's remaining dword is at `+0x14`. `0x5f1a10` returns it. Read one caller before naming that dword. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, `0x5f22c0`, `0x5f1cb0`, `0x5a70a0`, `0x5f19b0`, `0x5f1930`, `0x5f2250`, `0x5f22b0`, `0x5ac930`, `0x5f37e0`, `0x5f19d0`, `0x5b3c10`, `0x5ada30`, `0x5adb50`, `0x5f19f0`, `0x5f1ae0`, `0x5acfc0`, `0x5ae3c0`, `0x5b09c0`, `0x5acfa0`, or `0x5abf40`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
