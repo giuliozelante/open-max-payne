@@ -141,6 +141,7 @@ records what is read so far and where the reading goes next.
   take `test ah, 0x41`, and returns 1 at `0x5c051d` only when `0x5ba5b0` returns non-zero. The loop that ends at
   `0x5c0519` returns 0. `0x63e350` does not call `0x5c1e20`. The direct callers of `0x5c1e20` are `0x5c1d3c`,
   `0x5c1fd9`, `0x5c2350`, `0x5c2391`, `0x5c23d2` and `0x5c2413`.
+- **VERIFIED:** `0x5ba5b0` (`ret 0x14`) returns 0, 1, 2, or 3. `0x5bf8e0` treats every non-zero the same (`test eax, eax` at `0x5c04fb`). `0x449460` is the dot of the vec3 at `ecx` with the vec3 at `edx`. `0x5adb50` subtracts its argument from `this`. `0x5b3c90` multiplies `this` by its float argument. `0x5b4b00` is a square root and `0x5b4930` divides 1 by its argument. `0x7cb8b0` is 0. At the call from `0x5c04f6`, `ecx` is `0x8b0900`, `edx` is `0x8b08f0`, arg0 is `0x8b0930`, arg1 is `0x8b0920`, and arg2, arg3, arg4 are `ebp`, `edi`, `ebx`. Just before that call the three floats returned by `0x5b5eb0` are copied to both globals; `0x8b0930` then adds `0x8b0940` and `0x8b0920` subtracts it. The return at `0x5ba900` is 1 when `|arg1-arg0|²` is not 0, `|arg4-arg3|²` is 0, the dot `D` of `(arg3-arg0)` with `unit(arg1-arg0)` is greater than 0 and less than `|arg1-arg0|`, and `|arg3 - (arg0 + D·unit)|²` is less than `arg2²` (`fcompp` at `0x5ba8e7`, `test ah, 0x41` goes to the 0 return). A non-zero `|arg4-arg3|²` jumps to `0x5ba903`. That path returns 3 at `0x5baab4` after `0x507f50`, and again at `0x5baba0`. Another 1 is at `0x5bac2e`. A 2 is at `0x5badbd`. The shared 0 is at `0x5badc9`.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -222,5 +223,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read `0x5ba5b0`. `0x5bf8e0` returns 1 only when that call returns non-zero, and `0x646020` recurses only when the return is 1.
+1. Read `0x507f50` and the path at `0x5ba903`. It runs when arg3 and arg4 of `0x5ba5b0` differ, and its return of 3 is one of the values `0x5bf8e0` treats as success.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
