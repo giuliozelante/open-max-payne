@@ -230,6 +230,11 @@ records what is read so far and where the reading goes next.
   The child passed to slot 23 is `[[arg0+0x10] + i*4]`. `0x646020` does not load that element's first dword.
   It does read `[element+0x80]` through `0x40e420`. The constructor that writes vtable `0x7d1fa4` stores 0 at
   `+0x80` and does not write that field again.
+- **VERIFIED:** `0x642ed0` stores its first stack argument at `this+0x60` and sets the bytes at `+0x88` and `+0xb0`
+  to 1. It also copies nine dwords from its third argument onto `this+0x30`. At `0x642597` that first argument is
+  the return of `0x656680`, which walks `[[container+8] + i*4]` and returns the element whose string compares
+  equal under `_stricmp` (`0x7ca358`), or 0. At `0x648592` the stored pointer is one just read from another
+  object's `+0x60`. The stores of the dwords inside the array at `+0x10` are not in these functions.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -311,5 +316,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read who writes the pointer array at `[[object+0x60]+0x10]`. Those pointers are the children slot 23 receives. The vtable at `0x7d1fa4` was not loaded on this path.
+1. Read who writes the dwords in the array at `+0x10` of the object `0x656680` returns. `0x642ed0` only stores that object at `this+0x60`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
