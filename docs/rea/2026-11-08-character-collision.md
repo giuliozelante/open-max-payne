@@ -175,6 +175,18 @@ records what is read so far and where the reading goes next.
   (`0x5c02d1`, `0x5c03f2`, `0x5c04f6`), and to `0x5ba000` (`0x5c02fb`, `0x5c041c`). A return of 3 or 4 from
   `0x5b9f00` jumps to `0x5c051d`. Any non-zero from `0x5ba5b0` or `0x5ba000` does the same. `0x5c051d` sets `eax`
   to 1 and returns. The point and the direction written through those pointers are not read.
+- **VERIFIED:** `0x5b9f00` (`ret 0xc`) at `0x5bfe56` and `0x5bff43` takes `ecx = 0x8b0900`, `edx = 0x8b08f0`,
+  and stack arguments `0x8b0878`, `0x8b08d0`, `0x8b08c0`. The call at `0x5c01f2` passes `[esp+0x5c]` and `edi` in
+  place of the last two. `0x5b9fe0` is `this+0x30` and `0x5b9ef0` is `this+0x24`. It copies `arg0+0x30` to
+  `0x8b0d38+0x10` and `arg0+0x24` to `0x8b0d38+4` and to `edx`. `0x5ca490` returns the dot of `this+4` with
+  `point - (this+0x10)`. With `s0` that value for the first point and `s1` for the second, `0x5b9d30` returns 0
+  when both are greater than 0 and 1 when both are less than 0. Both zero copies the first point and returns 2.
+  `s0 == 0` with `s1 != 0`, and `s0 > 0` with `s1 == 0`, copy a point and return 3. `s0 < 0` with `s1 == 0` copies
+  the second point and returns 4. Otherwise `t = s0 / (s0 - s1)` is clamped to `[0, 1]`, `0x507f50` writes the
+  first point plus `t` times the difference, and the return is 4 when `s0 < 0` and 3 otherwise. `0x5b9f00` turns
+  an inner 0 into 1 and an inner 1 into 2. An inner 3 or 4 is returned unchanged when `0x5f70e0` returns 0, and
+  becomes 0 when `0x5f70e0` returns non-zero. `0x5f70e0` returns 1 at `0x5f7154` when the absolute dot of
+  `(argument - this+0x30)` with `this+0x24` is greater than `0.001` (`0x7d3050`). It returns 0 at `0x5f7337`.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -256,5 +268,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read `0x5b9f00`. It runs before `0x5ba5b0` on the same scratch pair, and a return of 3 or 4 makes `0x5bf8e0` return 1 without calling `0x5ba5b0`.
+1. Read the stores of the two points at `0x5bfd73` and `0x5bfe76`, and of `0x8b0878+0x24`. Those are the inputs whose signs `0x5b9f00` tests.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
