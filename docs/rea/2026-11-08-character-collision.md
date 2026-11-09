@@ -251,6 +251,13 @@ records what is read so far and where the reading goes next.
   `[node+8]+0x110`, which is passed to the import at `0x7cac44`. That list is not the pointer array at
   `+0x10`. The functions from `0x656770` to `0x6572b0` operate on tree nodes with fields at `+8` and
   `+0x14`. They do not advance the pointer array's end.
+- **STRONGLY SUPPORTED:** the constructor at `0x5e3490` writes vtable `0x7d2690` and then `0x7d2808`.
+  The complete-object locator behind `0x7d2808` names `.?AVX_LevelDBRoom@@`. It zeros `[this+0x10]`,
+  `[this+0x14]`, and `[this+0x1c]`, and it calls `std::rs::_Tidy` (`0x7caa9c`) on `this+0x148` with
+  argument 0. It stores nothing at `+8`. Its only direct caller is `0x5cf91d`, inside `0x5cf900`,
+  which then writes vtable `0x7d2264` (`.?AVX_LevelDBImportRoom@@`) and the return of `0x5cc300` at
+  `+0x188`. `0x5cfe20` builds those rooms in an array whose elements are `0x18c` bytes. The name
+  lookup reads `[[[element+8]+0x148]+4]`, so this constructor does not show that the element is the room.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -332,5 +339,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The writer of the pointer array is still unread. The element's name chars are at `[[[element+8]+0x148]+4]`, and `[element+0x1c]` is a separate list. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, or `0x656770`. Next, find the store of the inner object at `[element+8]` together with the store that advances `[element+0x14]`.
+1. The writer of the pointer array is still unread. `X_LevelDBRoom`'s constructor zeros `[this+0x10]` and `[this+0x14]` but never writes `+8`, and the name lookup reads `[[[element+8]+0x148]+4]`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, or `0x5e3490`. Next, find the store of a pointer at `[element+8]` and the store that advances `[element+0x14]`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
