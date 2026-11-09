@@ -349,6 +349,11 @@ records what is read so far and where the reading goes next.
   the index to `[this+4]` and calls `0x5b89c0` with `[this]`. `0x5da220` returns `[base+4]`, and
   `0x5b89c0` adds `(index+[container+8])*68` to that. The caller passes `[record+0x40]` to `0x542130`,
   and a non-zero `al` stores 1 at `[room+0xda]`.
+- **VERIFIED:** `0x542130` is `mov al, [ecx+0x29]; ret`. `[room+0xda]` becomes 1 when that byte is
+  non-zero and stays 0 when every tested byte is zero. `0x63a250` returns `[ecx+0xda]`. Its only
+  direct caller, `0x67a9d7`, walks the pointer vector at `this+0x5ec` and passes `[element+0x6c]`.
+  `0x67a9b0` returns 1 if any of those bytes is non-zero, otherwise 0. Its only direct caller is
+  `0x44ecf7`, with `ecx = [esi+0x1074]`.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -429,5 +434,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `0x5ca660` returns a 68-byte record. It does not make the 12-byte points a mesh. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, or `0x5ca660`. `0x63a208` calls `0x542130` with `[record+0x40]`. Read that before naming `[room+0xda]`.
+1. `[room+0xda]` is 1 when the byte at `[[record+0x40]+0x29]` is non-zero. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, or `0x542130`. The only reader returns that byte to `0x44ecf7`. Read `0x44ed00` before treating a non-zero result as collision. The 12-byte points are still not a mesh.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
