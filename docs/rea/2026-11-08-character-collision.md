@@ -112,6 +112,17 @@ records what is read so far and where the reading goes next.
   from `0x642d70` and calls the node object's slot `+0x6c` with the walker and the product. Slot `+0x6c` is `ret 0x8`
   (`0x755fa0`) on the capsule, the sphere, the start-point capsule and `CharacterTestSphere`. `X_Character` overrides
   it with `0x696e90`. `X_Projectile` (`0x7d8110`) overrides it with `0x704ef0`.
+- **VERIFIED:** `0x696e90` (`ret 0x8`) returns immediately when `0x642a80` says the dword at `this+0x60` is zero. It
+  does not load `[ebp+8]`, the walker. It adds the three floats at `[ebp+0xc]` (the product just pushed at
+  `0x64bf56`) to the position from `0x642d50`. `0x64aee0` then calls `0x64af10` with that sum, global `0x8b49c8` and
+  flag 0, and calls `0x6461c0`. `0x687f10` stores 1 at `[this-0x1e+0x21c]` and jumps to `0x64f010`, which stores 1
+  at `this+0xb0` and `this+0x88`. The byte at `+0x88` is the one `0x646710` tests before rebuilding the 40-byte
+  container. The one-time init of global `0x8b4a6c` (bit 0) registers `0x696f50`, which jumps to `0x41c3a0`.
+- **VERIFIED:** `0x6461c0` returns without writing when `[this+0x84]` equals the dword from `0x642d40`, the three
+  floats at `this+0x78` equal the position from `0x642d50`, `[this+0x6c]` is not zero, and
+  `[this+0x70] - [this+0x6c]` is outside `0..63` (`test ecx, 0xffffffc0` at `0x646224`). Otherwise it calls
+  `0x646020` with the dword from `0x642d40`, the position, and global `0x8b82a0`, then stores that dword at
+  `+0x84` and the position at `+0x78`.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -193,5 +204,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read `0x696e90`, the character override of slot 27. The hit-list walk calls it when the walker's byte at `+0xf0` is zero and the node object's dword at `+0x60` is not.
+1. Read `0x646020`. `0x6461c0` calls it after `0x696e90` re-enters `0x64af10`, when the cached position at `+0x78` does not match.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
