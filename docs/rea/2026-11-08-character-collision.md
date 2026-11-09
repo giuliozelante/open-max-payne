@@ -147,9 +147,11 @@ records what is read so far and where the reading goes next.
   `0x6954f0`. `0x6954f0` has no direct caller. The dword at `0x7d59b4` is `0x6954f0`, which is slot 25 of
   `X_Character` (`0x7d5950`). `0x652640` and `0x5c84f0`, reached from the container rebuild, copy records of 40 bytes.
   They do not compute `+0x1c`.
-- **UNKNOWN:** which virtual call enters slot 25 while Max moves. The flag-0 move's direct calls do not. The
-  bit-level approximation that feeds `0x640af7` is not named. The capsule-versus-triangle distance, if it is
-  `0x64db90`, is not called from the flag-0 move.
+- **Ruled out:** `0x696f60` through `0x697800` has no `call [reg+0x64]`. The `call [eax+0x64]` at `0x684cdb`
+  reads `[return+0x1c]` as a string for `R_STR`, so that slot is not the character's plane builder.
+- **UNKNOWN:** which virtual call enters `X_Character` slot 25 while Max moves. The flag-0 move's direct calls do
+  not. The bit-level approximation that feeds `0x640af7` is not named. The capsule-versus-triangle distance, if it
+  is `0x64db90`, is not called from the flag-0 move.
 
 ## Next
 
