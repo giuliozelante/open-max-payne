@@ -269,6 +269,12 @@ records what is read so far and where the reading goes next.
   allocation of `0x29b` bytes and `0x72f7e0`. `0x65f680` then inserts into the tree at `edi+0xdb`; it
   compares keys at `node+0xc` with the sentinel `0x8b3f58`. `0x65c110` writes the new object to
   `[node+0x10]`. That is a tree node's value, not the pointer array.
+- **VERIFIED:** `0x72fdb0` (`ret 0x10`) does not store a dword at `+8`, `+0x10`, or `+0x14`. It writes
+  the byte 0 at `+0x10` and `+0x14`. It passes `[this+0x18]` and `[this+0x1c]` to
+  `P_Buffer::setUsedCount` (`0x7ca80c`) and calls `P_TriangleMeshBase::lock` (`0x7ca58c`) on `this`.
+  At `0x72fe85` it calls `0x6423e0` with `ecx = this+0x140`. The two stack values are the
+  `R_MemoryFile` from `Chunk::getMemoryFile` (`0x7caba0`) and this function's first argument.
+  `0x6423e0` passes its second stack argument to `0x656680`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -349,5 +355,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The writer of the pointer array is still unread. `0x65c110` writes a tree node's value, and nothing inlines an add of 4 to `[reg+0xc]`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, or `0x65f680`. Next, read `0x72fdb0`. It is called on the new `0x29b`-byte object with the name container as an argument and it reads the file.
+1. The writer of the pointer array is still unread. `0x72fdb0` clears two bytes and locks a triangle mesh; it is not the element `0x656600` returns. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, or `0x72fdb0`. Next, the container at the `0x65c051` lookup is the dword at `[esp+0xc8]` of the function after `0x65bf7e`. Find which argument that is and who fills its array at `+8`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
