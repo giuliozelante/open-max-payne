@@ -459,6 +459,11 @@ records what is read so far and where the reading goes next.
   `0x5a8b90`, loaded at `0x5a8e15`. The calls at `0x5a803e`, `0x5a8097`, and `0x5a80f5` pass `0x8b02e8`.
   `0x5abf40` loads both dwords with `fld` and returns 1 when each component is within the immediate
   `0x3b03126f` (0.002) of the other pair.
+- **VERIFIED:** `0x5f1a10` reads the dword at record `+0x14`. It returns -1 when that dword is -1, and
+  otherwise returns the dword masked with `0x7fffff`. The callers `0x5a7470`, `0x5a7567`, and `0x5a7665`
+  skip the lookup when the return is negative. Otherwise `0x5c3eb0` returns the begin of the container
+  at `0x8b02a8` plus that index times 8, and the caller reads the record's first dword. With the byte
+  at `+0x18`, the 25 bytes of the record are accounted for.
 - **VERIFIED:** `0x5e1fe0` inserts one 20-byte record. `0x5e2310` copies `[source+0x10]` to
   `[dest+0x10]` at `0x5e2457`. `0x5e0a40`, slot 0 of vtable `0x7d27ac`, stores the `__RTDynamicCast`
   return of `.?AVX_LevelDBMaterialCategory@@` (`0x8876d0`) at that offset and passes the record to
@@ -545,5 +550,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The dwords at record `+0xc` and `+0x10` are floats. The 25-byte record's remaining dword is at `+0x14`. `0x5f1a10` returns it. Read one caller before naming that dword. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, `0x5f22c0`, `0x5f1cb0`, `0x5a70a0`, `0x5f19b0`, `0x5f1930`, `0x5f2250`, `0x5f22b0`, `0x5ac930`, `0x5f37e0`, `0x5f19d0`, `0x5b3c10`, `0x5ada30`, `0x5adb50`, `0x5f19f0`, `0x5f1ae0`, `0x5acfc0`, `0x5ae3c0`, `0x5b09c0`, `0x5acfa0`, or `0x5abf40`.
+1. The dword at record `+0x14` indexes an 8-byte record in the container at `0x8b02a8`, or it is -1. Read one writer of that record's first dword before naming it. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, `0x5f22c0`, `0x5f1cb0`, `0x5a70a0`, `0x5f19b0`, `0x5f1930`, `0x5f2250`, `0x5f22b0`, `0x5ac930`, `0x5f37e0`, `0x5f19d0`, `0x5b3c10`, `0x5ada30`, `0x5adb50`, `0x5f19f0`, `0x5f1ae0`, `0x5acfc0`, `0x5ae3c0`, `0x5b09c0`, `0x5acfa0`, `0x5abf40`, `0x5f1a10`, or `0x5c3eb0`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
