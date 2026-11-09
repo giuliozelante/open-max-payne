@@ -365,6 +365,13 @@ records what is read so far and where the reading goes next.
   both call it. The value is 0 when the byte at `[[[room+4]+0x14]+0x14]` is 0 and `0x754650` returns 0,
   or when `0x5cb8d0` returns the end pointer `[container+0xc]` (`0x5da210` reads `[ecx+8]`). Otherwise the
   appended dword is `[node+4]`. The 12-byte points would be at that object's `+0xc`. They are not a mesh.
+- **VERIFIED:** `0x5cb8d0` returns one 8-byte record from a contiguous array. `0x5cbc90` searches it with stride 8.
+  Begin is `[map+4]` (`0x5d7d40` reads `[ecx+4]`). End is `[map+8]` (`0x5da210` reads `[ecx+8]`). `0x5b56e0`
+  compares the first dword of each pointer (`cmp`, then `setl`). The record is kept only when those dwords are
+  equal. The room copies `[record+4]`. The key is the dword at `[[importRoom+0xac]+index*4]`.
+- **VERIFIED:** slot 20 (`0x5cfa90`) builds the rooms through `0x5cfe20` (size `0x18c`, constructor `0x5cf900`).
+  `0x421a60` stores `[parent+0x2c]` at each new room's `+4`. The map then sits at `[[[room+4]+0x14]+4]`.
+  Neither call writes `[record+4]`.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -445,5 +452,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `0x5e57f0` appends `[node+4]` or 0 into the vector at `[importRoom+0xc]`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, or `0x5e57f0`. The 12-byte points are at that object's `+0xc`. Read the writer of `[node+4]` before naming the element.
+1. `[record+4]` is the dword copied into the vector at `[importRoom+0xc]`. The record is 8 bytes, key then value, in the array at `[[[importRoom+4]+0x14]+4]`. `[importRoom+4]` is `[parent+0x2c]`, stored by `0x5cfa90`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, or `0x5cb8d0`. Read the append of that 8-byte record before naming the element. The points at its `+0xc` are not a mesh.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
