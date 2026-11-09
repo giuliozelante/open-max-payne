@@ -345,6 +345,10 @@ records what is read so far and where the reading goes next.
   (`0x7d4d38`); that path calls `0x63aa40` and leaves the corners. Otherwise the corners are moved to
   `1.2` (`0x7d4d08`) times their offset from the center. Neither path reads `[room+0x10]` or
   `[room+0x2c]`. The 12-byte records are not shown to be triangles.
+- **VERIFIED:** `0x5ca660` does not read those points. Its `this` is `[importRoom+0x188]+4`. It adds
+  the index to `[this+4]` and calls `0x5b89c0` with `[this]`. `0x5da220` returns `[base+4]`, and
+  `0x5b89c0` adds `(index+[container+8])*68` to that. The caller passes `[record+0x40]` to `0x542130`,
+  and a non-zero `al` stores 1 at `[room+0xda]`.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -425,5 +429,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `[room+0x38]` and `[room+0x44]` are the bounds of the 12-byte points. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, or `0x63a480`. After the bounds, `0x63a1e5` stores 0 at `[room+0xda]`. `0x63a200` calls `0x5ca660` on `[[[room+8]+0x188]+4]`. Read that before calling the points a mesh.
+1. `0x5ca660` returns a 68-byte record. It does not make the 12-byte points a mesh. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, or `0x5ca660`. `0x63a208` calls `0x542130` with `[record+0x40]`. Read that before naming `[room+0xda]`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
