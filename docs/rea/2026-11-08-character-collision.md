@@ -149,11 +149,24 @@ records what is read so far and where the reading goes next.
   They do not compute `+0x1c`.
 - **Ruled out:** `0x696f60` through `0x697800` has no `call [reg+0x64]`. The `call [eax+0x64]` at `0x684cdb`
   reads `[return+0x1c]` as a string for `R_STR`, so that slot is not the character's plane builder.
-- **UNKNOWN:** which virtual call enters `X_Character` slot 25 while Max moves. The flag-0 move's direct calls do
-  not. The bit-level approximation that feeds `0x640af7` is not named. The capsule-versus-triangle distance, if it
-  is `0x64db90`, is not called from the flag-0 move.
+- **VERIFIED:** `0x696f60` is slot 21 of `X_Character` (`0x7d59a4`). Its `ecx` is the subobject whose vtable the
+  constructor writes at outer `+0x1e` (`0x682ad8`, store at `0x682f8a`). The call to `0x64af10` at `0x6971fd` uses
+  `ecx+0x522`, which is outer `+0x540`. `0x64c910`, called on that same pointer at `0x697210`, calls `0x647660` on
+  it. The constructor builds that subobject with `0x6d7940` (`0x682da5`). `0x658900` first writes the sphere vtable
+  `0x7d5008`; `0x6d7aa4` then writes `0x7d7404`.
+- **STRONGLY SUPPORTED:** the RTTI on `0x7d7404` names `.?AVX_Crosshair@@`, with bases
+  `X_LevelRuntimeSphereObjectBase` and `X_LevelRuntimeObjectBase` (complete-object locator `0x7fc490`, type
+  descriptor `0x89aed0`).
+- **VERIFIED:** slot 25 of `0x7d7404` is `0x64b4f0` (`0x7d7468`). The rebuild calls it at `0x646557`. That function
+  does not call `0x6954f0` or `0x63fc40`. It divides a 40-byte container by 40 and, when the count is not zero,
+  shrinks it through `0x5cac20` and `0x5c84c0`. At this call the container is the global `0x8b3b88`. The caller
+  ignores the count and calls `0x64b660`.
+- **UNKNOWN:** which call enters `X_Character` slot 25 (`0x6954f0`) while Max moves. The move's object is the
+  crosshair subobject, and that slot is a different function. The bit-level approximation that feeds `0x640af7` is
+  not named. `0x64db90` is not called from the flag-0 move.
 
 ## Next
 
-1. Find the call through `X_Character` slot 25 (`[reg+0x64]` → `0x6954f0`) and name the float at `0x640af7`.
+1. Find a caller of `X_Character` slot 25 (`0x6954f0`) and name the float at `0x640af7`. The move's slot 25 is
+   `0x64b4f0`, and it does not build the plane.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
