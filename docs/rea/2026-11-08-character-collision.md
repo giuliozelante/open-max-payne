@@ -379,10 +379,18 @@ records what is read so far and where the reading goes next.
   `std::less<int>`. A sibling container for `X_LevelDBStaticMesh` is vtable `0x7d3018`. The room searches
   the same record shape. This does not show that `[[importRoom+4]+0x14]` is vtable `0x7d2f38`. The polygon
   constructor writes separate dwords at `+0xc`, `+0x10`, and `+0x14`. Those are not the point vector.
-- **VERIFIED:** `[importRoom+4]` is the begin pointer of the parent's pointer vector at `+0x28`. `0x5e5b30`
-  appends 4-byte elements. `[[importRoom+4]+0x14]` is the dword at byte offset `0x14` in that buffer, the
-  6th stored pointer. It is not a field whose constructor was read. Each stored pointer is `[record+0x10]`
-  from the 20-byte records `0x5e7ae0` searches (`begin + index*20`), or 0. No vtable was read there.
+- **VERIFIED:** `[importRoom+4]` is the `X_LevelDBImportLevel`. Slot 10 of vtable `0x7d1ff8`
+  (`0x5b74a0`) passes that level to `0x5b8000`, which passes it to `0x5cfa00`. `0x5e5400` pushes
+  that argument at `0x5e558a` and `0x5ecd80` stores it at `[container+0x2c]`. `0x5cfa90` copies
+  `[container+0x2c]` to each new room's `+4`. `[[importRoom+4]+0x14]` is `[ImportLevel+0x14]`.
+  `0x5ebc3d`, in `0x5ebba0`, stores 0 there. The later writer was not read. `0x5e5b30` still appends
+  `[record+0x10]` or 0 into the room's own vector at `+0x28`. Its map is `[ImportLevel+0xc]+4`.
+- **VERIFIED:** `0x5e1fe0` inserts one 20-byte record. `0x5e2310` copies `[source+0x10]` to
+  `[dest+0x10]` at `0x5e2457`. `0x5e0a40`, slot 0 of vtable `0x7d27ac`, stores the `__RTDynamicCast`
+  return of `.?AVX_LevelDBMaterialCategory@@` (`0x8876d0`) at that offset and passes the record to
+  `0x5e1fe0`. The vtable's type is `X_LevelDBObjectContainerBase` of `std::rs`,
+  `X_LevelDBMaterialCategory`, and `r_stril`. This does not show that `[ImportLevel+0xc]` is that
+  container.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -463,5 +471,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `[[importRoom+4]+0x14]` is the 6th pointer in the parent's `+0x28` vector. That pointer is `[record+0x10]` from a 20-byte record. Read the writer of that dword before naming the object. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, or `0x5e7ae0`. The polygon container vtable `0x7d2f38` is a different object. The points at the element's `+0xc` are not a mesh.
+1. `[importRoom+4]` is the `X_LevelDBImportLevel`. `[[importRoom+4]+0x14]` is `[ImportLevel+0x14]`, which `0x5ebba0` zeroes. Read the later writer before naming it. The room's appended dword is `[record+0x10]` from the map at `[ImportLevel+0xc]+4`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, or `0x5e0a40`. The polygon container vtable `0x7d2f38` is a different object. The points at the element's `+0xc` are not a mesh.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
