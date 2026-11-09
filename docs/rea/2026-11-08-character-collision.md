@@ -383,8 +383,15 @@ records what is read so far and where the reading goes next.
   (`0x5b74a0`) passes that level to `0x5b8000`, which passes it to `0x5cfa00`. `0x5e5400` pushes
   that argument at `0x5e558a` and `0x5ecd80` stores it at `[container+0x2c]`. `0x5cfa90` copies
   `[container+0x2c]` to each new room's `+4`. `[[importRoom+4]+0x14]` is `[ImportLevel+0x14]`.
-  `0x5ebc3d`, in `0x5ebba0`, stores 0 there. The later writer was not read. `0x5e5b30` still appends
-  `[record+0x10]` or 0 into the room's own vector at `+0x28`. Its map is `[ImportLevel+0xc]+4`.
+  `0x5eba70` stores 0 there, then `0x5ebae0` fills it. The import constructor sets vtable `0x7d1ff8`
+  and calls `0x5ebae0` again. That call stores slot 11's return at `[level+0x14]` (`0x5ebb12`) and
+  slot 9's return at `[level+0xc]` (`0x5ebb26`).
+- **VERIFIED:** slot 11 is `0x5b74b0`. It allocates `0x40` bytes and calls `0x5ac8a0`, which writes
+  vtable `0x7d1f6c`. That type is `.?AVX_LevelDBImportStaticMeshContainer@@`. Slot 9 is `0x5b7490`.
+  It allocates `0x2c` bytes and calls `0x5b5da0`, which writes vtable `0x7d1fc0`. That type is
+  `.?AVX_LevelDBImportExitContainer@@`. `0x5e9520` puts the 20-byte vector at that object's `+4`
+  (begin `[this+8]`, end `[this+0xc]`). The room's appended dword is `[record+0x10]` from that
+  vector, or 0. The writer of that dword was not read.
 - **VERIFIED:** `0x5e1fe0` inserts one 20-byte record. `0x5e2310` copies `[source+0x10]` to
   `[dest+0x10]` at `0x5e2457`. `0x5e0a40`, slot 0 of vtable `0x7d27ac`, stores the `__RTDynamicCast`
   return of `.?AVX_LevelDBMaterialCategory@@` (`0x8876d0`) at that offset and passes the record to
@@ -471,5 +478,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `[importRoom+4]` is the `X_LevelDBImportLevel`. `[[importRoom+4]+0x14]` is `[ImportLevel+0x14]`, which `0x5ebba0` zeroes. Read the later writer before naming it. The room's appended dword is `[record+0x10]` from the map at `[ImportLevel+0xc]+4`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, or `0x5e0a40`. The polygon container vtable `0x7d2f38` is a different object. The points at the element's `+0xc` are not a mesh.
+1. `[ImportLevel+0x14]` is an `X_LevelDBImportStaticMeshContainer`. The room appends `[record+0x10]` from the 20-byte map at `[ImportLevel+0xc]+4`, and that object is an `X_LevelDBImportExitContainer`. Read the writer of that dword before naming the pointer. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, or `0x5ebae0`. The polygon container vtable `0x7d2f38` is a different object. The points at the element's `+0xc` are not a mesh.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
