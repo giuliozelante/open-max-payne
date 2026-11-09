@@ -443,6 +443,11 @@ records what is read so far and where the reading goes next.
   is that address, so its `+4` is `[container+0x34]`, the begin of the 25-byte records. `0x5cc219` and
   `0x5ef869` pass `this+0x2c` for elements of `0xaa` and `0xa6` bytes. The stores at `0x5a522d`,
   `0x5a52d0`, and `0x5a52e8` copy `+4`, `+8`, and `+0xc` together; that object is a string.
+- **VERIFIED:** `0x5b3c10` takes the address `0x5f19d0` returns, record `+4`. It loads that dword and the
+  dword at record `+8`. `0x5ada30` stores them as the first two components of a 12-byte vector, and the
+  third component is the constant 0. The three calls pass corners 0 and 1 and the corner index saved at
+  `[ebp-0x44]`. Each result is a stack temporary. `0x5adb50` subtracts two of those vectors with `fld`
+  and `fsub`, so both dwords are floats.
 - **VERIFIED:** `0x5e1fe0` inserts one 20-byte record. `0x5e2310` copies `[source+0x10]` to
   `[dest+0x10]` at `0x5e2457`. `0x5e0a40`, slot 0 of vtable `0x7d27ac`, stores the `__RTDynamicCast`
   return of `.?AVX_LevelDBMaterialCategory@@` (`0x8876d0`) at that offset and passes the record to
@@ -529,5 +534,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `[importPolygon+8]` is the address of the import static mesh container's vector at `+0x30`. The 25-byte records begin at its `+4`, and the first dword is the vertex index. Read the dword at record `+4` by reading `0x5b3c10`, which receives the address `0x5f19d0` returns. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, `0x5f22c0`, `0x5f1cb0`, `0x5a70a0`, `0x5f19b0`, `0x5f1930`, `0x5f2250`, `0x5f22b0`, `0x5ac930`, or `0x5f37e0`.
+1. The dword at record `+4` is a float, and the dword at record `+8` is the next float. `0x5b3c10` writes the constant 0 as the third component. Read the dword at record `+0xc`. `0x5f19f0` returns its address. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, `0x5f22c0`, `0x5f1cb0`, `0x5a70a0`, `0x5f19b0`, `0x5f1930`, `0x5f2250`, `0x5f22b0`, `0x5ac930`, `0x5f37e0`, `0x5f19d0`, `0x5b3c10`, `0x5ada30`, or `0x5adb50`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
