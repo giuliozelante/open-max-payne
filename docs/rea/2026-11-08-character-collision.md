@@ -244,6 +244,13 @@ records what is read so far and where the reading goes next.
   The loop it takes when those two differ steps by `0x64` and calls `0x41c3a0`, which is `ret`. That
   container is the 100-byte element vector, not the pointer array. No instruction adds 4 to `[reg+0x14]`
   for `eax`, `ecx`, `edx`, `ebx`, `esi`, or `edi`.
+- **VERIFIED:** the characters `0x656680` compares are at `[[[element+8]+0x148]+4]`. `0x63aa40` returns that
+  address: `0x748300` reads `[element+8]` and `0x5e3b20` is `lea eax, [ecx+0x148]`. A null pointer is
+  replaced by the dword at `0x7caa2c`, as the argument string is. `0x63a320` returns `[element+0x1c]`.
+  `0x6566f0` walks that as a list: the next node is `[node]`, and `0x64b370` on `[node+8]` returns
+  `[node+8]+0x110`, which is passed to the import at `0x7cac44`. That list is not the pointer array at
+  `+0x10`. The functions from `0x656770` to `0x6572b0` operate on tree nodes with fields at `+8` and
+  `+0x14`. They do not advance the pointer array's end.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -325,5 +332,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The writer of the pointer array is still unread. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, or `0x64ffc0`. Next, find the constructor of the element `0x656600` returns and the store that advances that element's dword at `+0x14`.
+1. The writer of the pointer array is still unread. The element's name chars are at `[[[element+8]+0x148]+4]`, and `[element+0x1c]` is a separate list. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, or `0x656770`. Next, find the store of the inner object at `[element+8]` together with the store that advances `[element+0x14]`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
