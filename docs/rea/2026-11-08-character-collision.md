@@ -170,6 +170,11 @@ records what is read so far and where the reading goes next.
   than `|arg1-arg0|`. `edx` then receives that point minus `arg0`, minus the dot times the unit, and `0x5b3c40`
   divides the result by its length (`0x5b48d0` squares a component, `0x5b4900` returns 0 for a 0 argument and
   `1/x` otherwise). The return is 2 (`0x5badbd`).
+- **VERIFIED:** the immediates `0x8b0900` and `0x8b08f0` occur only inside `0x5bf8e0`, nine times each. No instruction loads
+  the floats. The same pair is passed to `0x5b9f00` (`0x5bfe56`, `0x5bff43`, `0x5c01f2`), to `0x5ba5b0`
+  (`0x5c02d1`, `0x5c03f2`, `0x5c04f6`), and to `0x5ba000` (`0x5c02fb`, `0x5c041c`). A return of 3 or 4 from
+  `0x5b9f00` jumps to `0x5c051d`. Any non-zero from `0x5ba5b0` or `0x5ba000` does the same. `0x5c051d` sets `eax`
+  to 1 and returns. The point and the direction written through those pointers are not read.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -251,5 +256,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Find the reads of `0x8b0900` and `0x8b08f0` after `0x5bf8e0` returns. A success leaves a point in `0x8b0900`. Return 2 also leaves a unit vector in `0x8b08f0`, and return 3 leaves the segment direction there.
+1. Read `0x5b9f00`. It runs before `0x5ba5b0` on the same scratch pair, and a return of 3 or 4 makes `0x5bf8e0` return 1 without calling `0x5ba5b0`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
