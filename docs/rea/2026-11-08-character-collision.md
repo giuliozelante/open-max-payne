@@ -403,6 +403,13 @@ records what is read so far and where the reading goes next.
   that return as the record's second dword. `0x5f6090` inserts the 8-byte record, and `0x5d03fe` copies
   `[source+4]` to `[dest+4]`. The room's element is that static mesh. The 25-byte array at `this+0x30`
   is a different vector.
+- **VERIFIED:** `X_LevelDBStaticMesh` is vtable `0x7d2f70` (COL `0x7ef1b0`). Constructor `0x5f28d0` zeroes
+  `[this+0xc]`, `[this+0x10]`, and `[this+0x14]`. Slot 0 `0x5f2f70` reads an unsigned count through IAT
+  `0x7cab1c` (`operator>>` of `R_MemoryFile` and `unsigned int`) and grows the vector at `this+8` by
+  12-byte records (`0x2aaaaaab`, `sar 1`). IAT `0x7caafc` writes each one: `operator>>` of
+  `M_Vector3Template<M>`, with `edx` at `[this+0xc] + index*12`. The same reader fills the vector at
+  `this+0x18`, sized by an int from IAT `0x7ca980`. IAT `0x7caaf0` then reads an
+  `M_Matrix4x3Template<M>` into `[this+0x28]`. These records are vector3 values, not triangles.
 - **VERIFIED:** `0x5e1fe0` inserts one 20-byte record. `0x5e2310` copies `[source+0x10]` to
   `[dest+0x10]` at `0x5e2457`. `0x5e0a40`, slot 0 of vtable `0x7d27ac`, stores the `__RTDynamicCast`
   return of `.?AVX_LevelDBMaterialCategory@@` (`0x8876d0`) at that offset and passes the record to
@@ -489,5 +496,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The element the room appends from the 8-byte map is an `X_LevelDBStaticMesh`. The 12-byte points are at that object's `+0xc`. Read the writer of that field before calling the points a mesh. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, or `0x5f4a10`. The polygon container vtable `0x7d2f38` is a different object. The 25-byte array at the container's `+0x30` is not the point vector.
+1. `[staticMesh+0x58]` is the return of `0x5f5260`. That function allocates `0x44` bytes and calls `0x5f1e40`. Read that object before calling it a polygon container. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, or `0x5f2f70`. The records at `+0xc` are `M_Vector3Template<M>` values, not triangles.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
