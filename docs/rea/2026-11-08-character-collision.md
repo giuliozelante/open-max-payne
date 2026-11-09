@@ -150,9 +150,16 @@ records what is read so far and where the reading goes next.
   `0x8b0940` and `0x8b0920` subtracts it. The return at `0x5ba900` is 1 when `|arg1-arg0|²` is not 0,
   `|arg4-arg3|²` is 0, the dot `D` of `(arg3-arg0)` with `unit(arg1-arg0)` is greater than 0 and less than
   `|arg1-arg0|`, and `|arg3 - (arg0 + D·unit)|²` is less than `arg2²` (`fcompp` at `0x5ba8e7`, `test ah, 0x41` goes
-  to the 0 return). A non-zero `|arg4-arg3|²` jumps to `0x5ba903`. That path returns 3 at `0x5baab4` after
-  `0x507f50`, and again at `0x5baba0`. Another 1 is at `0x5bac2e`. A 2 is at `0x5badbd`. The shared 0 is at
-  `0x5badc9`.
+  to the 0 return). A non-zero `|arg4-arg3|²` jumps to `0x5ba903`.
+- **VERIFIED:** `0x507f50` (`ret 0x8`) writes `edx + scalar·(arg1 - edx)` into `ecx`. `0x507f10` flips the sign bit of
+  each of the three floats at `ecx`. On the `0x5ba903` path, `D4` is the dot of `(arg4-arg0)` with `unit(arg1-arg0)`.
+  Both `D` and `D4` at or below 0, or both at or above `|arg1-arg0|`, return 0. When `D < 0`, `t = |D| / (|D| + |D4|)`
+  is clamped to `[0, 1]` and `0x507f50` stores `arg3 + t·(arg4-arg3)` into the `ecx` argument. If that point's
+  distance squared to `arg0` is less than `arg2²`, `edx` is set to `-unit(arg1-arg0)` and the return is 3
+  (`0x5baab4`). When `D > |arg1-arg0|`, the same `t` uses `|D - length|` and `|D4 - length|`, the distance test is
+  against `arg1`, `edx` is set to `+unit(arg1-arg0)`, and the return is 3 (`0x5baba0`). When `0 ≤ D ≤ |arg1-arg0|`,
+  the return at `0x5bac2e` is 1 if `|(arg3-arg0) - D·unit|² < arg2²`, and that return does not write `edx`. A failed
+  distance test continues at `0x5bac31`. The return of 2 is at `0x5badbd`. The shared 0 is at `0x5badc9`.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -234,5 +241,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read `0x507f50` and the path at `0x5ba903`. It runs when arg3 and arg4 of `0x5ba5b0` differ, and its return of 3 is one of the values `0x5bf8e0` treats as success.
+1. Read `0x5bac31`. A failed distance test in `0x5ba5b0` continues there, and the return of 2 is at `0x5badbd`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
