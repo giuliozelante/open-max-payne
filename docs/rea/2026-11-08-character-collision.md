@@ -379,6 +379,10 @@ records what is read so far and where the reading goes next.
   `std::less<int>`. A sibling container for `X_LevelDBStaticMesh` is vtable `0x7d3018`. The room searches
   the same record shape. This does not show that `[[importRoom+4]+0x14]` is vtable `0x7d2f38`. The polygon
   constructor writes separate dwords at `+0xc`, `+0x10`, and `+0x14`. Those are not the point vector.
+- **VERIFIED:** `[importRoom+4]` is the begin pointer of the parent's pointer vector at `+0x28`. `0x5e5b30`
+  appends 4-byte elements. `[[importRoom+4]+0x14]` is the dword at byte offset `0x14` in that buffer, the
+  6th stored pointer. It is not a field whose constructor was read. Each stored pointer is `[record+0x10]`
+  from the 20-byte records `0x5e7ae0` searches (`begin + index*20`), or 0. No vtable was read there.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -459,5 +463,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The polygon container at vtable `0x7d2f38` appends an `X_LevelDBMeshPolygon*` as the second dword of an 8-byte record. The room's array is at `[[[importRoom+4]+0x14]+4]`. Read that object's vtable before naming the element. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, or `0x5f5ee0`. A static-mesh container is vtable `0x7d3018`. The points at the element's `+0xc` are not a mesh.
+1. `[[importRoom+4]+0x14]` is the 6th pointer in the parent's `+0x28` vector. That pointer is `[record+0x10]` from a 20-byte record. Read the writer of that dword before naming the object. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, or `0x5e7ae0`. The polygon container vtable `0x7d2f38` is a different object. The points at the element's `+0xc` are not a mesh.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
