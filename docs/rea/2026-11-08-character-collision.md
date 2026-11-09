@@ -337,6 +337,14 @@ records what is read so far and where the reading goes next.
   buffer, `0x56457e` stores the buffer at `[room+0x2c]`, and `0x564587` stores `buffer+4` at
   `[room+0x30]`. When a slot remains, `0x56a6d0` writes the index at the current end and `0x56461b`
   adds 4. A miss still appends the count `0x63d9f0` returned.
+- **VERIFIED:** `0x63a480` does not append. `0x748300` returns `[room+8]`. For each element of that
+  vector, `0x5f2ba0` returns `([element+0x10]-[element+0xc])/12`, or 0 when `+0xc` is null, and
+  `0x5f2bc0` returns `[element+0xc]+index*12`. `[room+0x38]` starts at `FLT_MAX` (`0x7f7fffff`) and
+  keeps the lesser component. `[room+0x44]` starts at `-FLT_MAX` (`0xff7fffff`) and keeps the greater
+  component. The scale runs unless a `(max-min)` component compares greater than `5000.0`
+  (`0x7d4d38`); that path calls `0x63aa40` and leaves the corners. Otherwise the corners are moved to
+  `1.2` (`0x7d4d08`) times their offset from the center. Neither path reads `[room+0x10]` or
+  `[room+0x2c]`. The 12-byte records are not shown to be triangles.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -417,5 +425,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `[room+0x2c]` receives the index, including the count when `0x63d9f0` finds no match. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, or `0x5644a0`. After the walk, `0x63a1e0` calls `0x63a480` on the room. Read that before looking for another array.
+1. `[room+0x38]` and `[room+0x44]` are the bounds of the 12-byte points. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, or `0x63a480`. After the bounds, `0x63a1e5` stores 0 at `[room+0xda]`. `0x63a200` calls `0x5ca660` on `[[[room+8]+0x188]+4]`. Read that before calling the points a mesh.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
