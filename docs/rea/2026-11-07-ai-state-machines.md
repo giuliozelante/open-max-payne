@@ -99,10 +99,17 @@ The conditions read three flags of the AI object: `0x4f6260` returns `+0x3ad`, `
     (`0x531290`).
   - Without one, a perceived AI counts `+0x3b0` down by `dt`. At zero `+0x3af` clears and `0x4f7470(0)` zeroes
     `+0x3b4`. `0x4f7470(1)` instead loads `+0x3b4` from the same skin field.
-- **VERIFIED:** the skin parser copies its `[AI]` keys into the skin record (`0x5300f1`-`0x530149`, from globals
-  the key table fills): `VisualPerceivingRadius` to `+0xc1`, `GeneralPerceivingRadius` to `+0xc5`,
-  `ActivationReactionTime` to `+0xcd`, `EnemyInterestTime` to `+0xdd`. So the "perceived" memory lasts
-  `EnemyInterestTime` seconds after the last stimulus.
+- **VERIFIED:** when the `AI` section (`0x87d4f8`) has a count above zero (`0x5300a4`), `0x52fc80` copies the
+  key globals into the skin record. `AimingSpeed` lands at `+0xb5`, `TurnLeftRightSpeed` at `+0xb9`,
+  `AimUpDownSpeed` at `+0xbd`, `VisualPerceivingRadius` at `+0xc1`, `GeneralPerceivingRadius` at `+0xc5`,
+  `ShootingCone` at `+0xc9`, `ActivationReactionTime` at `+0xcd`, `PerceivingGroupOneRadius` at `+0xd1`,
+  `PerceivingGroupTwoRadius` at `+0xd5`, `PerceivingGroupThreeRadius` at `+0xd9`, `EnemyInterestTime` at `+0xdd`
+  and `ActivateOtherCharactersRadius` at `+0xe1`. The dword at `+0xb1` is copied from `0x8ad728`, which has no
+  key string in `.text`. The "perceived" memory lasts `EnemyInterestTime` seconds after the last stimulus.
 - **HYPOTHESIS:** `0x6d73b0` is the AI's alert reaction, and `+0x3b4` is a cool-down before it can alert again.
 
-Not read yet: what counts as a stimulus (sight, `ShotHeardDistance`, `NearDistance`), and who calls `0x4f6df0`.
+- **VERIFIED:** `0x4f6df0` has three callers. `0x4f6c9a` passes the OR of `+0x3ad` and a local byte, and the float
+  at the caller's argument `+0x4` (`0x5e53d0` is `fld [ecx+4]; ret`). `0x4feb3c` passes stimulus `1` and the value
+  in `ebp`. `0x4fec9a` passes stimulus `1` and `0`, with `ecx` set to `this+0x157`.
+
+Not read yet: the range and cone tests before the line-of-sight ray, and what the local byte at `0x4f6c80` means.
