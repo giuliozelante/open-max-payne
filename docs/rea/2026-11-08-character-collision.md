@@ -235,6 +235,15 @@ records what is read so far and where the reading goes next.
   the return of `0x656680`, which walks `[[container+8] + i*4]` and returns the element whose string compares
   equal under `_stricmp` (`0x7ca358`), or 0. At `0x648592` the stored pointer is one just read from another
   object's `+0x60`. The stores of the dwords inside the array at `+0x10` are not in these functions.
+- **Ruled out:** the pointer array `0x63aa10` reads is not written by the stores read this pass.
+  `0x438ef5` copies 12 dwords between two stack locals. `0x43940e`, `0x43943a`, and `0x439460` write
+  `[pointer+0x10]`, where the pointer is the return of `0x43aea0` or `0x43abe0`, and they do not change a
+  dword at `+0x14`. `0x40da80` writes 0 from `+0x8` through `+0xe8`. `0x6471a1` and `0x64b178` call
+  `0x64ffc0` with `ecx = this+0x10`, `arg0 = [this+0x14]`, and `arg1 = [this+0x18]`. Both exits of that
+  call, `0x6500f8` and `0x650104`, write `[ecx+8] = arg0`, so the call sets `[this+0x18] = [this+0x14]`.
+  The loop it takes when those two differ steps by `0x64` and calls `0x41c3a0`, which is `ret`. That
+  container is the 100-byte element vector, not the pointer array. No instruction adds 4 to `[reg+0x14]`
+  for `eax`, `ecx`, `edx`, `ebx`, `esi`, or `edi`.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -316,5 +325,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read who writes the dwords in the array at `+0x10` of the object `0x656680` returns. `0x642ed0` only stores that object at `this+0x60`.
+1. The writer of the pointer array is still unread. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, or `0x64ffc0`. Next, find the constructor of the element `0x656600` returns and the store that advances that element's dword at `+0x14`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
