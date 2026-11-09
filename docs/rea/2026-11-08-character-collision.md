@@ -153,13 +153,13 @@ records what is read so far and where the reading goes next.
   crosshair constructor passes `0.05` (`0x3d4ccccd`) into that writer. An earlier length in the same function is
   rejected when it is greater than the sum of those two fields plus `0.02` (`0x63fca5`, compare at `0x63fdb8`).
 - **VERIFIED:** `0x63fc40`'s only caller is `0x6954d8`, in `0x695490`. That function's only caller is `0x695755`, in
-  `0x6954f0`. `0x6954f0` has no direct caller. The dword at `0x7d59b4` is `0x6954f0`, which is slot 25 of
-  `X_Character` (`0x7d5950`). `0x652640` and `0x5c84f0`, reached from the container rebuild, copy records of 40 bytes.
+  `0x6954f0`. `0x6954f0` has no direct caller. The dword at `0x7d59b4` is `0x6954f0`, slot 25 of the vtable at
+  `0x7d5950`. `0x652640` and `0x5c84f0`, reached from the container rebuild, copy records of 40 bytes.
   They do not compute `+0x1c`.
 - **Ruled out:** `0x696f60` through `0x697800` has no `call [reg+0x64]`. The `call [eax+0x64]` at `0x684cdb`
   reads `[return+0x1c]` as a string for `R_STR`, so that slot is not the character's plane builder.
-- **VERIFIED:** `0x696f60` is slot 21 of `X_Character` (`0x7d59a4`). Its `ecx` is the subobject whose vtable the
-  constructor writes at outer `+0x1e` (`0x682ad8`, store at `0x682f8a`). The call to `0x64af10` at `0x6971fd` uses
+- **VERIFIED:** `0x696f60` is slot 21 of the vtable at `0x7d5950` (`0x7d59a4`). Its `ecx` is the subobject whose vtable the
+  constructor writes at `+0x1e` (`0x682ad8`, store at `0x682f8a`). The call to `0x64af10` at `0x6971fd` uses
   `ecx+0x522`, which is outer `+0x540`. `0x64c910`, called on that same pointer at `0x697210`, calls `0x647660` on
   it. The constructor builds that subobject with `0x6d7940` (`0x682da5`). `0x658900` first writes the sphere vtable
   `0x7d5008`; `0x6d7aa4` then writes `0x7d7404`.
@@ -172,10 +172,12 @@ records what is read so far and where the reading goes next.
   ignores the count and calls `0x64b660`.
 - **VERIFIED:** `0x4f84f0` writes a 3×4. It copies `other+0x30` (`0x4f8601`) and multiplies each of its three rows by the 3×3 of `0x63fc40`'s third argument (`0x4f865f`, three passes). The translation it writes is that argument's `+0x24` (`0x4f870c`). `0x43dfc0` returns the identity at `0x8b82e0` (`1,0,0 / 0,1,0 / 0,0,1`); `0x4f84f0` copies it onto the destination and then replaces it with this product (`0x4f87f8`).
 - **VERIFIED:** `0x6954f0` returns with `ret 0xc` (`0x6957fa`). Its `eax` on the empty path is the begin pointer at `[arg+4]` (`0x6957e3`). Inside it, `0x695752` subtracts `0x1e` from its `this` and calls `0x695490`, which adds `0x1e` back before `0x63fc40`. The only dword in the image equal to `0x6954f0` is the vtable slot at `0x7d59b4`.
-- **Ruled out:** none of the 56 `call [reg+0x64]` sites in `.text` is within 80 bytes of an `lea` or `add` of `+0x1e`. `0x49b0a4` and `0x49b723` push no argument. `0x684c08`, like `0x684cdb`, reads `[return+0x1c]` as a string. The call at `0x6982b6` is inside `X_Character` method `0x697cd0`, on the mesh object.
-- **UNKNOWN:** which of the remaining `call [reg+0x64]` sites has an `X_Character` in `ecx` while Max moves. `0x64db90` is not called from the flag-0 move.
+- **STRONGLY SUPPORTED (RTTI):** the complete object is `X_Character`. Its primary vtable is `0x7d59d0` at offset 0 (complete-object locator `0x7f5f00`, type descriptor `0x8684c8`). The vtable stored at `+0x1e` is `0x7d5950`; that locator's offset field is `0x1e`, and the base at member displacement `0x1e` is `X_LevelRuntimeCapsuleObjectBase` (the level-object base sits at the same displacement). Two more vtables are stored on the same object: `0x7d59fc` at `+0x15b` (`X_ParticleSystemReceiver`) and `0x7d5930` at `+0x17c` (`X_CameraTarget`).
+- **VERIFIED:** slot 25 of `0x7d4d64`, `0x7d5008`, `0x7cd010`, `0x7d5d10` and `0x7d7404` is `0x64b4f0`. Slot 25 of `0x7d5950` is the only one of these that is `0x6954f0`. Slot 25 of the primary vtable `0x7d59d0` is `0x53e210`. The image stores the immediate `0x7d5950` only at `0x682f8a` and `0x68320e`. `0x6831e0` writes the second of those and its only caller is `0x682fd3`, inside `0x682ab0`. The only caller of `0x682ab0` is `0x452d72`, inside `0x452cd0`, which passes a `0x810`-byte block as `ecx`. Callers of `0x452cd0` are `0x450a04` and `0x4520f2`.
+- **Ruled out:** none of the 56 `call [reg+0x64]` sites in `.text` is within 80 bytes of an `lea` or `add` of `+0x1e`. `0x49b0a4` and `0x49b723` push no argument. `0x684c08`, like `0x684cdb`, reads `[return+0x1c]` as a string. The call at `0x6982b6` is inside `X_Character` method `0x697cd0`, on the mesh object. `0x5789d0` is `lea eax, [ecx+0x1e]; ret`. Its nine callers, all in `0x578029`–`0x578be7`, read the container at the returned pointer `+0x4` and do not call slot 25.
+- **UNKNOWN:** which call passes the pointer at `X_Character+0x1e` as `ecx` to slot 25 while Max moves. Every other shape's slot 25 is `0x64b4f0`. `0x64db90` is not called from the flag-0 move.
 
 ## Next
 
-1. Separate the remaining `call [reg+0x64]` sites by the vtable of `ecx`. The move's own slot 25 is `0x64b4f0`.
+1. Find the `call [reg+0x64]` whose `ecx` is `X_Character+0x1e`. It is not computed in the 80 bytes before any of those calls, and the getter `0x5789d0` does not reach one.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
