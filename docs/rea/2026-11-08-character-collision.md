@@ -105,11 +105,17 @@ records what is read so far and where the reading goes next.
 - **VERIFIED:** from `0x6478e9` the move subtracts the target (`edi+0xc`) from the position (`0x642d50`). `0x64bd90`
   returns immediately when that delta's length squared is at most `FLT_MIN` (`0x7cefb8`). Otherwise it multiplies the
   delta by the 3×3 from `0x642d40` / `0x63a900` and calls `0x64be70` with the local delta and `this+0xc0`.
-- **VERIFIED:** `0x64be70` walks the list at `this+0xc0` (sentinel `0x8b3d84`). For a node whose `+0xc` object passes
-  `0x642a80` and fails `0x64dae0`, it multiplies the delta by the 3×3 from `0x642d70` and calls that object's slot
-  `+0x6c` with the character and the product. Slot `+0x6c` is `ret 0x8` (`0x755fa0`) on the capsule, the sphere, the
-  start-point capsule and `CharacterTestSphere`. `X_Character` overrides it with `0x696e90`. `X_Projectile` (`0x7d8110`)
-  overrides it with `0x704ef0`.
+- **VERIFIED:** `0x64be70` walks the list at `this+0xc0` (sentinel `0x8b3d84`). `0x642a80` returns 1 when the dword
+  at the node object's `+0x60` is not zero; zero skips the node (`0x64bea2`). `0x64dae0` returns the byte at the
+  walker's `+0xf0`, not a field of the node. When that byte is not zero, the walker copies the delta's three floats
+  onto `this+0xb1` and does not call slot 27 (`0x64beb1`). When the byte is zero, it multiplies the delta by the 3×3
+  from `0x642d70` and calls the node object's slot `+0x6c` with the walker and the product. Slot `+0x6c` is `ret 0x8`
+  (`0x755fa0`) on the capsule, the sphere, the start-point capsule and `CharacterTestSphere`. `X_Character` overrides
+  it with `0x696e90`. `X_Projectile` (`0x7d8110`) overrides it with `0x704ef0`.
+- **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
+  `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
+  squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
+  byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
 - **VERIFIED:** `0x6437e0` then decides `0x64f100`. The path that finds a component equal to `FLT_MAX` (`0x7d4f6c`)
   returns 0, and `0x64f100` is skipped. The other return is the byte at `[ebp-0xe]`.
 - **VERIFIED:** `0x64f100` leaves immediately unless `0x64c2b0` returns non-zero and `0x646710` returns a container
@@ -187,5 +193,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The slot-25 calls do not compute `X_Character+0x1e`, and the fields they load are not stored from that address. Read `0x642a80` and `0x64dae0`, the two predicates on the hit list in `0x64be70`.
+1. Read `0x696e90`, the character override of slot 27. The hit-list walk calls it when the walker's byte at `+0xf0` is zero and the node object's dword at `+0x60` is not.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
