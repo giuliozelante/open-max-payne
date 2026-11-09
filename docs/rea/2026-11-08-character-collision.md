@@ -291,7 +291,12 @@ records what is read so far and where the reading goes next.
   nonzero: it calls slot 0 of `[[end]-4]` with argument 1 and moves the end back by 4. `0x45008e` calls
   `0x493f80` with `ecx = GameMode+0x104`. That calls `0x655f90` on `this+0x39`, stores its argument at
   `[container]`, sets the byte at `+0x24` to 1, and walks objects whose name is read by `0x5e3b20`.
-  The store into the pointer array is later in `0x655f90`.
+  At `0x656258` it calls `0x447dd0` with `ecx = container+4`. The first argument is `[container+0xc]`,
+  the second is 1, and the third is the address of the `0xe0`-byte object `0x639bd0` returned.
+  When no free slot remains, `0x447e62` writes that pointer into the new buffer and `0x447ed3`
+  (or `0x447ef4`) stores the new end at `[container+0xc]` and the new begin at `[container+8]`.
+  When a slot remains, `0x447f57` writes the pointer at the current end and `0x447f73` adds 4 to
+  `[container+0xc]`. `0x639bd0` zeroes the new object's `[this+0x10]` and `[this+0x14]`.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -372,5 +377,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The writer of the pointer array is still unread. `0x655f90` runs on the embedded container and walks the named objects, but the store is later in that function. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, or `0x6564c0`. Next, continue `0x655f90` from `0x6560e2` and find the store of a pointer at `[end]` and the add of 4 to `[container+0xc]`. The call at `0x65613f` writes a different vector, the one at `[eax+0x14]`.
+1. The pointer array is written by `0x447dd0`, called from `0x656258`. The inserted object is the `0xe0`-byte return of `0x639bd0`, whose constructor zeroes `+0x10` and `+0x14`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, or `0x447dd0`. Next, read the rest of `0x639bd0` for a store of a pointer at `[this+8]`. The copies at `this+0x5c` and `this+0x80` are not that field.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
