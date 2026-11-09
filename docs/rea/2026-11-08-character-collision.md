@@ -212,6 +212,13 @@ records what is read so far and where the reading goes next.
   `this+0x24`, then divided by its length (`fsqrt`, no zero test). If the dot of `argument - current` with that
   unit is greater than `0.001`, it returns 1. This compare is not an absolute value. If none are, it returns 0.
   `[this+0x18]` is the dword `0x5ca5c0` increments, and `[this+0x14]` is the vec3 count saved at the first append.
+- **VERIFIED:** `0x5b5ad0`, called at `0x5b5900`, empties `this+0x88` and appends copies of vec3s from `this+0x8`.
+  Each record is 24 bytes: the dot of that vec3 with one vector, the dot with a second vector, and the index.
+  The first vector is `(1, 0, 0)` crossed with `this+0x18`. When that equals `(0, 0, 0)`, it becomes `(0, 1, 0)`
+  crossed with `this+0x18`. When that is also zero, it is `(0, 0, 1)` and is not crossed. The second vector is the
+  first crossed with `this+0x18`. `0x5b6190` returns 1 only when all three components compare equal. `0x5b5990`
+  returns 1 when the first record's first double is greater and -1 when it is less. On a tie it compares the second
+  doubles the other way. The append then reads the records from the last toward the first.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -293,5 +300,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read what writes the vec3 array `0x5b5eb0` reads at `child+0x88`. Those are the elements `0x5bf1b0` appends and `0x5f70e0` walks.
+1. Read what writes the vec3 container at `this+0x8`. `0x5b5ad0` only copies from it. `0x5f96c0`, the virtual call just before that copy, is unread.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
