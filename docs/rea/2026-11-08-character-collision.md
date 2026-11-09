@@ -199,6 +199,13 @@ records what is read so far and where the reading goes next.
   (`0x5bfe01`, `0x5bfe2a`). At `0x5bfe76` both point globals are overwritten
   with the position plus `0x8b0940`, and that is what `0x5b9f00` tests. The two points are equal on this call, so
   the two dots are equal.
+- **VERIFIED:** `0x5bafa0` (`ret 0xc` at `0x5bb0d0`) does not read its incoming `ecx`. `arg0` is the object,
+  `arg1` and `arg2` are vec3 pointers. It returns 0 at `0x5bb0d5` when the absolute dot of `arg0+0x24` with `arg1`
+  is below `0.001` (`0x7d2084`, same bits as `0x7d3050`). Otherwise
+  `t = dot(arg0+0x24, arg2 - arg0+0x30) / dot(arg0+0x24, arg1)`, using `0x5b4900`. `t > 1` and `t < 0` also return 0.
+  The kept `t` writes `arg2 - t*arg1` to `0x8b0c28` and returns 1 only when `0x5f70e0` on that point returns 0.
+  On the calls before the point stores, `arg1` is the rotated `this+0x130` and `arg2` is the position. On the later
+  calls, `arg2` is `0x8b08d0` or `0x8b08c0` and `arg1` is the vec3 `0x5ca330` wrote.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -280,5 +287,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read `0x5bafa0`. It is called with the plane and the shifted position before `0x5b9f00`, and a non-zero `al` makes `0x5bf8e0` return 1.
+1. Read the loop in `0x5f70e0` that returns 0 at `0x5f7337`. `0x5bafa0` returns 1 only when that call returns 0.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
