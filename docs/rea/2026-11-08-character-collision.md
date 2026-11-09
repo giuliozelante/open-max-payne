@@ -427,6 +427,14 @@ records what is read so far and where the reading goes next.
   goes to `[this+0x3c]`. `0x5f1c94` stores the return of `0x5de320` at `[this+0x24]`. `0x5f1ca4`
   stores 0, or `[record+4]` from an 8-byte range on `[[this+4]+8]`, at `[this+0x28]`. Two ints and
   one vector are not a triangle.
+- **VERIFIED:** slot 6 of `X_LevelDBImportStaticMesh` is `0x5a70a0` (vtable `0x7d1ee8`). `0x40e390`
+  returns `[this+0x58]`, and the function calls that object's slot 10. The return is cast from
+  `X_LevelDBMeshPolygon` (`0x886bd8`) to `X_LevelDBImportMeshPolygon` (`0x886c00`). `0x65a2e0` returns
+  `[polygon+0x10]`. `0x5f19b0` returns the dword at `[[polygon+8]+4] + ([polygon+0xc] + arg)*25`.
+  `0x5f2bc0` uses that dword as the index into this mesh's 12-byte vector. Corners 0 and 1 are read
+  before the count is tested. Corners 2 and up are read while the index is less than `[polygon+0x10]`.
+  The int at `+0xc` is the base added to the corner number, not the vertex index. The count is not
+  fixed at 3.
 - **VERIFIED:** `0x5e1fe0` inserts one 20-byte record. `0x5e2310` copies `[source+0x10]` to
   `[dest+0x10]` at `0x5e2457`. `0x5e0a40`, slot 0 of vtable `0x7d27ac`, stores the `__RTDynamicCast`
   return of `.?AVX_LevelDBMaterialCategory@@` (`0x8876d0`) at that offset and passes the record to
@@ -513,5 +521,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The polygon's two ints at `+0xc` and `+0x10` are not shown to index the static mesh's vector. Read one caller that uses both with that vector before calling them vertex indices. `[polygon+0x24]` is the return of `0x5de320` and is still unnamed. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, `0x5f22c0`, or `0x5f1cb0`. Two ints and one vector are not a triangle.
+1. `[importPolygon+8]` is the pointer whose `+4` begins the 25-byte records. Read what is stored there before naming that array. The int at `+0xc` is the base added to the corner number, not the vertex index. The int at `+0x10` is the corner count, and it is not fixed at 3. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, `0x5f22c0`, `0x5f1cb0`, `0x5a70a0`, or `0x5f19b0`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
