@@ -304,6 +304,16 @@ records what is read so far and where the reading goes next.
 - **VERIFIED:** `0x747810` is `ret 0x8`. The call at `0x639f6b` discards two arguments and does not insert.
   `0x561030` returns its destination because `[room+0x14]` and `[room+0x10]` are both still 0, so
   `0x639f73` writes 0 back to `[room+0x14]`. That is not a child-array append.
+- **VERIFIED:** `0x63ce30` (`ret 0xc`) inserts into the pointer vector at `room+0xc`. Begin is
+  `[room+0x10]`, end is `[room+0x14]`, and capacity is `[room+0x18]`. `0x639bf9` stores 0 there too, so
+  the first call has no free slot. Argument 0 is the current end, argument 1 is 1, and argument 2 is
+  the address of the `0x76f96a` return. `0x63d060` asks `0x76f5b6` for `count*4` bytes. `0x63cec2`
+  writes that return into the new buffer, `0x63cf36` stores the buffer at `[room+0x10]`, and
+  `0x63cf33` stores `buffer+4` at `[room+0x14]`. When a slot remains, `0x63d03b` writes the pointer
+  and `0x63d044` adds 4 to the end. `0x5e3a30` returns the first dword of `[[room+8]+0x2c]` when it
+  differs from `+0x30`, else 0. `0x5e3a50` advances the cursor at `[room+8]+0x160` by 4. Each
+  non-zero dword is passed to `0x76f96a` with `.?AVX_LevelDBExit@@` (`0x875ed8`) and
+  `.?AVX_LevelDBImportExit@@` (`0x875ef8`).
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -384,5 +394,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `[room+0x14]` is still 0 after `0x639f73`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, or `0x747810`. Next, `0x639f9e` calls `0x63ce30` on `room+0xc` with that 0. Read it before looking elsewhere for the child append.
+1. The room vector at `+0x10` receives the return of `0x76f96a` once per element of `[[room+8]+0x2c]`. The call at `0x639f89` passes `.?AVX_LevelDBExit@@` and `.?AVX_LevelDBImportExit@@`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, or `0x63ce30`. Read `0x76f96a` before naming the stored pointer.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
