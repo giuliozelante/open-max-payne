@@ -435,6 +435,14 @@ records what is read so far and where the reading goes next.
   before the count is tested. Corners 2 and up are read while the index is less than `[polygon+0x10]`.
   The int at `+0xc` is the base added to the corner number, not the vertex index. The count is not
   fixed at 3.
+- **VERIFIED:** `0x5f1930` stores 0 at `[this+8]` (`0x5f1951`). The pointer `0x5f19b0` reads is written
+  later. Slot 11 of the polygon container (`0x7d2ec8`) is `0x5f2250`, and `0x5f228c` copies
+  `[polygonContainer+0x30]` into `[element+8]`. `0x5f22b0` is `mov [ecx+0x30], arg; ret 4`. Slot 11 of
+  `X_LevelDBImportStaticMeshContainer` (`0x5ac930`, vtable `0x7d1f6c`) and its slot 0 `0x5f37e0` both
+  pass the address of `this+0x30` through `0x40e390`, which returns `[mesh+0x58]`. `[importPolygon+8]`
+  is that address, so its `+4` is `[container+0x34]`, the begin of the 25-byte records. `0x5cc219` and
+  `0x5ef869` pass `this+0x2c` for elements of `0xaa` and `0xa6` bytes. The stores at `0x5a522d`,
+  `0x5a52d0`, and `0x5a52e8` copy `+4`, `+8`, and `+0xc` together; that object is a string.
 - **VERIFIED:** `0x5e1fe0` inserts one 20-byte record. `0x5e2310` copies `[source+0x10]` to
   `[dest+0x10]` at `0x5e2457`. `0x5e0a40`, slot 0 of vtable `0x7d27ac`, stores the `__RTDynamicCast`
   return of `.?AVX_LevelDBMaterialCategory@@` (`0x8876d0`) at that offset and passes the record to
@@ -521,5 +529,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. `[importPolygon+8]` is the pointer whose `+4` begins the 25-byte records. Read what is stored there before naming that array. The int at `+0xc` is the base added to the corner number, not the vertex index. The int at `+0x10` is the corner count, and it is not fixed at 3. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, `0x5f22c0`, `0x5f1cb0`, `0x5a70a0`, or `0x5f19b0`.
+1. `[importPolygon+8]` is the address of the import static mesh container's vector at `+0x30`. The 25-byte records begin at its `+4`, and the first dword is the vertex index. Read the dword at record `+4` by reading `0x5b3c10`, which receives the address `0x5f19d0` returns. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, `0x5f22c0`, `0x5f1cb0`, `0x5a70a0`, `0x5f19b0`, `0x5f1930`, `0x5f2250`, `0x5f22b0`, `0x5ac930`, or `0x5f37e0`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
