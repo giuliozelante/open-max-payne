@@ -170,12 +170,12 @@ records what is read so far and where the reading goes next.
   does not call `0x6954f0` or `0x63fc40`. It divides a 40-byte container by 40 and, when the count is not zero,
   shrinks it through `0x5cac20` and `0x5c84c0`. At this call the container is the global `0x8b3b88`. The caller
   ignores the count and calls `0x64b660`.
+- **VERIFIED:** `0x4f84f0` writes a 3×4. It copies `other+0x30` (`0x4f8601`) and multiplies each of its three rows by the 3×3 of `0x63fc40`'s third argument (`0x4f865f`, three passes). The translation it writes is that argument's `+0x24` (`0x4f870c`). `0x43dfc0` returns the identity at `0x8b82e0` (`1,0,0 / 0,1,0 / 0,0,1`); `0x4f84f0` copies it onto the destination and then replaces it with this product (`0x4f87f8`).
 - **UNKNOWN:** which call enters `X_Character` slot 25 (`0x6954f0`) while Max moves. The move's object is the
-  crosshair subobject, and that slot is a different function. What `0x4f84f0` does to `other+0x30` before writing
-  the 3×4 is not named. `0x64db90` is not called from the flag-0 move.
+  crosshair subobject, and that slot is a different function. `0x64db90` is not called from the flag-0 move.
 
 ## Next
 
 1. Find a caller of `X_Character` slot 25 (`0x6954f0`). The move's slot 25 is `0x64b4f0`, and it does not build the
-   plane. Name the 3×4 that `0x4f84f0` writes.
+   plane.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
