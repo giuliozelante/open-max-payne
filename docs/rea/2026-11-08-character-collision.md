@@ -469,6 +469,14 @@ records what is read so far and where the reading goes next.
   `0x5a7185` adds that count minus 2 to `esi`. `0x5ad380` inserts the two dwords into the container at
   `0x8b02a8`, and `0x5b4670` copies them onto the element. The other path stores -1 at `0x8b0290`
   (`0x5a718b`) and does not advance `esi`.
+- **VERIFIED:** `0x64db90` returns 0 at `0x64dd4f` when the product of two dots is ordered and greater than
+  or equal to the negative `FLT_MIN` at `0x7d4ec8` (`0x80800000`). The normal is the cross product of
+  `(second stack argument - first)` and `(third stack argument - first)`. The dots are that normal with
+  `ecx - first` and with `(ecx - first) + edx`. The only direct caller is `0x698836`, inside `0x698130`.
+  `0x709aa8` is the projectile caller, in `0x7097d0`. The other caller is `0x6d921d`, in `0x6d8be0`.
+  The dword at `0x7d7480` is `0x6d8be0`, slot 31 of the crosshair vtable `0x7d7404`. No direct call
+  targets `0x6d8be0`. No direct-call chain from the character update `0x696f60` reaches `0x698130`,
+  and none of the functions that chain reaches contains `call [reg+0x7c]`.
 - **VERIFIED:** `0x5e1fe0` inserts one 20-byte record. `0x5e2310` copies `[source+0x10]` to
   `[dest+0x10]` at `0x5e2457`. `0x5e0a40`, slot 0 of vtable `0x7d27ac`, stores the `__RTDynamicCast`
   return of `.?AVX_LevelDBMaterialCategory@@` (`0x8876d0`) at that offset and passes the record to
@@ -555,4 +563,4 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The 8-byte record's first dword is the running sum of (corner count - 2), or -1. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, `0x5f22c0`, `0x5f1cb0`, `0x5a70a0`, `0x5f19b0`, `0x5f1930`, `0x5f2250`, `0x5f22b0`, `0x5ac930`, `0x5f37e0`, `0x5f19d0`, `0x5b3c10`, `0x5ada30`, `0x5adb50`, `0x5f19f0`, `0x5f1ae0`, `0x5acfc0`, `0x5ae3c0`, `0x5b09c0`, `0x5acfa0`, `0x5abf40`, `0x5f1a10`, `0x5c3eb0`, `0x5ad380`, `0x5aea80`, `0x5b0e80`,   `0x5b4670`, or `0x65a2e0`.
+1. `0x696f60` returns at `0x697270`. That return compares the float at `0x8b49b8` with `FLT_MAX` (`0x7d4f6c`) and the pointer at `0x8b4954` with the second stack argument. Read the writers of those two. Do not reopen `0x64db90`, `0x698130`, `0x6d8be0`, `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, `0x639bd0`, `0x747810`, `0x63ce30`, `0x76f96a`, `0x5f2be0`, `0x63d9f0`, `0x5644a0`, `0x63a480`, `0x5ca660`, `0x542130`, `0x44ed00`, `0x5e57f0`, `0x5cb8d0`, `0x5f5ee0`, `0x5e7ae0`, `0x5e0a40`, `0x5ebae0`, `0x5b60a0`, `0x5f4a10`, `0x5f2f70`, `0x5f1e40`, `0x5f22c0`, `0x5f1cb0`, `0x5a70a0`, `0x5f19b0`, `0x5f1930`, `0x5f2250`, `0x5f22b0`, `0x5ac930`, `0x5f37e0`, `0x5f19d0`, `0x5b3c10`, `0x5ada30`, `0x5adb50`, `0x5f19f0`, `0x5f1ae0`, `0x5acfc0`, `0x5ae3c0`, `0x5b09c0`, `0x5acfa0`, `0x5abf40`, `0x5f1a10`, `0x5c3eb0`, `0x5ad380`, `0x5aea80`, `0x5b0e80`, `0x5b4670`, or `0x65a2e0`.
