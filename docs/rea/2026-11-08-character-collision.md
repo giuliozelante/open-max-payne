@@ -145,7 +145,10 @@ records what is read so far and where the reading goes next.
   that float is greater than `0.02` (`0x7d4e04`, compare at `0x640afa`, jump at `0x640b05`).
 - **VERIFIED:** that float is a length minus two fields. The length is the sum of squares of
   `[ebp-0x94] - [ebp-0x4c]`, passed through the same `1.5` / `0.5` table iteration the sight test uses on a distance
-  (`0x640a60`). The two subtracted floats are `[this+0x12c]` and `[other+0x12c]`, loaded by `0x658b50` at `0x63fdc8`
+  (`0x640a60`). `[ebp-0x94]` is argument0 `+0x24` plus `this+0x130` rotated by the 3×3 at argument0 (`0x6406b5`,
+  from `[ebp-0x40] + [ebp-0x34]`). `[ebp-0x4c]` is the translation of the 3×4 that `0x4f84f0` writes from
+  `other+0x30`, minus `other+0x130` rotated by the 3×3 at `other+0x30` (`0x640063`). `0x63e070` is the address of
+  `+0x130`. The two subtracted floats are `[this+0x12c]` and `[other+0x12c]`, loaded by `0x658b50` at `0x63fdc8`
   and `0x63fdd2` and still in `[ebp+0xc]` and `[ebp-0x98]` on this path. `0x658b80` is what writes `+0x12c`. The
   crosshair constructor passes `0.05` (`0x3d4ccccd`) into that writer. An earlier length in the same function is
   rejected when it is greater than the sum of those two fields plus `0.02` (`0x63fca5`, compare at `0x63fdb8`).
@@ -168,11 +171,11 @@ records what is read so far and where the reading goes next.
   shrinks it through `0x5cac20` and `0x5c84c0`. At this call the container is the global `0x8b3b88`. The caller
   ignores the count and calls `0x64b660`.
 - **UNKNOWN:** which call enters `X_Character` slot 25 (`0x6954f0`) while Max moves. The move's object is the
-  crosshair subobject, and that slot is a different function. The two vectors subtracted before `0x640af7` are not
-  named beyond those stack slots. `0x64db90` is not called from the flag-0 move.
+  crosshair subobject, and that slot is a different function. What `0x4f84f0` does to `other+0x30` before writing
+  the 3×4 is not named. `0x64db90` is not called from the flag-0 move.
 
 ## Next
 
 1. Find a caller of `X_Character` slot 25 (`0x6954f0`). The move's slot 25 is `0x64b4f0`, and it does not build the
-   plane. Name the two vectors at `[ebp-0x94]` and `[ebp-0x4c]`.
+   plane. Name the 3×4 that `0x4f84f0` writes.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
