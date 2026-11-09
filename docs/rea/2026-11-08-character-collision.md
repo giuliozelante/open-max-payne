@@ -297,6 +297,10 @@ records what is read so far and where the reading goes next.
   (or `0x447ef4`) stores the new end at `[container+0xc]` and the new begin at `[container+8]`.
   When a slot remains, `0x447f57` writes the pointer at the current end and `0x447f73` adds 4 to
   `[container+0xc]`. `0x639bd0` zeroes the new object's `[this+0x10]` and `[this+0x14]`.
+- **VERIFIED:** `0x639bd0` does not store `[this+8]`. It writes vtable `0x7d4d10`,
+  `X_LevelRuntimeRoom`, then calls `0x639ee0`. `0x639f43` stores the second argument at `[this+4]`
+  and `0x639f46` stores the first argument at `[this+8]`. At the call from `0x6561ea` the first
+  argument is the return of `0x76f96a` and the second is the container.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -377,5 +381,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The pointer array is written by `0x447dd0`, called from `0x656258`. The inserted object is the `0xe0`-byte return of `0x639bd0`, whose constructor zeroes `+0x10` and `+0x14`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, or `0x447dd0`. Next, read the rest of `0x639bd0` for a store of a pointer at `[this+8]`. The copies at `this+0x5c` and `this+0x80` are not that field.
+1. `[element+8]` is stored at `0x639f46`. It is the return of `0x76f96a`, and `[element+4]` is the container. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, `0x6564c0`, `0x447dd0`, or `0x639bd0`. Next, `0x639f73` writes `[room+0x14]` after `0x747810`. Read that call before treating it as the child-array append.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
