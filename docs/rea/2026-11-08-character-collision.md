@@ -285,6 +285,13 @@ records what is read so far and where the reading goes next.
   The decal slot caller is `0x454676`, in `MaxPayne_GameMode` slot 25 (`0x454230`, vtable `0x7ccec4`).
   `ecx` is the decal at `[GameMode+0x9b]`. Argument 0 is `Chunk::getMemoryFile`. Argument 1 is the
   address `GameMode+0x13d` (`0x496bc0` on `GameMode+0x104`). That call does not write the container.
+- **VERIFIED:** `0x655ea0`, called from `0x493bf6` on `GameMode+0x104`, zeroes `[this+8]`, `[this+0xc]`, and
+  `[this+0x10]`. `0x656620` then sets `[this]` to 0 and `[this+0xc]` equal to `[this+8]`. `0x655f00` frees
+  `[this+8]` and zeroes the same three fields. `0x6564c0` pops one pointer when the byte at `+0x24` is
+  nonzero: it calls slot 0 of `[[end]-4]` with argument 1 and moves the end back by 4. `0x45008e` calls
+  `0x493f80` with `ecx = GameMode+0x104`. That calls `0x655f90` on `this+0x39`, stores its argument at
+  `[container]`, sets the byte at `+0x24` to 1, and walks objects whose name is read by `0x5e3b20`.
+  The store into the pointer array is later in `0x655f90`.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -365,5 +372,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The writer of the pointer array is still unread. The container passed to the decal slot is the object embedded at `MaxPayne_GameMode+0x13d`. `0x454676` only reads it. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, or `0x668937`. Next, find who writes the pointer array at that embedded object (`begin` at `+8`, `end` at `+0xc`).
+1. The writer of the pointer array is still unread. `0x655f90` runs on the embedded container and walks the named objects, but the store is later in that function. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, `0x668937`, `0x655ea0`, or `0x6564c0`. Next, continue `0x655f90` from `0x6560e2` and find the store of a pointer at `[end]` and the add of 4 to `[container+0xc]`. The call at `0x65613f` writes a different vector, the one at `[eax+0x14]`.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
