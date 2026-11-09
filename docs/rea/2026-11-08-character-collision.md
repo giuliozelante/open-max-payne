@@ -275,7 +275,12 @@ records what is read so far and where the reading goes next.
   At `0x72fe85` it calls `0x6423e0` with `ecx = this+0x140`. The two stack values are the
   `R_MemoryFile` from `Chunk::getMemoryFile` (`0x7caba0`) and this function's first argument.
   `0x6423e0` passes its second stack argument to `0x656680`.
-  `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
+- **VERIFIED:** `[esp+0xc8]` in `0x65bf80` is that function's second argument. `0x65bf80` is slot 5 of
+  `X_DecalImplementation` (vtable `0x7d5178`, COL `0x7f4948`, offset 0, `ret 0x8`). It is the container
+  passed to `0x656680` at `0x65c051`, and the same pointer goes to `0x667d00` (`ecx = this+0x22`) and
+  `0x58f860` (`ecx = this+4`). None of the three writes `[container+8]` or `[container+0x14]`.
+  `0x667d00` increments the dword at `[this+0xc]` of the subobject and stores a node at `[this+4]`.
+- **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
 - **VERIFIED:** `0x6437e0` then decides `0x64f100`. The path that finds a component equal to `FLT_MAX` (`0x7d4f6c`)
@@ -355,5 +360,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The writer of the pointer array is still unread. `0x72fdb0` clears two bytes and locks a triangle mesh; it is not the element `0x656600` returns. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, or `0x72fdb0`. Next, the container at the `0x65c051` lookup is the dword at `[esp+0xc8]` of the function after `0x65bf7e`. Find which argument that is and who fills its array at `+8`.
+1. The writer of the pointer array is still unread. The container is argument 1 of `X_DecalImplementation` slot 5, and that function only looks names up. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, or `0x65bf80`. Next, find the caller of slot 5 (`call [vtable+0x14]`, two arguments) on an object whose vtable is `0x7d5178`. The constructor is `0x65b950`, called from `0x421244`. Check the two-push call at `0x668937` (`ecx = [esi+0x16]`) before a wider scan.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
