@@ -187,6 +187,18 @@ records what is read so far and where the reading goes next.
   an inner 0 into 1 and an inner 1 into 2. An inner 3 or 4 is returned unchanged when `0x5f70e0` returns 0, and
   becomes 0 when `0x5f70e0` returns non-zero. `0x5f70e0` returns 1 at `0x5f7154` when the absolute dot of
   `(argument - this+0x30)` with `this+0x24` is greater than `0.001` (`0x7d3050`). It returns 0 at `0x5f7337`.
+- **VERIFIED:** from the call in `0x646020`, slot 23's `[ebp+0x10]` and `[ebp+0x14]` are the same position pointer.
+  `0x5f2c20` is `this+0x18` and `0x5f2c10` is `this+0x8`, so `0x5bf8e0` receives `child+0x88`, `child+0x18`, the
+  dword at `child+0xc`, that position pointer twice, the float at `this+0x12c`, and the rotated `this+0x130`.
+  `0x5bf1d0` copies `child+0x18` to `0x8b0878+0x24`. `0x5bf1f0` copies the vec3 at `[child+0xc]` to
+  `0x8b0878+0x30`. `0x8b0940` is the rotated `this+0x130`, negated at `0x5bfd33` when its dot with `0x8b0878+0x24`
+  is negative. The float's stack slot is overwritten at `0x5bfb26` with `1.05` times the float plus `0.025`
+  (`0x7d20c0`, `0x7d20c4`). `0x8b0910` is `child+0x18` multiplied by that sum. At `0x5bfd73` both point globals
+  are that position minus `0x8b0940`, and then minus `0x8b0910`. `0x5ca330` is called with `0x8b0910` and each
+  point, and its return is passed with `0x8b0878` to `0x5bafa0`. A non-zero `al` jumps to the return of 1
+  (`0x5bfe01`, `0x5bfe2a`). At `0x5bfe76` both point globals are overwritten
+  with the position plus `0x8b0940`, and that is what `0x5b9f00` tests. The two points are equal on this call, so
+  the two dots are equal.
 - **VERIFIED:** `0x64dac0` writes its argument byte to `+0xf0` and then `0x64daf0` zeroes the three floats at `+0xb1`.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
@@ -268,5 +280,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read the stores of the two points at `0x5bfd73` and `0x5bfe76`, and of `0x8b0878+0x24`. Those are the inputs whose signs `0x5b9f00` tests.
+1. Read `0x5bafa0`. It is called with the plane and the shifted position before `0x5b9f00`, and a non-zero `al` makes `0x5bf8e0` return 1.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
