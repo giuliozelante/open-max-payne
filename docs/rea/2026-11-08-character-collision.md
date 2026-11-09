@@ -280,6 +280,11 @@ records what is read so far and where the reading goes next.
   passed to `0x656680` at `0x65c051`, and the same pointer goes to `0x667d00` (`ecx = this+0x22`) and
   `0x58f860` (`ecx = this+4`). None of the three writes `[container+8]` or `[container+0x14]`.
   `0x667d00` increments the dword at `[this+0xc]` of the subobject and stores a node at `[this+4]`.
+- **VERIFIED:** `0x668937` does not call that slot. Its `this` is the decal base at `+0x22`, and the call
+  uses the vtable of `[this+0x16]`, an `X_ParticleSystemImplementation` (`0x7d57e8`, slot 5 is `0x673d90`).
+  The decal slot caller is `0x454676`, in `MaxPayne_GameMode` slot 25 (`0x454230`, vtable `0x7ccec4`).
+  `ecx` is the decal at `[GameMode+0x9b]`. Argument 0 is `Chunk::getMemoryFile`. Argument 1 is the
+  address `GameMode+0x13d` (`0x496bc0` on `GameMode+0x104`). That call does not write the container.
 - **VERIFIED:** `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -360,5 +365,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The writer of the pointer array is still unread. The container is argument 1 of `X_DecalImplementation` slot 5, and that function only looks names up. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, or `0x65bf80`. Next, find the caller of slot 5 (`call [vtable+0x14]`, two arguments) on an object whose vtable is `0x7d5178`. The constructor is `0x65b950`, called from `0x421244`. Check the two-push call at `0x668937` (`ecx = [esi+0x16]`) before a wider scan.
+1. The writer of the pointer array is still unread. The container passed to the decal slot is the object embedded at `MaxPayne_GameMode+0x13d`. `0x454676` only reads it. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, `0x65f680`, `0x72fdb0`, `0x65bf80`, or `0x668937`. Next, find who writes the pointer array at that embedded object (`begin` at `+8`, `end` at `+0xc`).
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
