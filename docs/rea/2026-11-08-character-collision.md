@@ -264,6 +264,11 @@ records what is read so far and where the reading goes next.
   it calls `0x642d40` on `[ebp-0x1c]`, then `0x63a280` on that result. `0x63a280` calls `0x76f96a`, reads
   `[return+0x184]`, and returns `0x656600` of the container at `[this+4]` for that index. `0x683915` and
   `0x688047` write 0 to `+0x6d8`. None of these stores writes `[element+8]` or advances `[element+0x14]`.
+- **Ruled out:** no instruction loads `[reg+0xc]`, adds 4, and stores that register back. `0x5dad80`,
+  the usual call on `[reg+8]`, swaps `[ecx]` with `[edx]`. At `0x65c051` a lookup is followed by an
+  allocation of `0x29b` bytes and `0x72f7e0`. `0x65f680` then inserts into the tree at `edi+0xdb`; it
+  compares keys at `node+0xc` with the sentinel `0x8b3f58`. `0x65c110` writes the new object to
+  `[node+0x10]`. That is a tree node's value, not the pointer array.
   `0x64db30` saves the byte, clears it, and calls `0x64be70` with the vector at `+0xb1` only when that vector's sum of
   squares is greater than `FLT_MIN` (`0x7cefb8`, compare at `0x64db5b`). It then zeroes the vector and restores the
   byte. `0x6434c2` writes 0 to the byte. `0x642285` copies the byte from another object.
@@ -344,5 +349,5 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. The writer of the pointer array is still unread. `0x63a280` indexes the container at `[element+4]` and does not write `[element+8]` or `[element+0x14]`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, or `0x63a280`. Next, find the function that pushes an element into the container `0x656600` indexes. That push is next to the constructor that stores `[element+8]` and advances `[element+0x14]`.
+1. The writer of the pointer array is still unread. `0x65c110` writes a tree node's value, and nothing inlines an add of 4 to `[reg+0xc]`. Do not reopen `0x438ef5`, `0x43940e`, `0x40da80`, `0x64ffc0`, `0x656770`, `0x5e3490`, `0x63a280`, or `0x65f680`. Next, read `0x72fdb0`. It is called on the new `0x29b`-byte object with the name container as an argument and it reads the file.
 2. Read `0x64db90` only together with a caller that the character update reaches. The projectile caller is not that.
