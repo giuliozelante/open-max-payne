@@ -24,4 +24,4 @@ wgpu = "30.0.1"
 pollster = "1.0.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 winit = "0.30.13"
-rodio = { version = "0.20", default-features = false, features = ["symphonia-wav"] }
+rodio = { version = "0.23", default-features = false, features = ["symphonia-wav"] }
