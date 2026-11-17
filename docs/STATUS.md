@@ -70,7 +70,8 @@ Tutorial.
 ## What to do next, in order
 
 1. **Collision (approved, #204).** Walls now use the skin's capsule radius and top, and the distance from the body's
-   segment to each triangle. Still to do: sliding, floors from the same test, and removing the escape rules. The
+   segment to each triangle, and a blocked move slides along what it meets. Still to do: floors from the same test,
+   the exe's own slide response, and removing the escape rules. The
    static search for slot 25's caller is parked; a winedbg breakpoint on `0x6954f0` while Max walks in retail would
    show it. Done when the Tutorial's secret-room wall and the first alley's trash containers stop Max in a capture.
 2. **Enemies, phase 2** ([spec](specs/2026-11-06-health-and-enemy-ai.md)). Read the range and cone gates before the
@@ -86,8 +87,8 @@ Tutorial.
 ## Engine: known gaps
 
 - Enemies do not perceive, aim, shoot or follow `.ai` paths (item 2 above).
-- Collision: no sliding along walls, floors are a separate pass, and the body's low end sits 0.35 m above the feet
-  (a guess that keeps stairs steppable) instead of the capsule's round bottom (item 1).
+- Collision: the slide is a hypothesis (push out to the radius), floors are a separate pass, and the body's low end
+  sits 0.35 m above the feet (a guess that keeps stairs steppable) instead of the capsule's round bottom (item 1).
 - `[Target]` hit zones are not applied, and enemy capsule values are still constants.
 - Bullet camera and its shake are missing.
 - The chase camera clips into walls and into Max.
