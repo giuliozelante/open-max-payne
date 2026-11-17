@@ -99,10 +99,23 @@ The conditions read three flags of the AI object: `0x4f6260` returns `+0x3ad`, `
     (`0x531290`).
   - Without one, a perceived AI counts `+0x3b0` down by `dt`. At zero `+0x3af` clears and `0x4f7470(0)` zeroes
     `+0x3b4`. `0x4f7470(1)` instead loads `+0x3b4` from the same skin field.
-- **VERIFIED:** the skin parser copies its `[AI]` keys into the skin record (`0x5300f1`-`0x530149`, from globals
-  the key table fills): `VisualPerceivingRadius` to `+0xc1`, `GeneralPerceivingRadius` to `+0xc5`,
-  `ActivationReactionTime` to `+0xcd`, `EnemyInterestTime` to `+0xdd`. So the "perceived" memory lasts
-  `EnemyInterestTime` seconds after the last stimulus.
+- **VERIFIED:** when the `AI` section (`0x87d4f8`) has a count above zero (`0x5300a4`), `0x52fc80` copies the
+  key globals into the skin record. `AimingSpeed` lands at `+0xb5`, `TurnLeftRightSpeed` at `+0xb9`,
+  `AimUpDownSpeed` at `+0xbd`, `VisualPerceivingRadius` at `+0xc1`, `GeneralPerceivingRadius` at `+0xc5`,
+  `ShootingCone` at `+0xc9`, `ActivationReactionTime` at `+0xcd`, `PerceivingGroupOneRadius` at `+0xd1`,
+  `PerceivingGroupTwoRadius` at `+0xd5`, `PerceivingGroupThreeRadius` at `+0xd9`, `EnemyInterestTime` at `+0xdd`
+  and `ActivateOtherCharactersRadius` at `+0xe1`. The dword at `+0xb1` is copied from `0x8ad728`, which has no
+  key string in `.text`. The "perceived" memory lasts `EnemyInterestTime` seconds after the last stimulus.
 - **HYPOTHESIS:** `0x6d73b0` is the AI's alert reaction, and `+0x3b4` is a cool-down before it can alert again.
 
-Not read yet: what counts as a stimulus (sight, `ShotHeardDistance`, `NearDistance`), and who calls `0x4f6df0`.
+- **VERIFIED:** `0x4f6df0` has three callers. `0x4f6c9a` passes the OR of `+0x3ad` and a local byte, and the float
+  at the caller's argument `+0x4` (`0x5e53d0` is `fld [ecx+4]; ret`). `0x4feb3c` passes stimulus `1` and the value
+  in `ebp`. `0x4fec9a` passes stimulus `1` and `0`, with `ecx` set to `this+0x157`.
+
+- **VERIFIED:** `0x4f62a0` is the sight update. `0x4f18a0` writes a vector from the two characters at `+0x3d8` and `+0x3dc` when `0x642d40` returns the same value for both. The sum of squares of that vector is turned into a length by the `1.5` / `0.5` table iteration (`0x3fc00000`, `0x3f000000`) and stored at `[ebp-0x1c]`.
+- **VERIFIED:** `0x6841c5` copies `VisualPerceivingRadius` (`skin+0xc1`, getter `0x531220`) to `+0x9e` through `0x6d72a0`, and `GeneralPerceivingRadius` (`skin+0xc5`, `0x531230`) to `+0xa2` through `0x6d72c0`. The sight test reads those with `0x6d7290` and `0x6d72b0`.
+- **VERIFIED:** when `0x4f17b0` returns nonzero, a radius greater than the length sets the local byte at `[ebp-0x74]`. The radius is `PerceivingGroupOneRadius` (`+0xd1`) when the target's byte `+0x2` is set (`0x6d73e0`), else group two (`+0xd5`, byte `+0x3`), else group three (`+0xd9`, byte `+0x4` via `0x421800`), else `+0xa2` when `+0x3ae` is clear. `0x4f17b0` returns 1 when `0x642d40` matches for the two characters.
+- **VERIFIED:** the line-of-sight block runs only after `+0x3b8` has counted down to 0, `0x4f17b0` was nonzero, the dot of the two vectors is greater than 0, and `+0x9e` is greater than the length. `ShootingCone` (`+0xc9`) is not loaded in `0x4f62a0`. The local byte at `0x4f6c80` is `[ebp-0x74]`, OR-ed with `+0x3ad`, and passed to `0x4f6df0` as the stimulus.
+- **VERIFIED:** `0x684249` copies `ShootingCone` to `+0xaa` through `0x6d7320`. `0x4ff5e8` loads it, multiplies by `0.5` (`0x7cbdd4`) and by `π/180` (`0x7cfb04`), and passes that to `0x4f2fc0` as the half-angle. When the angle is not 0, `0x4f2fc0` rotates the horizontal pair at `[ebp-0x2c]` and `[ebp-0x24]` by the negated angle: `x' = x·cos + z·sin`, `z' = z·cos − x·sin` (`0x4f3037`-`0x4f305f`). The cosine of the result against the horizontal target is compared at `0x4f31f6`. Above `0.9999` (`0x7cfc88`) the function returns 1. At or below 0 it returns 0. Otherwise it returns 1 only when the half-angle is greater than `_CIacos` of that cosine (`0x4f3216`).
+
+- **VERIFIED:** when the two `0x642d40` results differ, `0x4f18a0` returns 0 unless `0x63bfb0` returns nonzero. When it does, the position of the character at `+0x3d8` is multiplied by the 3×4 from `0x43e060` and the position of `+0x3dc` is subtracted (`0x4f1ab6`-`0x4f1b65`). The function then returns 1.
