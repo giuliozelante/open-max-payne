@@ -2038,7 +2038,7 @@ fn can_step(
 
 /// The static walls near `(x, z)`, each as its signed distance from the body's centre.
 fn wall_distances(scene: &LdbScene, x: f32, y: f32, z: f32, reach: f32) -> Vec<f32> {
-    let (body_min_y, body_max_y) = (y - EYE_HEIGHT + 0.35, y - 0.10);
+    let (body_min_y, body_max_y, _) = body_segment(scene, y);
     let mut out = Vec::new();
     for sm in &scene.static_meshes {
         let o = sm.world_origin;
@@ -2079,13 +2079,13 @@ fn wall_distances(scene: &LdbScene, x: f32, y: f32, z: f32, reach: f32) -> Vec<f
 
 /// A step from `from` to `(wx, wz)` that ends closer to a wall it touches, or on its far side.
 fn presses_into_wall(scene: &LdbScene, from: [f32; 3], wx: f32, wz: f32) -> bool {
-    const RADIUS: f32 = 0.38;
+    let radius = scene.player_capsule[0];
     let [x, y, z] = from;
-    let reach = RADIUS + (wx - x).hypot(wz - z);
+    let reach = radius + (wx - x).hypot(wz - z);
     let before = wall_distances(scene, x, y, z, reach);
     let after = wall_distances(scene, wx, y, wz, reach);
     before.iter().zip(&after).any(|(&a, &b)| {
-        if a.is_nan() || b.is_nan() || a.abs() >= RADIUS {
+        if a.is_nan() || b.is_nan() || a.abs() >= radius {
             return false;
         }
         a.signum() != b.signum() || b.abs() < a.abs() - 1e-4
@@ -2151,10 +2151,17 @@ fn find_floor_y(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> Option<f32> {
     best
 }
 
+/// The body as a vertical segment from `wy` (eye height): its low and high ends, and the radius
+/// around it. Radius and top are the skin's `CapsuleRadius` and `CapsuleTop`. HYPOTHESIS: the
+/// low end sits 0.35 m above the feet so stair risers stay steppable until floors use this test.
+fn body_segment(scene: &LdbScene, wy: f32) -> (f32, f32, f32) {
+    let [radius, top] = scene.player_capsule;
+    let feet = wy - EYE_HEIGHT;
+    (feet + 0.35, feet + top, radius)
+}
+
 fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32, wz: f32) -> bool {
-    let body_min_y = wy - EYE_HEIGHT + 0.35;
-    let body_max_y = wy - 0.10;
-    let radius = 0.38f32;
+    let (body_min_y, body_max_y, radius) = body_segment(scene, wy);
     for sm in &scene.static_meshes {
         let ox = sm.world_origin[0];
         let oy = sm.world_origin[1];
@@ -2193,13 +2200,9 @@ fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32
             {
                 continue;
             }
-            let v0 = [
-                poly.vertices[0].pos[0] + ox,
-                poly.vertices[0].pos[1] + oy,
-                poly.vertices[0].pos[2] + oz,
-            ];
-            let plane_dist = (wx - v0[0]) * poly.normal[0] + (wz - v0[2]) * poly.normal[2];
-            if plane_dist.abs() < radius {
+            let world = poly_world(&poly.vertices, sm.world_origin);
+            let (lo, hi) = ([wx, body_min_y, wz], [wx, body_max_y, wz]);
+            if segment_poly_gap(&world, poly.normal, lo, hi) < radius {
                 return true;
             }
         }
@@ -2215,9 +2218,7 @@ fn dynamic_wall_hit(
     wy: f32,
     wz: f32,
 ) -> Option<usize> {
-    let body_min_y = wy - EYE_HEIGHT + 0.35;
-    let body_max_y = wy - 0.10;
-    let radius = 0.38f32;
+    let (body_min_y, body_max_y, radius) = body_segment(scene, wy);
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
         if dm.hidden
             || !dm.collisions
@@ -2267,8 +2268,8 @@ fn dynamic_wall_hit(
             {
                 continue;
             }
-            let plane_dist = (wx - world[0][0]) * n[0] + (wz - world[0][2]) * n[2];
-            if plane_dist.abs() < radius {
+            let (lo, hi) = ([wx, body_min_y, wz], [wx, body_max_y, wz]);
+            if segment_poly_gap(&world, n, lo, hi) < radius {
                 return Some(idx);
             }
         }
@@ -2571,6 +2572,61 @@ fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
 
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+/// Closest distance between segments `p1..q1` and `p2..q2` (Ericson, Real-Time Collision
+/// Detection 5.1.9).
+fn segment_segment_gap(p1: [f32; 3], q1: [f32; 3], p2: [f32; 3], q2: [f32; 3]) -> f32 {
+    const EPS: f32 = 1e-9;
+    let (d1, d2, r) = (sub3(q1, p1), sub3(q2, p2), sub3(p1, p2));
+    let (a, e, f) = (dot3(d1, d1), dot3(d2, d2), dot3(d2, r));
+    let (s, t) = if a <= EPS && e <= EPS {
+        (0.0, 0.0)
+    } else if a <= EPS {
+        (0.0, (f / e).clamp(0.0, 1.0))
+    } else {
+        let c = dot3(d1, r);
+        if e <= EPS {
+            ((-c / a).clamp(0.0, 1.0), 0.0)
+        } else {
+            let b = dot3(d1, d2);
+            let denom = a * e - b * b;
+            let s = if denom > EPS {
+                ((b * f - c * e) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let t = (b * s + f) / e;
+            if t < 0.0 {
+                ((-c / a).clamp(0.0, 1.0), 0.0)
+            } else if t > 1.0 {
+                (((b - c) / a).clamp(0.0, 1.0), 1.0)
+            } else {
+                (s, t)
+            }
+        }
+    };
+    let c1 = [0, 1, 2].map(|k| p1[k] + d1[k] * s);
+    let c2 = [0, 1, 2].map(|k| p2[k] + d2[k] * t);
+    dot3(sub3(c1, c2), sub3(c1, c2)).sqrt()
+}
+
+/// Closest distance between segment `a..b` and the convex polygon `world` with unit normal `n`.
+fn segment_poly_gap(world: &[[f32; 3]], n: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
+    let (da, db) = (dot3(n, sub3(a, world[0])), dot3(n, sub3(b, world[0])));
+    if da * db <= 0.0 && da != db {
+        let t = da / (da - db);
+        if inside_convex(world, n, [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t)) {
+            return 0.0;
+        }
+    }
+    let faces = [(a, da), (b, db)]
+        .into_iter()
+        .filter(|&(p, d)| inside_convex(world, n, [0, 1, 2].map(|k| p[k] - n[k] * d)))
+        .map(|(_, d)| d.abs());
+    let edges =
+        (0..world.len()).map(|i| segment_segment_gap(a, b, world[i], world[(i + 1) % world.len()]));
+    faces.chain(edges).fold(f32::INFINITY, f32::min)
 }
 
 fn poly_world(vertices: &[SceneVertex], o: [f32; 3]) -> Vec<[f32; 3]> {
@@ -6710,6 +6766,60 @@ mod tests {
         assert!(!can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.0, 5.1));
         // Sliding along it at the same depth is allowed, or a body on a railing stays stuck.
         assert!(can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.3, 4.8));
+    }
+
+    /// One static quad between two `[x, y]` points, spanning z -1..1.
+    fn one_static_poly(corners: &[[f32; 2]], normal: [f32; 3]) -> LdbScene {
+        let mut scene = empty_scene();
+        let vertices = corners
+            .iter()
+            .flat_map(|&[x, y]| [vert([x, y, -1.0]), vert([x, y, 1.0])])
+            .collect::<Vec<_>>();
+        // Order the two edges into a quad: a(-1), a(+1), b(+1), b(-1).
+        let vertices = vec![vertices[0], vertices[1], vertices[3], vertices[2]];
+        scene.static_meshes.push(crate::scene::SceneStaticMesh {
+            mesh_id: 0,
+            room_id: None,
+            world_origin: [0.0; 3],
+            polys: vec![ScenePoly {
+                vertices,
+                normal,
+                material_id: 7,
+                lightmap_id: -1,
+            }],
+        });
+        scene
+    }
+
+    #[test]
+    fn a_wall_leaning_over_the_body_stops_it_at_head_height() {
+        // A face from the floor at x = 0 up to x = 1 at 2.5 m, like a container's slanted side.
+        // At the capsule's top (1.95 m) the face is at x = 0.78, so a body at x = 1.2 is 0.42 m
+        // from it, inside the 0.48 m radius, though 1.11 m from vertex 0's height.
+        let len = (2.5f32 * 2.5 + 1.0).sqrt();
+        let scene = one_static_poly(&[[0.0, 0.0], [1.0, 2.5]], [2.5 / len, -1.0 / len, 0.0]);
+        let rooms = BTreeMap::new();
+        assert!(hits_wall(&scene, &rooms, 1.2, EYE_HEIGHT, 0.0));
+        assert!(!hits_wall(&scene, &rooms, 1.4, EYE_HEIGHT, 0.0));
+    }
+
+    #[test]
+    fn the_wall_gap_is_the_skin_capsule_radius() {
+        // `max_payne.txt` `CapsuleRadius 0.48`: a body 0.45 m from a wall touches it.
+        let scene = one_static_poly(&[[0.0, 0.0], [0.0, 3.0]], [1.0, 0.0, 0.0]);
+        let rooms = BTreeMap::new();
+        assert!(hits_wall(&scene, &rooms, 0.45, EYE_HEIGHT, 0.0));
+        assert!(!hits_wall(&scene, &rooms, 0.5, EYE_HEIGHT, 0.0));
+    }
+
+    #[test]
+    fn a_body_past_a_narrow_face_is_judged_by_its_edge_not_its_plane() {
+        // The face spans z -1..1 at x = 0. At (0.4, z 1.4) the body is 0.4 m from its plane but
+        // 0.57 m from its nearest edge, outside the 0.48 m radius.
+        let scene = one_static_poly(&[[0.0, 0.0], [0.0, 3.0]], [1.0, 0.0, 0.0]);
+        let rooms = BTreeMap::new();
+        assert!(!hits_wall(&scene, &rooms, 0.4, EYE_HEIGHT, 1.4));
+        assert!(hits_wall(&scene, &rooms, 0.4, EYE_HEIGHT, 1.2));
     }
 
     #[test]
