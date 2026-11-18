@@ -2026,7 +2026,7 @@ fn can_step(
     can_stand_at(scene, rooms, wx, y, wz)
         || (hits_wall(scene, rooms, x, y, z)
             && find_floor_y(scene, wx, y, wz).is_some()
-            && !presses_into_wall(scene, from, wx, wz))
+            && !presses_into_wall(scene, rooms, from, wx, wz))
 }
 
 /// Moves the body at `pos` by `(dx, dz)`, never off walkable floor. A blocked move keeps only
@@ -2065,60 +2065,73 @@ fn step_with_slide(
     }
 }
 
-/// The static walls near `(x, z)`, each as its signed distance from the body's centre.
-fn wall_distances(scene: &LdbScene, x: f32, y: f32, z: f32, reach: f32) -> Vec<f32> {
-    let (body_min_y, body_max_y, _) = body_segment(scene, y);
-    let mut out = Vec::new();
-    for sm in &scene.static_meshes {
-        let o = sm.world_origin;
-        for poly in &sm.polys {
-            if poly.normal[1].abs() > 0.45
-                || poly.vertices.len() < 3
-                || !blocks_character(scene, poly.material_id)
-            {
-                out.push(f32::NAN);
-                continue;
-            }
-            let world: Vec<[f32; 3]> = poly
-                .vertices
-                .iter()
-                .map(|v| [v.pos[0] + o[0], v.pos[1] + o[1], v.pos[2] + o[2]])
-                .collect();
-            let (lo, hi) = world
-                .iter()
-                .fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| {
-                    (
-                        std::array::from_fn(|k| lo[k].min(p[k])),
-                        std::array::from_fn(|k| hi[k].max(p[k])),
-                    )
-                });
-            let near = body_max_y >= lo[1]
-                && body_min_y <= hi[1]
-                && (lo[0] - reach..=hi[0] + reach).contains(&x)
-                && (lo[2] - reach..=hi[2] + reach).contains(&z);
-            out.push(if near {
-                (x - world[0][0]) * poly.normal[0] + (z - world[0][2]) * poly.normal[2]
-            } else {
-                f32::NAN
-            });
-        }
-    }
-    out
-}
-
-/// A step from `from` to `(wx, wz)` that ends closer to a wall it touches, or on its far side.
-fn presses_into_wall(scene: &LdbScene, from: [f32; 3], wx: f32, wz: f32) -> bool {
+/// A step from `from` to `(wx, wz)` that ends inside a wall's radius closer than it started, or
+/// whose path crosses a wall at the body's low end, middle or top.
+fn presses_into_wall(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    from: [f32; 3],
+    wx: f32,
+    wz: f32,
+) -> bool {
     let radius = scene.player_capsule[0];
     let [x, y, z] = from;
     let reach = radius + (wx - x).hypot(wz - z);
-    let before = wall_distances(scene, x, y, z, reach);
-    let after = wall_distances(scene, wx, y, wz, reach);
-    before.iter().zip(&after).any(|(&a, &b)| {
-        if a.is_nan() || b.is_nan() || a.abs() >= radius {
+    let (body_min_y, body_max_y, _) = body_segment(scene, y);
+    let presses = |world: &[[f32; 3]], n: [f32; 3]| {
+        let (min, max) = world
+            .iter()
+            .fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| {
+                (
+                    std::array::from_fn(|k| lo[k].min(p[k])),
+                    std::array::from_fn(|k| hi[k].max(p[k])),
+                )
+            });
+        let near = body_max_y >= min[1]
+            && body_min_y <= max[1]
+            && (min[0] - reach..=max[0] + reach).contains(&x)
+            && (min[2] - reach..=max[2] + reach).contains(&z);
+        if !near {
             return false;
         }
-        a.signum() != b.signum() || b.abs() < a.abs() - 1e-4
-    })
+        let gap = |px, pz| segment_poly_gap(world, n, [px, body_min_y, pz], [px, body_max_y, pz]).0;
+        let (before, after) = (gap(x, z), gap(wx, wz));
+        let crosses = [body_min_y, (body_min_y + body_max_y) / 2.0, body_max_y]
+            .iter()
+            .any(|&h| segment_poly_gap(world, n, [x, h, z], [wx, h, wz]).0 == 0.0);
+        crosses || (after < radius && after < before - 1e-4)
+    };
+    let static_hit = scene.static_meshes.iter().any(|sm| {
+        sm.polys.iter().any(|poly| {
+            poly.normal[1].abs() <= 0.45
+                && poly.vertices.len() >= 3
+                && blocks_character(scene, poly.material_id)
+                && presses(&poly_world(&poly.vertices, sm.world_origin), poly.normal)
+        })
+    });
+    static_hit
+        || scene.dynamic_meshes.iter().enumerate().any(|(idx, dm)| {
+            if dm.hidden
+                || !dm.collisions
+                || dm.name.contains("_Tip_")
+                || dm.name.ends_with("Start_FSM.DO")
+            {
+                return false;
+            }
+            let (xform, origin) = dynamic_world(scene, idx, rooms);
+            dm.polys.iter().any(|poly| {
+                let n = xform_dir(xform, poly.normal);
+                let world: Vec<[f32; 3]> = poly
+                    .vertices
+                    .iter()
+                    .map(|v| xform_point(xform, origin, v.pos))
+                    .collect();
+                n[1].abs() <= 0.45
+                    && world.len() >= 3
+                    && blocks_character(scene, poly.material_id)
+                    && presses(&world, n)
+            })
+        })
 }
 
 fn can_stand_at(
@@ -6819,6 +6832,15 @@ mod tests {
         assert!(can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.3, 4.8));
     }
 
+    #[test]
+    fn a_body_caught_in_a_wall_cannot_jump_across_it_in_one_long_step() {
+        // A 0.1 s frame at run speed moves 0.5 m: from 4.8 to 5.3 the body ends farther from
+        // the wall at z = 5 than it started, but on its far side.
+        let scene = floor_and_wall(1.65);
+        let rooms = BTreeMap::new();
+        assert!(!can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.0, 5.3));
+    }
+
     /// One static quad between two `[x, y]` points, spanning z -1..1.
     fn one_static_poly(corners: &[[f32; 2]], normal: [f32; 3]) -> LdbScene {
         let mut scene = empty_scene();
@@ -6914,6 +6936,38 @@ mod tests {
             pos = step_with_slide(&scene, &rooms, pos, -0.1, 0.0);
         }
         assert!((0.48..0.6).contains(&pos[0]), "{pos:?}");
+    }
+
+    #[test]
+    fn a_body_touching_a_dynamic_mesh_cannot_walk_into_it() {
+        // engine28: Max met the parked van's side and walked through it, out of the alley.
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(glass_quad(false));
+        let floor = ScenePoly {
+            vertices: [
+                [-5.0, 0.0, -5.0],
+                [5.0, 0.0, -5.0],
+                [5.0, 0.0, 5.0],
+                [-5.0, 0.0, 5.0],
+            ]
+            .map(vert)
+            .to_vec(),
+            normal: [0.0, 1.0, 0.0],
+            material_id: 7,
+            lightmap_id: -1,
+        };
+        scene.static_meshes.push(crate::scene::SceneStaticMesh {
+            mesh_id: 0,
+            room_id: None,
+            world_origin: [0.0; 3],
+            polys: vec![floor],
+        });
+        let rooms = BTreeMap::new();
+        let mut pos = [0.45, EYE_HEIGHT, 0.0];
+        for _ in 0..20 {
+            pos = step_with_slide(&scene, &rooms, pos, -0.1, 0.0);
+        }
+        assert!(pos[0] >= 0.45 - 1e-4, "{pos:?}");
     }
 
     #[test]
