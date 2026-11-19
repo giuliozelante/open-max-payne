@@ -2014,7 +2014,8 @@ fn frame_dt(elapsed: std::time::Duration) -> f32 {
 }
 
 /// Whether a body at `from` may go to `(wx, wz)`. One already caught in a wall, as after landing
-/// on a railing, may move along or away from it, but never deeper into or through it.
+/// on a railing, may move along or away from it, but never deeper into or through it. No step,
+/// however long, crosses a wall.
 fn can_step(
     scene: &LdbScene,
     rooms: &BTreeMap<i32, [f32; 3]>,
@@ -2023,10 +2024,9 @@ fn can_step(
     wz: f32,
 ) -> bool {
     let [x, y, z] = from;
-    can_stand_at(scene, rooms, wx, y, wz)
-        || (hits_wall(scene, rooms, x, y, z)
-            && find_floor_y(scene, wx, y, wz).is_some()
-            && !presses_into_wall(scene, rooms, from, wx, wz))
+    !presses_into_wall(scene, rooms, from, wx, wz)
+        && (can_stand_at(scene, rooms, wx, y, wz)
+            || (hits_wall(scene, rooms, x, y, z) && find_floor_y(scene, wx, y, wz).is_some()))
 }
 
 /// Moves the body at `pos` by `(dx, dz)`, never off walkable floor. A blocked move keeps only
@@ -6839,6 +6839,16 @@ mod tests {
         let scene = floor_and_wall(1.65);
         let rooms = BTreeMap::new();
         assert!(!can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.0, 5.3));
+    }
+
+    #[test]
+    fn a_long_step_into_a_thin_wall_is_not_pushed_out_on_its_far_side() {
+        // Tutorial probe: a 0.55 m step from just outside the radius landed past the wall at
+        // z = 5, and the slide pushed it a radius further out on that side.
+        let scene = floor_and_wall(1.65);
+        let rooms = BTreeMap::new();
+        let pos = step_with_slide(&scene, &rooms, [0.0, 0.0, 4.5], 0.0, 0.55);
+        assert!(pos[2] < 5.0, "{pos:?}");
     }
 
     /// One static quad between two `[x, y]` points, spanning z -1..1.
