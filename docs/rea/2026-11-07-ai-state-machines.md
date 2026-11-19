@@ -74,8 +74,9 @@ with limits of 1, 4, 9.6 and 100 m, through `0x4f8ae0`.
 ## Open
 
 - Conditions 5, 6, 9 to 13, 15 to 23, 27, 28, 31, 32.
-- Enemy perception: the update of `+0x3ad` and `+0x3af` from the skin's `[AI]` keys (`VisualPerceivingRadius`,
-  `GeneralPerceivingRadius`, `ShootingCone`, `EnemyInterestTime`).
+- Enemy perception: the target height `[ebp-0x30]` the sight ray aims into (bones read through `0x538ae0`,
+  `0x5ff410`, `0x40eee0` and the factor from `0x6d7200`), the eye point from `0x64af10`, and the room list `0x63bf40`
+  builds.
 
 ## Perception (first read, 2026-11-08)
 
@@ -90,8 +91,8 @@ The conditions read three flags of the AI object: `0x4f6260` returns `+0x3ad`, `
   `+0x3ad` and `+0x3ac` become 1; otherwise `+0x3ac` becomes 0 and `+0x3ad` keeps its value. The two points are kept
   at `+0x3c0` and `+0x3cc`, and `+0x3b8` is set to 0.2.
 - **STRONGLY SUPPORTED:** `0x64c910` is a line-of-sight ray test against the level, and the points are the AI's eye and
-  its target. `+0x3b8 = 0.2` is the delay before the next test. Neither the eye bone nor the range and cone gates
-  before the test (`0x4f6700`-`0x4f6b16`) have been read.
+  its target. `+0x3b8 = 0.2` is the delay before the next test. The gates before the test are read below; the
+  eye point is not.
 - **VERIFIED:** `0x4f6df0(stimulus, dt)` runs the "perceived" memory:
   - `+0x3b4 -= dt` on every call.
   - With a stimulus: if not yet perceived and `+0x3b4` has run out, it calls `0x6d73b0` on the object `0x694430(1)`
@@ -115,7 +116,19 @@ The conditions read three flags of the AI object: `0x4f6260` returns `+0x3ad`, `
 - **VERIFIED:** `0x4f62a0` is the sight update. `0x4f18a0` writes a vector from the two characters at `+0x3d8` and `+0x3dc` when `0x642d40` returns the same value for both. The sum of squares of that vector is turned into a length by the `1.5` / `0.5` table iteration (`0x3fc00000`, `0x3f000000`) and stored at `[ebp-0x1c]`.
 - **VERIFIED:** `0x6841c5` copies `VisualPerceivingRadius` (`skin+0xc1`, getter `0x531220`) to `+0x9e` through `0x6d72a0`, and `GeneralPerceivingRadius` (`skin+0xc5`, `0x531230`) to `+0xa2` through `0x6d72c0`. The sight test reads those with `0x6d7290` and `0x6d72b0`.
 - **VERIFIED:** when `0x4f17b0` returns nonzero, a radius greater than the length sets the local byte at `[ebp-0x74]`. The radius is `PerceivingGroupOneRadius` (`+0xd1`) when the target's byte `+0x2` is set (`0x6d73e0`), else group two (`+0xd5`, byte `+0x3`), else group three (`+0xd9`, byte `+0x4` via `0x421800`), else `+0xa2` when `+0x3ae` is clear. `0x4f17b0` returns 1 when `0x642d40` matches for the two characters.
+- **VERIFIED:** when `0x642d40` differs for the two characters, `0x4f17b0` calls `0x63bf40` with both results and a
+  list at `0x8ab740` (begin `0x8ab744`, end `0x8ab748`). It returns 1 when the list is empty or when every element,
+  passed through `0x40e530`, makes `0x6d6e70` return nonzero; the first element that fails returns 0
+  (`0x4f1868`-`0x4f188f`). **HYPOTHESIS:** the dword is the character's room, the list holds the portals between the
+  two rooms, and `0x6d6e70` asks whether one is open.
 - **VERIFIED:** the line-of-sight block runs only after `+0x3b8` has counted down to 0, `0x4f17b0` was nonzero, the dot of the two vectors is greater than 0, and `+0x9e` is greater than the length. `ShootingCone` (`+0xc9`) is not loaded in `0x4f62a0`. The local byte at `0x4f6c80` is `[ebp-0x74]`, OR-ed with `+0x3ad`, and passed to `0x4f6df0` as the stimulus.
+- **VERIFIED:** the ray aims at a random point on the target, not at its origin (`0x4f69c2`-`0x4f6b0a`). With
+  `rand` (msvcrt import `0x7ca368`): `x = (rand·2/32767 − 1) · 0.9 · w`, where `w` is the float at `+0x4c` of the
+  target's skin record (`0x691700`, `0x50b9d0`) and `2/32767`, `0.9` are `0x7cfc9c`, `0x7cfca0`;
+  `y = rand/32767 · h` (`0x7cfc98`) with `h` the height in `[ebp-0x30]`, raised to `0.1` (`0x3dcccccd`) when it falls
+  below `0.1` (`0x7cb8b4`); `z = 0`. The offset is added to the vector from `0x691640` on the target; `0x74e8e0` then
+  loads the target's 3×3 for the transforms at `0x4f6b27`-`0x4f6bf6`, which are not read in this pass. **HYPOTHESIS:** `w` is the skin's body half-width, so
+  "seen" is decided against a random spot on the body every 0.2 s.
 - **VERIFIED:** `0x684249` copies `ShootingCone` to `+0xaa` through `0x6d7320`. `0x4ff5e8` loads it, multiplies by `0.5` (`0x7cbdd4`) and by `π/180` (`0x7cfb04`), and passes that to `0x4f2fc0` as the half-angle. When the angle is not 0, `0x4f2fc0` rotates the horizontal pair at `[ebp-0x2c]` and `[ebp-0x24]` by the negated angle: `x' = x·cos + z·sin`, `z' = z·cos − x·sin` (`0x4f3037`-`0x4f305f`). The cosine of the result against the horizontal target is compared at `0x4f31f6`. Above `0.9999` (`0x7cfc88`) the function returns 1. At or below 0 it returns 0. Otherwise it returns 1 only when the half-angle is greater than `_CIacos` of that cosine (`0x4f3216`).
 
 - **VERIFIED:** when the two `0x642d40` results differ, `0x4f18a0` returns 0 unless `0x63bfb0` returns nonzero. When it does, the position of the character at `+0x3d8` is multiplied by the 3×4 from `0x43e060` and the position of `+0x3dc` is subtracted (`0x4f1ab6`-`0x4f1b65`). The function then returns 1.
