@@ -73,9 +73,10 @@ Tutorial.
    character update's call into `0x647660`. Then rewrite: the capsule from skin data, triangle distance, sweep and
    slide, and floors from the same test. Done when the Tutorial's secret-room wall and the first alley's trash
    containers stop Max in a capture.
-2. **Enemies, phase 2** ([spec](specs/2026-11-06-health-and-enemy-ai.md)). Read the range and cone gates before the
-   sight ray (`0x4f6700`-`0x4f6b16`) and what feeds the stimulus. Then the interpreter for `StandAndShoot`, aiming at
-   `AimingSpeed`, and firing through the player's projectile path. Delete the hand-written pursuit.
+2. **Enemies, phase 2** ([spec](specs/2026-11-06-health-and-enemy-ai.md)). The sight gates, the stimulus and the random
+   aim point are read ([AI note](rea/2026-11-07-ai-state-machines.md)); the eye point and the target height are
+   not. Next: the interpreter for `StandAndShoot`, aiming at `AimingSpeed`, and firing through the player's
+   projectile path. Delete the hand-written pursuit.
 3. **Releases (on hold until the owner says go).** A GitHub Actions release workflow that builds binaries for Linux,
    Windows and macOS on `v*` tags, plus end-user docs for launching them. Needs a spec first.
 4. **Modding:** KF2/SKD/KFS writers and glTF import (steps 4-5 of the
