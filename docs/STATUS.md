@@ -89,6 +89,8 @@ Tutorial.
 - Enemies do not perceive, aim, shoot or follow `.ai` paths (item 2 above).
 - Collision: the slide is a hypothesis (push out to the radius), floors are a separate pass, and the body's low end
   sits 0.35 m above the feet (a guess that keeps stairs steppable) instead of the capsule's round bottom (item 1).
+  A prop whose top sits right at that 0.35 m line can end up overlapping the body by a few centimetres on a
+  downhill floor (Tutorial StartRoom `box_highdetail_item3::1`); the body cannot press deeper.
 - `[Target]` hit zones are not applied, and enemy capsule values are still constants.
 - Bullet camera and its shake are missing.
 - The chase camera clips into walls and into Max.
