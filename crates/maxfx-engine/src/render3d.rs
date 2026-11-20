@@ -7865,4 +7865,92 @@ mod tests {
         );
         fb.iter().filter(|px| **px != 0).count()
     }
+
+    /// The retail Tutorial with the player's skin capsule, or `None` without a BYOD install.
+    fn retail_tutorial() -> Option<(LdbScene, BTreeMap<i32, [f32; 3]>)> {
+        let game = std::path::PathBuf::from(std::env::var_os("HOME")?).join("Games/MaxPayne1");
+        let level = crate::read_game_bytes(&game, r"\data\database\levels\front_end\Tutorial.ldb")?;
+        let mut scene = crate::scene::parse_ldb_scene(&level)?;
+        scene.apply_startup_enables();
+        scene.player_capsule = crate::load_player_capsule(&game)?;
+        let rooms = scene.rooms.iter().map(|r| (r.id, r.world_origin)).collect();
+        Some((scene, rooms))
+    }
+
+    #[test]
+    fn retail_tutorial_trash_container_stops_the_body() {
+        // #204: Max clipped into the big trash containers in Alley2. Their `trashcan01` faces
+        // span x 52.02..53.82, z -33.3..-27.8 on the floor at y -7.
+        let Some((scene, rooms)) = retail_tutorial() else {
+            return;
+        };
+        let (lo, hi) = ([52.02, -33.3], [53.82, -27.8]);
+        let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+        let mut walks = 0;
+        for a in 0..8 {
+            let (dx, dz) = (a as f32 * std::f32::consts::TAU / 8.0).sin_cos();
+            let start = [
+                centre[0] + dx * 4.0,
+                -7.0 + EYE_HEIGHT,
+                centre[1] + dz * 4.0,
+            ];
+            if !can_stand_at(&scene, &rooms, start[0], start[1], start[2]) {
+                continue;
+            }
+            walks += 1;
+            let mut pos = start;
+            for _ in 0..50 {
+                pos = step_with_slide(&scene, &rooms, pos, -dx * 0.1, -dz * 0.1);
+                let inside = (lo[0]..=hi[0]).contains(&pos[0]) && (lo[1]..=hi[1]).contains(&pos[2]);
+                assert!(
+                    !inside,
+                    "walk {a} from {start:?} entered the container at {pos:?}"
+                );
+            }
+        }
+        assert!(walks > 0, "no free approach to the container");
+    }
+
+    #[test]
+    fn retail_tutorial_secret_room_walls_are_not_crossed() {
+        // #204: Max walked through the wall into the Tutorial's secret room. Walk straight out of
+        // it in 16 directions; no step may cross a static wall at mid-body height.
+        let Some((scene, rooms)) = retail_tutorial() else {
+            return;
+        };
+        let jp = scene
+            .jumppoints
+            .iter()
+            .position(|j| j.name == "::Secret::Jumppoint 00")
+            .expect("secret jumppoint");
+        let start = spawn_pos(&scene, &rooms, jp);
+        for a in 0..16 {
+            let (dx, dz) = (a as f32 * std::f32::consts::TAU / 16.0).sin_cos();
+            let mut pos = start;
+            for _ in 0..60 {
+                let from = pos;
+                pos = step_with_slide(&scene, &rooms, pos, dx * 0.15, dz * 0.15);
+                let (low, high, _) = body_segment(&scene, from[1]);
+                let h = (low + high) / 2.0;
+                let crossed = scene.static_meshes.iter().find_map(|sm| {
+                    sm.polys.iter().find(|p| {
+                        p.normal[1].abs() <= 0.45
+                            && p.vertices.len() >= 3
+                            && blocks_character(&scene, p.material_id)
+                            && segment_poly_gap(
+                                &poly_world(&p.vertices, sm.world_origin),
+                                p.normal,
+                                [from[0], h, from[2]],
+                                [pos[0], h, pos[2]],
+                            )
+                            .0 == 0.0
+                    })
+                });
+                assert!(
+                    crossed.is_none(),
+                    "walk {a}: {from:?} -> {pos:?} crossed a wall"
+                );
+            }
+        }
+    }
 }

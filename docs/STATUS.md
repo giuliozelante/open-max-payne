@@ -73,7 +73,8 @@ Tutorial.
    segment to each triangle, and a blocked move slides along what it meets. Still to do: floors from the same test,
    the exe's own slide response, and removing the escape rules. The
    static search for slot 25's caller is parked; a winedbg breakpoint on `0x6954f0` while Max walks in retail would
-   show it. Done when the Tutorial's secret-room wall and the first alley's trash containers stop Max in a capture.
+   show it. Retail-gated tests now walk the body at Alley2's trash container and out of the secret room, and
+   both hold; what remains for done is the owner's capture of the same two spots.
 2. **Enemies, phase 2** ([spec](specs/2026-11-06-health-and-enemy-ai.md)). Read the range and cone gates before the
    sight ray (`0x4f6700`-`0x4f6b16`) and what feeds the stimulus. Then the interpreter for `StandAndShoot`, aiming at
    `AimingSpeed`, and firing through the player's projectile path. Delete the hand-written pursuit.
