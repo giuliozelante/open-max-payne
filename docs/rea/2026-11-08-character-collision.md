@@ -79,12 +79,24 @@ records what is read so far and where the reading goes next.
 - **VERIFIED:** `MaxPayne.exe` has 56 `call [reg+0x64]` sites, spread over about 45 functions. Most receivers belong to
   other classes, so the list alone does not name the caller; the sites near the shape code are `0x6464d4`,
   `0x6382c1` and `0x6982a9` (function starts, approximate).
+- **VERIFIED:** `0x6954f0` does no float work (no `fld`/`fmul`/`fcom` in its 242 instructions). It walks a list at
+  `[edi+0x8]`, skips entries whose byte `+0x125` is clear, and compares each entry's class (`call [eax+0x48]`)
+  with two RTTI types through `type_info::name`: `X_Character` (`0x8684c8`) and `X_LevelRuntimeDynamicObject`
+  (`0x8683c0`). A character goes to `0x695490`, a dynamic object to `0x695390`; both after `0x65a1c0`.
+  `0x695390` reads a vector at `+0x7f4`/`+0x7f8`/`+0x7fc` of its object.
+- **VERIFIED:** the base `0x64b4f0` (78 instructions, no float work) fills a static list at `0x8b8100` through
+  `0x5cb890`, `0x5cac20` and `0x5c84c0`.
+- **VERIFIED:** `0x646430` calls slot 25 on itself (`0x646557`) with the static list `0x8b3b88`, then `0x64b660`.
+  It runs only when byte `+0x124` is set; byte `+0x88` picks the other branch, which calls slot 24 (`+0x60`)
+  instead (`0x6464b7`). Its one caller is `0x646884`.
+- **STRONGLY SUPPORTED (ruled out):** slot 25 is not the mover. It gathers the objects a shape touches and, for a
+  character, reacts to other characters and dynamic objects. The step that tests the capsule against level
+  triangles is elsewhere; `0x646884`'s function and slot 24 are the next places to read.
 
 ## Next
 
-1. Read the three slot-25 sites near the shape code (`0x6464d4`, `0x6382c1`, `0x6982a9`) and check whether the
-   receiver is a runtime shape. Then read `0x6954f0` against the base `0x64b4f0`: the difference is what a character
-   adds to the move.
+1. Read the caller of `0x646430` (`0x646884`) and slot 24 (`0x63e430` in the capsule base, which calls
+   `0x648a90` and `0x5bd240`): one of them should hold the capsule-versus-triangle step.
 2. Resolve the virtual calls inside `0x63b410`, `0x5bf8e0` and `0x646f30` (for example `[ebx+0x4c]` in `0x646f30`).
    Identify each receiver's class from how the object is built, then read its vtable, as done above.
 3. Alternatively, trace it at run time: run retail under Wine with a debugger (`winedbg`) and break on `0x647660`
