@@ -507,14 +507,14 @@ pub fn write_skd(skin: &SkdSkin) -> Vec<u8> {
             body.extend_from_slice(&weight.to_le_bytes());
         }
     }
-    // UNKNOWN: 1 in all 45 retail skins.
+    // Mesh-name count (game reader `0x5819ba`); retail skins have one.
     write_int(&mut body, 1);
     write_str(&mut body, &skin.name);
     write_int(&mut body, skin.bones.len() as i32);
     for bone in &skin.bones {
         write_str(&mut body, bone);
     }
-    // UNKNOWN: one vector per vertex, zero in all 45 retail skins.
+    // One vector per vertex, zero in retail; the game reads and discards them (`0x581abd`).
     write_int(&mut body, skin.weights.len() as i32);
     for _ in &skin.weights {
         body.push(0x16);
