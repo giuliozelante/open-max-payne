@@ -78,7 +78,7 @@ Tutorial.
    `AimingSpeed`, and firing through the player's projectile path. Delete the hand-written pursuit.
 3. **Releases (on hold until the owner says go).** A GitHub Actions release workflow that builds binaries for Linux,
    Windows and macOS on `v*` tags, plus end-user docs for launching them. Needs a spec first.
-4. **Modding:** KF2/SKD/KFS writers and glTF import (steps 4-5 of the
+4. **Modding:** KF2 and KFS writers (SKD done, byte-exact on all retail skins) and glTF import (steps 4-5 of the
    [converter spec](specs/2026-11-07-gltf-converter.md)). Import needs a JSON parser (`serde_json`), not yet
    approved. Then the Blender add-on.
 5. **Owner checks pending:** open `max_cli.glb` in Blender, and `capture engine27` to verify #200-#203.
@@ -101,6 +101,6 @@ Tutorial.
 ## Modding: known gaps
 
 - Blender add-on is a stub; glTF export works but has no vertex normals and is untested in Blender.
-- No KF2/SKD/KFS writers or glTF import yet.
+- No KF2/KFS writers or glTF import yet (`openkf2::write_skd` exists, no CLI command yet).
 - `openpfx` export omits graphs and emitters.
 - No `.ldb` writer or level editor.

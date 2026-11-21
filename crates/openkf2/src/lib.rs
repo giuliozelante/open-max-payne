@@ -56,19 +56,19 @@ pub struct KfsMesh {
     pub parts: Vec<(String, std::ops::Range<usize>)>,
 }
 
-/// One SKD influence (`P_SkinMesh` allows at most two — `TooManyBonesPerVertex`).
+/// One SKD influence. Retail skins give a vertex up to three.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoneWeight {
     pub bone: usize,
     pub weight: f32,
 }
 
-/// Parsed `.skd` (`0x00010014`): bone names + ≤2 weights per vertex.
+/// Parsed `.skd` (`0x00010014`): bone names + up to three weights per vertex.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkdSkin {
     pub name: String,
     pub bones: Vec<String>,
-    /// `weights[v]` is 1–2 influences. Empty vec = unskinned (keep bind pose).
+    /// `weights[v]` is 1–3 influences. Empty vec = unskinned (keep bind pose).
     pub weights: Vec<Vec<BoneWeight>>,
 }
 
@@ -421,24 +421,13 @@ pub fn parse_skd(data: &[u8]) -> Option<SkdSkin> {
     let blend0 = read_weight_recs(payload, &mut i, n_blend)?;
     let mut blend1 = Vec::new();
     if n_blend > 0 {
-        // Second influence list: either `n_blend` again or a bare run of n_blend recs.
-        let mark = i;
-        if let Some(n2) = read_i32(payload, &mut i) {
-            if n2 as usize == n_blend {
-                if let Some(recs) = read_weight_recs(payload, &mut i, n_blend) {
-                    blend1 = recs;
-                } else {
-                    i = mark;
-                }
-            } else {
-                i = mark;
-                if let Some(recs) = read_weight_recs(payload, &mut i, n_blend) {
-                    blend1 = recs;
-                } else {
-                    i = mark;
-                }
-            }
+        // The further influences, with their own count: a vertex with three bones has two
+        // records here (retail `gognitti_vinnie_l0.skd`, `DICOLA_BUCK_L0.SKD`).
+        let n_more = read_i32(payload, &mut i)? as usize;
+        if n_more > 200_000 {
+            return None;
         }
+        blend1 = read_weight_recs(payload, &mut i, n_more)?;
     }
     // Skip to mesh name.
     while i < payload.len() && payload[i] != 0x0d {
@@ -470,6 +459,73 @@ pub fn parse_skd(data: &[u8]) -> Option<SkdSkin> {
         bones,
         weights,
     })
+}
+
+/// `R_MemoryFile` int: the shortest tag that holds the value (`0x14` u8, `0x13` u16, `0x12` u24,
+/// `0x02` i32), the inverse of `read_i32`.
+fn write_int(out: &mut Vec<u8>, value: i32) {
+    let bytes = value.to_le_bytes();
+    let bits = value as u32;
+    if bits & 0xff80_0000 != 0 {
+        out.push(0x02);
+        out.extend_from_slice(&bytes);
+    } else if bits & 0x007f_8000 != 0 {
+        out.push(0x12);
+        out.extend_from_slice(&bytes[..3]);
+    } else if bits & 0x0000_7f80 != 0 {
+        out.push(0x13);
+        out.extend_from_slice(&bytes[..2]);
+    } else {
+        out.extend_from_slice(&[0x14, bytes[0]]);
+    }
+}
+
+fn write_str(out: &mut Vec<u8>, value: &str) {
+    out.push(0x0d);
+    write_int(out, value.len() as i32);
+    out.extend_from_slice(value.as_bytes());
+}
+
+/// Writes an `.skd` (`0x00010014`) in the retail layout, so a retail skin read with `parse_skd`
+/// writes back byte for byte. A vertex with one influence goes to the rigid list, otherwise its
+/// first influence goes to the first blend list and the rest to the second.
+pub fn write_skd(skin: &SkdSkin) -> Vec<u8> {
+    let mut lists: [Vec<(usize, usize, f32)>; 3] = Default::default();
+    for (v, infl) in skin.weights.iter().enumerate() {
+        for (k, w) in infl.iter().enumerate() {
+            let list = if infl.len() == 1 { 0 } else { 1 + k.min(1) };
+            lists[list].push((v, w.bone, w.weight));
+        }
+    }
+    let mut body = Vec::new();
+    for list in &lists {
+        write_int(&mut body, list.len() as i32);
+        for &(v, bone, weight) in list {
+            write_int(&mut body, v as i32);
+            write_int(&mut body, bone as i32);
+            body.push(0x09);
+            body.extend_from_slice(&weight.to_le_bytes());
+        }
+    }
+    // UNKNOWN: 1 in all 45 retail skins.
+    write_int(&mut body, 1);
+    write_str(&mut body, &skin.name);
+    write_int(&mut body, skin.bones.len() as i32);
+    for bone in &skin.bones {
+        write_str(&mut body, bone);
+    }
+    // UNKNOWN: one vector per vertex, zero in all 45 retail skins.
+    write_int(&mut body, skin.weights.len() as i32);
+    for _ in &skin.weights {
+        body.push(0x16);
+        body.extend_from_slice(&[0; 12]);
+    }
+    let mut out = vec![0x0c];
+    out.extend_from_slice(&0x0001_0014u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(13 + body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
 }
 
 pub fn read_0x1a(data: &[u8], i: &mut usize) -> Option<([f32; 9], [f32; 3])> {
@@ -1150,5 +1206,22 @@ mod tests {
         let anim = parse_kf2_anim(&buf).expect("anim");
         let (_, pos) = sample_locals(&anim, 1.0)["pelvis"];
         assert!((pos[0] - 15.0).abs() < 1e-4, "{pos:?}");
+    }
+
+    #[test]
+    fn a_skin_written_and_read_back_is_unchanged() {
+        // Retail `gognitti_vinnie_l0.skd` has vertices with three influences: the second blend
+        // list then holds more records than the first.
+        let w = |bone, weight| BoneWeight { bone, weight };
+        let skin = SkdSkin {
+            name: "Test_L0".into(),
+            bones: vec!["Pelvis".into(), "Torso".into(), "Head".into()],
+            weights: vec![
+                vec![w(2, 1.0)],
+                vec![w(0, 0.5), w(1, 0.3), w(2, 0.2)],
+                vec![w(1, 0.75), w(0, 0.25)],
+            ],
+        };
+        assert_eq!(parse_skd(&write_skd(&skin)), Some(skin));
     }
 }
