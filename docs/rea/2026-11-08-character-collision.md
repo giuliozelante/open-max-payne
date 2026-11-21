@@ -92,11 +92,18 @@ records what is read so far and where the reading goes next.
 - **STRONGLY SUPPORTED (ruled out):** slot 25 is not the mover. It gathers the objects a shape touches and, for a
   character, reacts to other characters and dynamic objects. The step that tests the capsule against level
   triangles is elsewhere; `0x646884`'s function and slot 24 are the next places to read.
+- **VERIFIED:** slot 24 in the capsule base (`0x63e430`, `ret 0xc`) takes the vector from `0x63e070`, turns it by
+  the shape's 3x3 from `0x74e8e0` (`0x63e53d`-`0x63e586`), and passes it with the shape's `+0x12c` and the result of
+  `0x648a90` to `0x5bd240` on the object at `[arg1+0x188]`. `0x5bd240` (56 instructions) calls `0x5bba80`,
+  `0x5c43e0`, `0x4459d0`, `0x449460`, `0x5b4b00`, `0x5bd0a0` and `0x5c4450`. **HYPOTHESIS:** the `0x5b`-`0x5c`
+  range, which also holds slot 22's `0x5bf8e0`, is the collision library, and `0x5bd240` hands it a shape to sweep.
+- **VERIFIED:** `0x646430`'s caller starts at `0x6467f7` (234 instructions, no float work). It reads the owner
+  through `0x748300` and position through `0x642d40`/`0x642d50`, and also calls `0x5c4450`.
 
 ## Next
 
-1. Read the caller of `0x646430` (`0x646884`) and slot 24 (`0x63e430` in the capsule base, which calls
-   `0x648a90` and `0x5bd240`): one of them should hold the capsule-versus-triangle step.
+1. Read `0x5bd240` and `0x5c4450` (called from both slot 24 and `0x6467f7`); one of them should lead to the
+   capsule-versus-triangle step.
 2. Resolve the virtual calls inside `0x63b410`, `0x5bf8e0` and `0x646f30` (for example `[ebx+0x4c]` in `0x646f30`).
    Identify each receiver's class from how the object is built, then read its vtable, as done above.
 3. Alternatively, trace it at run time: run retail under Wine with a debugger (`winedbg`) and break on `0x647660`
