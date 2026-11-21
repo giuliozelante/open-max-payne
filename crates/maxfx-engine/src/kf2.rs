@@ -1176,4 +1176,26 @@ mod tests {
             sum / n
         );
     }
+
+    #[test]
+    fn retail_skins_write_back_byte_for_byte() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let ras = Path::new(&home).join("Games/MaxPayne1/x_data.ras");
+        let Ok(index) = openras::archive::RasIndex::open(&ras) else {
+            return;
+        };
+        let skins: Vec<String> = index
+            .paths()
+            .filter(|p| p.to_ascii_lowercase().ends_with(".skd"))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(skins.len(), 45);
+        for path in &skins {
+            let bytes = index.read_member(path).unwrap().unwrap();
+            let skin = parse_skd(&bytes).unwrap_or_else(|| panic!("{path}"));
+            assert!(openkf2::write_skd(&skin) == bytes, "{path} differs");
+        }
+    }
 }

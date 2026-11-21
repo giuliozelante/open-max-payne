@@ -91,6 +91,23 @@ twice as fast.
 2. Synthetic unit tests once chunk header layout is locked (no retail `.kf2` in git).
 3. Cross-check writer against `KFExport.dle` REA (local vendor only).
 
+## Skin weights (`.skd`, VERIFIED on all 45 retail skins, 2026-11-21)
+
+One `0x00010014` chunk, version 0. Ints use the shortest `R_MemoryFile` tag; a record is vertex, bone, `0x09` weight.
+
+| Field | Content |
+|---|---|
+| Rigid list | Count, then one record per vertex with a single bone. The weight is always 1.0. |
+| First blend list | Count, then the first influence of every vertex with more than one bone. |
+| Second blend list | Count, then the remaining influences. Vertices with three bones give two records here, so the count can exceed the first list's (`gognitti_vinnie_l0` 345 vs 309, `DICOLA_BUCK_L0` 227 vs 226). |
+| Mesh names | Count, then that many strings (`Punchinello_Don_L0`). Always one in retail. |
+| Bones | Count, then names (28 for humans, 8 for `rat_l0`). |
+| Vectors | Count (the vertex count), then one `0x16` vector per vertex. All zero in retail, and the game discards them. |
+
+Every list is sorted by vertex, no weight is zero, and the rigid and blend vertices together cover every vertex once.
+The game's reader is `0x580eb0` (VERIFIED, `push 0x10014` at `0x580ee7`, `R_MemoryFile` imports from `rlmfc.dll`). After the three lists it reads an int at `0x5819ba`, passes it to `0x580790`, and reads that many `std::string`s (`0x5819f1`), so the constant 1 is the mesh-name count. Then a bone count (`0x581a19`) and the bone names (`0x581a50`). The last count (`0x581a78`) drives a loop that reads every vector into the same stack slot `[esp+0x12c]` (`0x581abd`) and never uses it.
+`openkf2::write_skd` writes this layout, and each retail skin read and written back is identical.
+
 ## World spheres (`database/worldspheres/bg_*.kf2`)
 
 Static meshes in a packed variant of the chunks, checked on all 11 retail files. A count is `0x10` + `u16` or `0x11` + `u8`.
