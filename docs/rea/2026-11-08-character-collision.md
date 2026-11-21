@@ -72,10 +72,20 @@ records what is read so far and where the reading goes next.
   (divide by 100). The element is 100 bytes. What it holds is not read.
 - **UNKNOWN:** the virtual callee that tests the capsule against the level, and where a step-up or a slope changes
   the target. `0x696f60` has no float immediate of its own between `0x697210` and `0x697619`.
+- **VERIFIED (2026-11-21):** slot 25 (`+0x64`) is `0x64b4f0` in the capsule base (`0x7d4d64`), the sphere base
+  (`0x7d5008`) and `MaxPayne_StartPointTestCapsule` (`0x7cd010`). `X_Character` (`0x7d5950`) overrides it with
+  `0x6954f0` and shares slots 23, 24 and 26 with the capsule base, so it derives from that base. It also overrides
+  slot 27 (`0x696e90`, base `0x755fa0`).
+- **VERIFIED:** `MaxPayne.exe` has 56 `call [reg+0x64]` sites, spread over about 45 functions. Most receivers belong to
+  other classes, so the list alone does not name the caller; the sites near the shape code are `0x6464d4`,
+  `0x6382c1` and `0x6982a9` (function starts, approximate).
 
 ## Next
 
-1. Resolve the virtual calls inside `0x63b410`, `0x5bf8e0` and `0x646f30` (for example `[ebx+0x4c]` in `0x646f30`).
+1. Read the three slot-25 sites near the shape code (`0x6464d4`, `0x6382c1`, `0x6982a9`) and check whether the
+   receiver is a runtime shape. Then read `0x6954f0` against the base `0x64b4f0`: the difference is what a character
+   adds to the move.
+2. Resolve the virtual calls inside `0x63b410`, `0x5bf8e0` and `0x646f30` (for example `[ebx+0x4c]` in `0x646f30`).
    Identify each receiver's class from how the object is built, then read its vtable, as done above.
-2. Alternatively, trace it at run time: run retail under Wine with a debugger (`winedbg`) and break on `0x647660`
+3. Alternatively, trace it at run time: run retail under Wine with a debugger (`winedbg`) and break on `0x647660`
    while Max walks into a wall. That gives the real call chain in one session.
