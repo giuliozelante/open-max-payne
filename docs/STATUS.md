@@ -69,10 +69,13 @@ Tutorial.
 
 ## What to do next, in order
 
-1. **Collision (approved, #204).** Finish the exe reading: `0x646f30` and `0x645340` are the next routines, then the
-   character update's call into `0x647660`. Then rewrite: the capsule from skin data, triangle distance, sweep and
-   slide, and floors from the same test. Done when the Tutorial's secret-room wall and the first alley's trash
-   containers stop Max in a capture.
+1. **Collision (approved, #204).** Walls now use the skin's capsule radius and top, and the distance from the body's
+   segment to each triangle, and a blocked move slides along what it meets. Still to do: floors from the same test,
+   the exe's own slide response, and removing the escape rules. The character's per-frame physics step is
+   `0x68c960` ([REA](rea/2026-11-08-character-collision.md)); ground now splits from wall at retail's
+   `MaximumSteepnessAngle` (46 degrees). A grounded player is dragged down onto ground below as `0x647df0` does (at least 0.05 m, or
+   `|move| * tan MaximumDragDownAngle`). Next: the no-ground branch of `0x6480a0`, for the slide. Retail-gated tests now walk the body at Alley2's trash container and out of the secret room, and
+   both hold; what remains for done is the owner's capture of the same two spots.
 2. **Enemies, phase 2** ([spec](specs/2026-11-06-health-and-enemy-ai.md)). Read the range and cone gates before the
    sight ray (`0x4f6700`-`0x4f6b16`) and what feeds the stimulus. Then the interpreter for `StandAndShoot`, aiming at
    `AimingSpeed`, and firing through the player's projectile path. Delete the hand-written pursuit.
@@ -86,7 +89,10 @@ Tutorial.
 ## Engine: known gaps
 
 - Enemies do not perceive, aim, shoot or follow `.ai` paths (item 2 above).
-- Collision: walls are a box plus plane distance with a 0.38 m radius; retail uses a 0.48 m capsule (item 1).
+- Collision: the slide is a hypothesis (push out to the radius), floors are a separate pass, and the body's low end
+  sits 0.35 m above the feet (a guess that keeps stairs steppable) instead of the capsule's round bottom (item 1).
+  A prop whose top sits right at that 0.35 m line can end up overlapping the body by a few centimetres on a
+  downhill floor (Tutorial StartRoom `box_highdetail_item3::1`); the body cannot press deeper.
 - `[Target]` hit zones are not applied, and enemy capsule values are still constants.
 - Bullet camera and its shake are missing.
 - The chase camera clips into walls and into Max.

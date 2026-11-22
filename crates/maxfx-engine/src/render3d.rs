@@ -169,6 +169,7 @@ pub fn run_3d_walkthrough(
         let mut wy = ro[1] + ch.pos[1];
         if let Some(fy) = find_floor_y(
             &scene,
+            &room_origins,
             ro[0] + ch.pos[0],
             wy + EYE_HEIGHT,
             ro[2] + ch.pos[2],
@@ -711,21 +712,18 @@ pub fn run_3d_walkthrough(
             let dz = stepped.velocity[1] * player_dt;
             let nx = player_pos[0] + dx;
             let nz = player_pos[2] + dz;
-            let contact = dynamic_wall_hit(&scene, &room_origins, nx, player_pos[1], nz);
+            let contact =
+                dynamic_wall_hit(&scene, &room_origins, nx, player_pos[1], nz).map(|(i, _)| i);
             if contact != last_contact {
                 if let Some(index) = contact {
                     scene.character_collides(index);
                 }
                 last_contact = contact;
             }
-            // Strict boundary & wall check: never allow stepping off walkable floor into void!
-            if can_step(&scene, &room_origins, player_pos, nx, nz) {
-                player_pos[0] = nx;
-                player_pos[2] = nz;
-            } else if can_step(&scene, &room_origins, player_pos, nx, player_pos[2]) {
-                player_pos[0] = nx;
-            } else if can_step(&scene, &room_origins, player_pos, player_pos[0], nz) {
-                player_pos[2] = nz;
+            player_pos = step_with_slide(&scene, &room_origins, player_pos, dx, dz);
+            // 0x68d277 runs the drag-down only for a character on the ground.
+            if grounded && vel_y <= 0.0 {
+                player_pos = drag_down(&scene, &room_origins, player_pos, dx.hypot(dz));
             }
 
             let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
@@ -758,8 +756,13 @@ pub fn run_3d_walkthrough(
                 particle_sprites.field.gravity[1],
                 player_dt,
             );
-            if let Some(floor_y) = find_floor_y(&scene, player_pos[0], player_pos[1], player_pos[2])
-            {
+            if let Some(floor_y) = find_floor_y(
+                &scene,
+                &room_origins,
+                player_pos[0],
+                player_pos[1],
+                player_pos[2],
+            ) {
                 if player_pos[1] <= floor_y + EYE_HEIGHT {
                     player_pos[1] = floor_y + EYE_HEIGHT;
                     // 0x68dd1d. HYPOTHESIS: only the fall counts, not the speed along the ground.
@@ -1297,8 +1300,13 @@ pub fn run_3d_walkthrough(
                     if can_stand_at(&scene, &room_origins, nx, en.world_pos[1] + EYE_HEIGHT, nz) {
                         en.world_pos[0] = nx;
                         en.world_pos[2] = nz;
-                        if let Some(fy) = find_floor_y(&scene, nx, en.world_pos[1] + EYE_HEIGHT, nz)
-                        {
+                        if let Some(fy) = find_floor_y(
+                            &scene,
+                            &room_origins,
+                            nx,
+                            en.world_pos[1] + EYE_HEIGHT,
+                            nz,
+                        ) {
                             en.world_pos[1] = fy;
                         }
                         en.walk_phase = move_clip_time(en.walk_phase, world_dt);
@@ -2021,7 +2029,8 @@ fn frame_dt(elapsed: std::time::Duration) -> f32 {
 }
 
 /// Whether a body at `from` may go to `(wx, wz)`. One already caught in a wall, as after landing
-/// on a railing, may move along or away from it, but never deeper into or through it.
+/// on a railing, may move along or away from it, but never deeper into or through it. No step,
+/// however long, crosses a wall.
 fn can_step(
     scene: &LdbScene,
     rooms: &BTreeMap<i32, [f32; 3]>,
@@ -2030,66 +2039,111 @@ fn can_step(
     wz: f32,
 ) -> bool {
     let [x, y, z] = from;
-    can_stand_at(scene, rooms, wx, y, wz)
-        || (hits_wall(scene, rooms, x, y, z)
-            && find_floor_y(scene, wx, y, wz).is_some()
-            && !presses_into_wall(scene, from, wx, wz))
+    !presses_into_wall(scene, rooms, from, wx, wz)
+        && (can_stand_at(scene, rooms, wx, y, wz)
+            || (hits_wall(scene, rooms, x, y, z)
+                && find_floor_y(scene, rooms, wx, y, wz).is_some()))
 }
 
-/// The static walls near `(x, z)`, each as its signed distance from the body's centre.
-fn wall_distances(scene: &LdbScene, x: f32, y: f32, z: f32, reach: f32) -> Vec<f32> {
-    let (body_min_y, body_max_y) = (y - EYE_HEIGHT + 0.35, y - 0.10);
-    let mut out = Vec::new();
-    for sm in &scene.static_meshes {
-        let o = sm.world_origin;
-        for poly in &sm.polys {
-            if poly.normal[1].abs() > 0.45
-                || poly.vertices.len() < 3
-                || !blocks_character(scene, poly.material_id)
-            {
-                out.push(f32::NAN);
-                continue;
+/// Moves the body at `pos` by `(dx, dz)`, never off walkable floor. A blocked move keeps only
+/// the part along the wall it meets, then tries each axis alone.
+fn step_with_slide(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    pos: [f32; 3],
+    dx: f32,
+    dz: f32,
+) -> [f32; 3] {
+    let [x, y, z] = pos;
+    let (nx, nz) = (x + dx, z + dz);
+    if can_step(scene, rooms, pos, nx, nz) {
+        return [nx, y, nz];
+    }
+    // HYPOTHESIS: retail slides its capsule along what it meets (spec step 4); the exe's
+    // response is not read yet. Pushing the target back out of the wall it touches keeps the
+    // move along the wall and rounds door and window frames.
+    if let Some([ax, _, az]) = wall_contact(scene, rooms, nx, y, nz) {
+        let len = ax.hypot(az);
+        if len > 1e-6 {
+            let push = (scene.player_capsule[0] + 1e-3 - len) / len;
+            let (sx, sz) = (nx + ax * push, nz + az * push);
+            if can_step(scene, rooms, pos, sx, sz) {
+                return [sx, y, sz];
             }
-            let world: Vec<[f32; 3]> = poly
-                .vertices
-                .iter()
-                .map(|v| [v.pos[0] + o[0], v.pos[1] + o[1], v.pos[2] + o[2]])
-                .collect();
-            let (lo, hi) = world
-                .iter()
-                .fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| {
-                    (
-                        std::array::from_fn(|k| lo[k].min(p[k])),
-                        std::array::from_fn(|k| hi[k].max(p[k])),
-                    )
-                });
-            let near = body_max_y >= lo[1]
-                && body_min_y <= hi[1]
-                && (lo[0] - reach..=hi[0] + reach).contains(&x)
-                && (lo[2] - reach..=hi[2] + reach).contains(&z);
-            out.push(if near {
-                (x - world[0][0]) * poly.normal[0] + (z - world[0][2]) * poly.normal[2]
-            } else {
-                f32::NAN
-            });
         }
     }
-    out
+    if can_step(scene, rooms, pos, nx, z) {
+        [nx, y, z]
+    } else if can_step(scene, rooms, pos, x, nz) {
+        [x, y, nz]
+    } else {
+        pos
+    }
 }
 
-/// A step from `from` to `(wx, wz)` that ends closer to a wall it touches, or on its far side.
-fn presses_into_wall(scene: &LdbScene, from: [f32; 3], wx: f32, wz: f32) -> bool {
-    const RADIUS: f32 = 0.38;
+/// A step from `from` to `(wx, wz)` that ends inside a wall's radius closer than it started, or
+/// whose path crosses a wall at the body's low end, middle or top.
+fn presses_into_wall(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    from: [f32; 3],
+    wx: f32,
+    wz: f32,
+) -> bool {
+    let radius = scene.player_capsule[0];
     let [x, y, z] = from;
-    let reach = RADIUS + (wx - x).hypot(wz - z);
-    let before = wall_distances(scene, x, y, z, reach);
-    let after = wall_distances(scene, wx, y, wz, reach);
-    before.iter().zip(&after).any(|(&a, &b)| {
-        if a.is_nan() || b.is_nan() || a.abs() >= RADIUS {
+    let reach = radius + (wx - x).hypot(wz - z);
+    let (body_min_y, body_max_y, _) = body_segment(scene, y);
+    let presses = |world: &[[f32; 3]], n: [f32; 3]| {
+        let (min, max) = world
+            .iter()
+            .fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| {
+                (
+                    std::array::from_fn(|k| lo[k].min(p[k])),
+                    std::array::from_fn(|k| hi[k].max(p[k])),
+                )
+            });
+        let near = body_max_y >= min[1]
+            && body_min_y <= max[1]
+            && (min[0] - reach..=max[0] + reach).contains(&x)
+            && (min[2] - reach..=max[2] + reach).contains(&z);
+        if !near {
             return false;
         }
-        a.signum() != b.signum() || b.abs() < a.abs() - 1e-4
-    })
+        let gap = |px, pz| segment_poly_gap(world, n, [px, body_min_y, pz], [px, body_max_y, pz]).0;
+        let (before, after) = (gap(x, z), gap(wx, wz));
+        let crosses = [body_min_y, (body_min_y + body_max_y) / 2.0, body_max_y]
+            .iter()
+            .any(|&h| segment_poly_gap(world, n, [x, h, z], [wx, h, wz]).0 == 0.0);
+        crosses || (after < radius && after < before - 1e-4)
+    };
+    let static_hit = scene.static_meshes.iter().any(|sm| {
+        sm.polys.iter().any(|poly| {
+            poly.normal[1].abs() <= GROUND_NORMAL_Y
+                && poly.vertices.len() >= 3
+                && blocks_character(scene, poly.material_id)
+                && presses(&poly_world(&poly.vertices, sm.world_origin), poly.normal)
+        })
+    });
+    static_hit
+        || scene.dynamic_meshes.iter().enumerate().any(|(idx, dm)| {
+            if !solid_to_body(dm) {
+                return false;
+            }
+            let (xform, origin) = dynamic_world(scene, idx, rooms);
+            dm.polys.iter().any(|poly| {
+                let n = xform_dir(xform, poly.normal);
+                let world: Vec<[f32; 3]> = poly
+                    .vertices
+                    .iter()
+                    .map(|v| xform_point(xform, origin, v.pos))
+                    .collect();
+                n[1].abs() <= GROUND_NORMAL_Y
+                    && world.len() >= 3
+                    && blocks_character(scene, poly.material_id)
+                    && presses(&world, n)
+            })
+        })
 }
 
 fn can_stand_at(
@@ -2099,14 +2153,45 @@ fn can_stand_at(
     wy: f32,
     wz: f32,
 ) -> bool {
-    !hits_wall(scene, rooms, wx, wy, wz) && find_floor_y(scene, wx, wy, wz).is_some()
+    !hits_wall(scene, rooms, wx, wy, wz) && find_floor_y(scene, rooms, wx, wy, wz).is_some()
 }
 
 /// Highest ledge the feet ride onto. Retail moves a capsule with a round bottom and has no step
 /// value; HYPOTHESIS: its radius, `max_payne.txt` `CapsuleRadius`.
+/// Least up-component of a ground normal: `globalconfig.txt` `MaximumSteepnessAngle 46` degrees, which
+/// `MaxPayne.exe` compares as `dot(up, n) > cos(angle)` at `0x648040`. Steeper faces are walls.
+// shortcut: the retail default, not read from a mod's globalconfig; thread the config through when one changes it.
+const GROUND_NORMAL_Y: f32 = 0.694_658_4;
+/// `tan` of `globalconfig.txt` `MaximumDragDownAngle 60` degrees, taken at `0x647edc`.
+// shortcut: the retail default, not read from a mod's globalconfig; thread the config through when one changes it.
+const DRAG_DOWN_TAN: f32 = 1.732_050_8;
+/// Least drag-down distance, in metres (`0x7d5924`).
+const DRAG_DOWN_MIN: f32 = 0.05;
+
+/// Pull a walking body onto ground just below it, as `0x647df0` does after each move of `moved` metres.
+fn drag_down(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    pos: [f32; 3],
+    moved: f32,
+) -> [f32; 3] {
+    let reach = (moved * DRAG_DOWN_TAN).max(DRAG_DOWN_MIN);
+    let feet = pos[1] - EYE_HEIGHT;
+    match find_floor_y(scene, rooms, pos[0], pos[1], pos[2]) {
+        Some(y) if y < feet && feet - y <= reach => [pos[0], y + EYE_HEIGHT, pos[2]],
+        _ => pos,
+    }
+}
+
 const STEP_UP: f32 = 0.48;
 
-fn find_floor_y(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> Option<f32> {
+fn find_floor_y(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    wx: f32,
+    wy: f32,
+    wz: f32,
+) -> Option<f32> {
     let mut best: Option<f32> = None;
     let feet_y = wy - EYE_HEIGHT;
     for sm in &scene.static_meshes {
@@ -2114,7 +2199,7 @@ fn find_floor_y(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> Option<f32> {
         let oy = sm.world_origin[1];
         let oz = sm.world_origin[2];
         for poly in &sm.polys {
-            if poly.normal[1] < 0.45 || poly.vertices.len() < 3 {
+            if poly.normal[1] < GROUND_NORMAL_Y || poly.vertices.len() < 3 {
                 continue;
             }
             if !blocks_character(scene, poly.material_id) {
@@ -2148,19 +2233,73 @@ fn find_floor_y(scene: &LdbScene, wx: f32, wy: f32, wz: f32) -> Option<f32> {
             }
         }
     }
+    // A prop's lid under the step height is ridden onto like any floor, or the body sinks into it.
+    for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
+        if !solid_to_body(dm) {
+            continue;
+        }
+        let (xform, origin) = dynamic_world(scene, idx, rooms);
+        for poly in &dm.polys {
+            let n = xform_dir(xform, poly.normal);
+            if n[1] < GROUND_NORMAL_Y
+                || poly.vertices.len() < 3
+                || !blocks_character(scene, poly.material_id)
+            {
+                continue;
+            }
+            let world: Vec<[f32; 3]> = poly
+                .vertices
+                .iter()
+                .map(|v| xform_point(xform, origin, v.pos))
+                .collect();
+            for k in 1..world.len() - 1 {
+                let (v0, v1, v2) = (world[0], world[k], world[k + 1]);
+                if point_in_xz_tri(wx, wz, v0, v1, v2) {
+                    let y = v0[1] - (n[0] * (wx - v0[0]) + n[2] * (wz - v0[2])) / n[1];
+                    if y <= feet_y + STEP_UP && best.is_none_or(|b| y > b) {
+                        best = Some(y);
+                    }
+                }
+            }
+        }
+    }
     best
 }
 
+/// A dynamic mesh the body collides with.
+fn solid_to_body(dm: &crate::scene::SceneDynamicMesh) -> bool {
+    dm.collisions && dynamic_mesh_drawn(dm)
+}
+
+/// The body as a vertical segment from `wy` (eye height): its low and high ends, and the radius
+/// around it. Radius and top are the skin's `CapsuleRadius` and `CapsuleTop`. HYPOTHESIS: the
+/// low end sits 0.35 m above the feet so stair risers stay steppable until floors use this test.
+fn body_segment(scene: &LdbScene, wy: f32) -> (f32, f32, f32) {
+    let [radius, top] = scene.player_capsule;
+    let feet = wy - EYE_HEIGHT;
+    (feet + 0.35, feet + top, radius)
+}
+
 fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32, wz: f32) -> bool {
-    let body_min_y = wy - EYE_HEIGHT + 0.35;
-    let body_max_y = wy - 0.10;
-    let radius = 0.38f32;
+    wall_contact(scene, rooms, wx, wy, wz).is_some()
+}
+
+/// The first wall a body at this spot touches, as the vector from the wall's closest point
+/// towards the body (zero when there is no useful direction).
+fn wall_contact(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    wx: f32,
+    wy: f32,
+    wz: f32,
+) -> Option<[f32; 3]> {
+    let (body_min_y, body_max_y, radius) = body_segment(scene, wy);
     for sm in &scene.static_meshes {
         let ox = sm.world_origin[0];
         let oy = sm.world_origin[1];
         let oz = sm.world_origin[2];
         for poly in &sm.polys {
-            if poly.normal[1].abs() > 0.45 || poly.vertices.len() < 3 {
+            if poly.normal[1].abs() > GROUND_NORMAL_Y || poly.vertices.len() < 3 {
                 continue;
             }
             if !blocks_character(scene, poly.material_id) {
@@ -2193,37 +2332,28 @@ fn hits_wall(scene: &LdbScene, rooms: &BTreeMap<i32, [f32; 3]>, wx: f32, wy: f32
             {
                 continue;
             }
-            let v0 = [
-                poly.vertices[0].pos[0] + ox,
-                poly.vertices[0].pos[1] + oy,
-                poly.vertices[0].pos[2] + oz,
-            ];
-            let plane_dist = (wx - v0[0]) * poly.normal[0] + (wz - v0[2]) * poly.normal[2];
-            if plane_dist.abs() < radius {
-                return true;
+            let world = poly_world(&poly.vertices, sm.world_origin);
+            let (lo, hi) = ([wx, body_min_y, wz], [wx, body_max_y, wz]);
+            let (gap, away) = segment_poly_gap(&world, poly.normal, lo, hi);
+            if gap < radius {
+                return Some(away);
             }
         }
     }
-    dynamic_wall_hit(scene, rooms, wx, wy, wz).is_some()
+    dynamic_wall_hit(scene, rooms, wx, wy, wz).map(|(_, away)| away)
 }
 
-/// The dynamic mesh a body at this spot runs into.
+/// The dynamic mesh a body at this spot runs into, and the vector from it towards the body.
 fn dynamic_wall_hit(
     scene: &LdbScene,
     rooms: &BTreeMap<i32, [f32; 3]>,
     wx: f32,
     wy: f32,
     wz: f32,
-) -> Option<usize> {
-    let body_min_y = wy - EYE_HEIGHT + 0.35;
-    let body_max_y = wy - 0.10;
-    let radius = 0.38f32;
+) -> Option<(usize, [f32; 3])> {
+    let (body_min_y, body_max_y, radius) = body_segment(scene, wy);
     for (idx, dm) in scene.dynamic_meshes.iter().enumerate() {
-        if dm.hidden
-            || !dm.collisions
-            || dm.name.contains("_Tip_")
-            || dm.name.ends_with("Start_FSM.DO")
-        {
+        if !solid_to_body(dm) {
             continue;
         }
         let (xform, origin) = dynamic_world(scene, idx, rooms);
@@ -2249,11 +2379,11 @@ fn dynamic_wall_hit(
                 min_z = min_z.min(p[2]);
                 max_z = max_z.max(p[2]);
             }
-            if n[1].abs() > 0.45 {
+            if n[1].abs() > GROUND_NORMAL_Y {
                 // A floor or lid the feet cannot ride onto, like a van's load bed.
                 let step = wy - EYE_HEIGHT + STEP_UP;
                 if max_y > step && min_y < body_max_y && xz_gap(&world, wx, wz) < radius {
-                    return Some(idx);
+                    return Some((idx, [0.0; 3]));
                 }
                 continue;
             }
@@ -2267,9 +2397,10 @@ fn dynamic_wall_hit(
             {
                 continue;
             }
-            let plane_dist = (wx - world[0][0]) * n[0] + (wz - world[0][2]) * n[2];
-            if plane_dist.abs() < radius {
-                return Some(idx);
+            let (lo, hi) = ([wx, body_min_y, wz], [wx, body_max_y, wz]);
+            let (gap, away) = segment_poly_gap(&world, n, lo, hi);
+            if gap < radius {
+                return Some((idx, away));
             }
         }
     }
@@ -2571,6 +2702,69 @@ fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
 
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+/// Shortest vector from segment `p2..q2` to segment `p1..q1` (Ericson, Real-Time Collision
+/// Detection 5.1.9).
+fn segment_segment_gap(p1: [f32; 3], q1: [f32; 3], p2: [f32; 3], q2: [f32; 3]) -> [f32; 3] {
+    const EPS: f32 = 1e-9;
+    let (d1, d2, r) = (sub3(q1, p1), sub3(q2, p2), sub3(p1, p2));
+    let (a, e, f) = (dot3(d1, d1), dot3(d2, d2), dot3(d2, r));
+    let (s, t) = if a <= EPS && e <= EPS {
+        (0.0, 0.0)
+    } else if a <= EPS {
+        (0.0, (f / e).clamp(0.0, 1.0))
+    } else {
+        let c = dot3(d1, r);
+        if e <= EPS {
+            ((-c / a).clamp(0.0, 1.0), 0.0)
+        } else {
+            let b = dot3(d1, d2);
+            let denom = a * e - b * b;
+            let s = if denom > EPS {
+                ((b * f - c * e) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let t = (b * s + f) / e;
+            if t < 0.0 {
+                ((-c / a).clamp(0.0, 1.0), 0.0)
+            } else if t > 1.0 {
+                (((b - c) / a).clamp(0.0, 1.0), 1.0)
+            } else {
+                (s, t)
+            }
+        }
+    };
+    let c1 = [0, 1, 2].map(|k| p1[k] + d1[k] * s);
+    let c2 = [0, 1, 2].map(|k| p2[k] + d2[k] * t);
+    sub3(c1, c2)
+}
+
+/// Closest distance between segment `a..b` and the convex polygon `world` with unit normal `n`,
+/// and the vector from the polygon's closest point to the segment's (zero when they cross).
+fn segment_poly_gap(world: &[[f32; 3]], n: [f32; 3], a: [f32; 3], b: [f32; 3]) -> (f32, [f32; 3]) {
+    let (da, db) = (dot3(n, sub3(a, world[0])), dot3(n, sub3(b, world[0])));
+    if da * db <= 0.0 && da != db {
+        let t = da / (da - db);
+        if inside_convex(world, n, [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t)) {
+            return (0.0, [0.0; 3]);
+        }
+    }
+    let faces = [da, db]
+        .into_iter()
+        .zip([a, b])
+        .filter(|&(d, p)| inside_convex(world, n, [0, 1, 2].map(|k| p[k] - n[k] * d)))
+        .map(|(d, _)| n.map(|c| c * d));
+    let edges =
+        (0..world.len()).map(|i| segment_segment_gap(a, b, world[i], world[(i + 1) % world.len()]));
+    faces
+        .chain(edges)
+        .map(|v| (dot3(v, v).sqrt(), v))
+        .fold(
+            (f32::INFINITY, n),
+            |best, gap| if gap.0 < best.0 { gap } else { best },
+        )
 }
 
 fn poly_world(vertices: &[SceneVertex], o: [f32; 3]) -> Vec<[f32; 3]> {
@@ -3363,7 +3557,7 @@ fn spawn_pos(scene: &LdbScene, room_origins: &BTreeMap<i32, [f32; 3]>, idx: usiz
         let ro = room_origins.get(&jp.room_id).copied().unwrap_or([0.0; 3]);
         let wx = ro[0] + jp.pos[0];
         let wz = ro[2] + jp.pos[2];
-        let wy = find_floor_y(scene, wx, ro[1] + jp.pos[1] + EYE_HEIGHT, wz)
+        let wy = find_floor_y(scene, room_origins, wx, ro[1] + jp.pos[1] + EYE_HEIGHT, wz)
             .unwrap_or(ro[1] + jp.pos[1]);
         [wx, wy + EYE_HEIGHT, wz]
     } else {
@@ -6573,17 +6767,80 @@ mod tests {
         scene
     }
 
+    /// One ramp through the origin, `deg` degrees steep, rising along +x.
+    fn ramp(deg: f32) -> LdbScene {
+        let mut scene = floors_at(&[0.0]);
+        let (sin, cos) = deg.to_radians().sin_cos();
+        let poly = &mut scene.static_meshes[0].polys[0];
+        for v in &mut poly.vertices {
+            v.pos[1] = v.pos[0] * sin / cos;
+        }
+        poly.normal = [-sin, cos, 0.0];
+        scene
+    }
+
+    #[test]
+    fn ground_is_no_steeper_than_the_retail_steepness_angle() {
+        // `globalconfig.txt` `MaximumSteepnessAngle 46`, tested at `0x648040`.
+        let rooms = BTreeMap::new();
+        assert_eq!(
+            find_floor_y(&ramp(44.0), &rooms, 0.0, EYE_HEIGHT, 0.0),
+            Some(0.0)
+        );
+        assert_eq!(
+            find_floor_y(&ramp(50.0), &rooms, 0.0, EYE_HEIGHT, 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn a_walk_down_a_ramp_keeps_the_feet_on_it() {
+        // 0x647df0: pulled down by at least 0.05 m, or |move| * tan(MaximumDragDownAngle 60).
+        let rooms = BTreeMap::new();
+        let scene = ramp(30.0);
+        let ground = -0.1 * 30f32.to_radians().tan();
+        let pos = drag_down(&scene, &rooms, [-0.1, EYE_HEIGHT, 0.0], 0.1);
+        assert!((pos[1] - EYE_HEIGHT - ground).abs() < 1e-4, "{pos:?}");
+        let ledge = floors_at(&[-1.0]);
+        let pos = drag_down(&ledge, &rooms, [0.0, EYE_HEIGHT, 0.0], 0.1);
+        assert_eq!(pos[1], EYE_HEIGHT);
+    }
+
     #[test]
     fn a_stair_riser_is_stepped_onto() {
         let scene = floors_at(&[0.0, 0.3]);
-        assert_eq!(find_floor_y(&scene, 0.0, EYE_HEIGHT, 0.0), Some(0.3));
+        assert_eq!(
+            find_floor_y(&scene, &BTreeMap::new(), 0.0, EYE_HEIGHT, 0.0),
+            Some(0.3)
+        );
     }
 
     #[test]
     fn a_surface_above_the_capsule_radius_is_not_stepped_onto() {
         // A railing 1 m up lifted Max onto it at the foot of the house stairs.
         let scene = floors_at(&[0.0, 1.0]);
-        assert_eq!(find_floor_y(&scene, 0.0, EYE_HEIGHT, 0.0), Some(0.0));
+        assert_eq!(
+            find_floor_y(&scene, &BTreeMap::new(), 0.0, EYE_HEIGHT, 0.0),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn a_low_box_is_stepped_onto() {
+        // Floors read static meshes only, so a prop under the step height let Max walk through it
+        // at floor level.
+        let mut scene = floors_at(&[0.0]);
+        let mut lid = glass_quad(false);
+        lid.polys[0].vertices = [[-1.0, -1.0], [-1.0, 1.0], [1.0, 1.0], [1.0, -1.0]]
+            .map(|[x, z]| vert([x, 0.35, z]))
+            .into();
+        lid.polys[0].normal = [0.0, 1.0, 0.0];
+        scene.dynamic_meshes.push(lid);
+        let rooms = BTreeMap::new();
+        assert_eq!(
+            find_floor_y(&scene, &rooms, 0.0, EYE_HEIGHT, 0.0),
+            Some(0.35)
+        );
     }
 
     #[test]
@@ -6689,7 +6946,10 @@ mod tests {
     fn a_long_drop_still_has_a_floor_to_land_on() {
         let scene = floor_and_wall(20.0);
         let rooms = BTreeMap::new();
-        assert_eq!(find_floor_y(&scene, 0.0, 0.0, 0.0), Some(-20.0));
+        assert_eq!(
+            find_floor_y(&scene, &BTreeMap::new(), 0.0, 0.0, 0.0),
+            Some(-20.0)
+        );
         assert!(can_step(&scene, &rooms, [0.0, 0.0, 0.0], 0.5, 0.0));
     }
 
@@ -6710,6 +6970,164 @@ mod tests {
         assert!(!can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.0, 5.1));
         // Sliding along it at the same depth is allowed, or a body on a railing stays stuck.
         assert!(can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.3, 4.8));
+    }
+
+    #[test]
+    fn a_body_caught_in_a_wall_cannot_jump_across_it_in_one_long_step() {
+        // A 0.1 s frame at run speed moves 0.5 m: from 4.8 to 5.3 the body ends farther from
+        // the wall at z = 5 than it started, but on its far side.
+        let scene = floor_and_wall(1.65);
+        let rooms = BTreeMap::new();
+        assert!(!can_step(&scene, &rooms, [0.0, 0.0, 4.8], 0.0, 5.3));
+    }
+
+    #[test]
+    fn a_long_step_into_a_thin_wall_is_not_pushed_out_on_its_far_side() {
+        // Tutorial probe: a 0.55 m step from just outside the radius landed past the wall at
+        // z = 5, and the slide pushed it a radius further out on that side.
+        let scene = floor_and_wall(1.65);
+        let rooms = BTreeMap::new();
+        let pos = step_with_slide(&scene, &rooms, [0.0, 0.0, 4.5], 0.0, 0.55);
+        assert!(pos[2] < 5.0, "{pos:?}");
+    }
+
+    /// One static quad between two `[x, y]` points, spanning z -1..1.
+    fn one_static_poly(corners: &[[f32; 2]], normal: [f32; 3]) -> LdbScene {
+        let mut scene = empty_scene();
+        let vertices = corners
+            .iter()
+            .flat_map(|&[x, y]| [vert([x, y, -1.0]), vert([x, y, 1.0])])
+            .collect::<Vec<_>>();
+        // Order the two edges into a quad: a(-1), a(+1), b(+1), b(-1).
+        let vertices = vec![vertices[0], vertices[1], vertices[3], vertices[2]];
+        scene.static_meshes.push(crate::scene::SceneStaticMesh {
+            mesh_id: 0,
+            room_id: None,
+            world_origin: [0.0; 3],
+            polys: vec![ScenePoly {
+                vertices,
+                normal,
+                material_id: 7,
+                lightmap_id: -1,
+            }],
+        });
+        scene
+    }
+
+    #[test]
+    fn a_wall_leaning_over_the_body_stops_it_at_head_height() {
+        // A face from the floor at x = 0 up to x = 1 at 2.5 m, like a container's slanted side.
+        // At the capsule's top (1.95 m) the face is at x = 0.78, so a body at x = 1.2 is 0.42 m
+        // from it, inside the 0.48 m radius, though 1.11 m from vertex 0's height.
+        let len = (2.5f32 * 2.5 + 1.0).sqrt();
+        let scene = one_static_poly(&[[0.0, 0.0], [1.0, 2.5]], [2.5 / len, -1.0 / len, 0.0]);
+        let rooms = BTreeMap::new();
+        assert!(hits_wall(&scene, &rooms, 1.2, EYE_HEIGHT, 0.0));
+        assert!(!hits_wall(&scene, &rooms, 1.4, EYE_HEIGHT, 0.0));
+    }
+
+    #[test]
+    fn the_wall_gap_is_the_skin_capsule_radius() {
+        // `max_payne.txt` `CapsuleRadius 0.48`: a body 0.45 m from a wall touches it.
+        let scene = one_static_poly(&[[0.0, 0.0], [0.0, 3.0]], [1.0, 0.0, 0.0]);
+        let rooms = BTreeMap::new();
+        assert!(hits_wall(&scene, &rooms, 0.45, EYE_HEIGHT, 0.0));
+        assert!(!hits_wall(&scene, &rooms, 0.5, EYE_HEIGHT, 0.0));
+    }
+
+    #[test]
+    fn a_body_off_centre_slides_through_a_window_wide_enough_for_it() {
+        // The secret room's openings are 1.10 m and 1.15 m; Max is 0.96 m wide. A wall at x = 0
+        // with a 1.1 m gap at z -0.55..0.55, approached head-on 0.2 m off centre.
+        let mut scene = empty_scene();
+        let quad = |corners: [[f32; 3]; 4], normal| ScenePoly {
+            vertices: corners.map(vert).to_vec(),
+            normal,
+            material_id: 7,
+            lightmap_id: -1,
+        };
+        let wall = |z0: f32, z1: f32| {
+            quad(
+                [
+                    [0.0, 0.0, z0],
+                    [0.0, 3.0, z0],
+                    [0.0, 3.0, z1],
+                    [0.0, 0.0, z1],
+                ],
+                [1.0, 0.0, 0.0],
+            )
+        };
+        let floor = quad(
+            [
+                [-5.0, 0.0, -5.0],
+                [5.0, 0.0, -5.0],
+                [5.0, 0.0, 5.0],
+                [-5.0, 0.0, 5.0],
+            ],
+            [0.0, 1.0, 0.0],
+        );
+        scene.static_meshes.push(crate::scene::SceneStaticMesh {
+            mesh_id: 0,
+            room_id: None,
+            world_origin: [0.0; 3],
+            polys: vec![floor, wall(-5.0, -0.55), wall(0.55, 5.0)],
+        });
+        let rooms = BTreeMap::new();
+        let mut pos = [1.5, EYE_HEIGHT, 0.2];
+        for _ in 0..40 {
+            pos = step_with_slide(&scene, &rooms, pos, -0.1, 0.0);
+        }
+        assert!(pos[0] < -1.0, "stopped at {pos:?}");
+        assert!(pos[2].abs() <= 0.07 + 1e-3, "{pos:?}");
+        // Bricked up, the same approach stops in front of the wall, a radius away.
+        scene.static_meshes[0].polys.push(wall(-0.55, 0.55));
+        let mut pos = [1.5, EYE_HEIGHT, 0.2];
+        for _ in 0..40 {
+            pos = step_with_slide(&scene, &rooms, pos, -0.1, 0.0);
+        }
+        assert!((0.48..0.6).contains(&pos[0]), "{pos:?}");
+    }
+
+    #[test]
+    fn a_body_touching_a_dynamic_mesh_cannot_walk_into_it() {
+        // engine28: Max met the parked van's side and walked through it, out of the alley.
+        let mut scene = empty_scene();
+        scene.dynamic_meshes.push(glass_quad(false));
+        let floor = ScenePoly {
+            vertices: [
+                [-5.0, 0.0, -5.0],
+                [5.0, 0.0, -5.0],
+                [5.0, 0.0, 5.0],
+                [-5.0, 0.0, 5.0],
+            ]
+            .map(vert)
+            .to_vec(),
+            normal: [0.0, 1.0, 0.0],
+            material_id: 7,
+            lightmap_id: -1,
+        };
+        scene.static_meshes.push(crate::scene::SceneStaticMesh {
+            mesh_id: 0,
+            room_id: None,
+            world_origin: [0.0; 3],
+            polys: vec![floor],
+        });
+        let rooms = BTreeMap::new();
+        let mut pos = [0.45, EYE_HEIGHT, 0.0];
+        for _ in 0..20 {
+            pos = step_with_slide(&scene, &rooms, pos, -0.1, 0.0);
+        }
+        assert!(pos[0] >= 0.45 - 1e-4, "{pos:?}");
+    }
+
+    #[test]
+    fn a_body_past_a_narrow_face_is_judged_by_its_edge_not_its_plane() {
+        // The face spans z -1..1 at x = 0. At (0.4, z 1.4) the body is 0.4 m from its plane but
+        // 0.57 m from its nearest edge, outside the 0.48 m radius.
+        let scene = one_static_poly(&[[0.0, 0.0], [0.0, 3.0]], [1.0, 0.0, 0.0]);
+        let rooms = BTreeMap::new();
+        assert!(!hits_wall(&scene, &rooms, 0.4, EYE_HEIGHT, 1.4));
+        assert!(hits_wall(&scene, &rooms, 0.4, EYE_HEIGHT, 1.2));
     }
 
     #[test]
@@ -7516,5 +7934,93 @@ mod tests {
             &mut zb,
         );
         fb.iter().filter(|px| **px != 0).count()
+    }
+
+    /// The retail Tutorial with the player's skin capsule, or `None` without a BYOD install.
+    fn retail_tutorial() -> Option<(LdbScene, BTreeMap<i32, [f32; 3]>)> {
+        let game = std::path::PathBuf::from(std::env::var_os("HOME")?).join("Games/MaxPayne1");
+        let level = crate::read_game_bytes(&game, r"\data\database\levels\front_end\Tutorial.ldb")?;
+        let mut scene = crate::scene::parse_ldb_scene(&level)?;
+        scene.apply_startup_enables();
+        scene.player_capsule = crate::load_player_capsule(&game)?;
+        let rooms = scene.rooms.iter().map(|r| (r.id, r.world_origin)).collect();
+        Some((scene, rooms))
+    }
+
+    #[test]
+    fn retail_tutorial_trash_container_stops_the_body() {
+        // #204: Max clipped into the big trash containers in Alley2. Their `trashcan01` faces
+        // span x 52.02..53.82, z -33.3..-27.8 on the floor at y -7.
+        let Some((scene, rooms)) = retail_tutorial() else {
+            return;
+        };
+        let (lo, hi) = ([52.02, -33.3], [53.82, -27.8]);
+        let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+        let mut walks = 0;
+        for a in 0..8 {
+            let (dx, dz) = (a as f32 * std::f32::consts::TAU / 8.0).sin_cos();
+            let start = [
+                centre[0] + dx * 4.0,
+                -7.0 + EYE_HEIGHT,
+                centre[1] + dz * 4.0,
+            ];
+            if !can_stand_at(&scene, &rooms, start[0], start[1], start[2]) {
+                continue;
+            }
+            walks += 1;
+            let mut pos = start;
+            for _ in 0..50 {
+                pos = step_with_slide(&scene, &rooms, pos, -dx * 0.1, -dz * 0.1);
+                let inside = (lo[0]..=hi[0]).contains(&pos[0]) && (lo[1]..=hi[1]).contains(&pos[2]);
+                assert!(
+                    !inside,
+                    "walk {a} from {start:?} entered the container at {pos:?}"
+                );
+            }
+        }
+        assert!(walks > 0, "no free approach to the container");
+    }
+
+    #[test]
+    fn retail_tutorial_secret_room_walls_are_not_crossed() {
+        // #204: Max walked through the wall into the Tutorial's secret room. Walk straight out of
+        // it in 16 directions; no step may cross a static wall at mid-body height.
+        let Some((scene, rooms)) = retail_tutorial() else {
+            return;
+        };
+        let jp = scene
+            .jumppoints
+            .iter()
+            .position(|j| j.name == "::Secret::Jumppoint 00")
+            .expect("secret jumppoint");
+        let start = spawn_pos(&scene, &rooms, jp);
+        for a in 0..16 {
+            let (dx, dz) = (a as f32 * std::f32::consts::TAU / 16.0).sin_cos();
+            let mut pos = start;
+            for _ in 0..60 {
+                let from = pos;
+                pos = step_with_slide(&scene, &rooms, pos, dx * 0.15, dz * 0.15);
+                let (low, high, _) = body_segment(&scene, from[1]);
+                let h = (low + high) / 2.0;
+                let crossed = scene.static_meshes.iter().find_map(|sm| {
+                    sm.polys.iter().find(|p| {
+                        p.normal[1].abs() <= GROUND_NORMAL_Y
+                            && p.vertices.len() >= 3
+                            && blocks_character(&scene, p.material_id)
+                            && segment_poly_gap(
+                                &poly_world(&p.vertices, sm.world_origin),
+                                p.normal,
+                                [from[0], h, from[2]],
+                                [pos[0], h, pos[2]],
+                            )
+                            .0 == 0.0
+                    })
+                });
+                assert!(
+                    crossed.is_none(),
+                    "walk {a}: {from:?} -> {pos:?} crossed a wall"
+                );
+            }
+        }
     }
 }
