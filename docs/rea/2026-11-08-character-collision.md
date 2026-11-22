@@ -97,13 +97,25 @@ records what is read so far and where the reading goes next.
   `0x648a90` to `0x5bd240` on the object at `[arg1+0x188]`. `0x5bd240` (56 instructions) calls `0x5bba80`,
   `0x5c43e0`, `0x4459d0`, `0x449460`, `0x5b4b00`, `0x5bd0a0` and `0x5c4450`. **HYPOTHESIS:** the `0x5b`-`0x5c`
   range, which also holds slot 22's `0x5bf8e0`, is the collision library, and `0x5bd240` hands it a shape to sweep.
+- **VERIFIED:** `0x5bd240` sits in the level-database code (`0x5b`-`0x5d` holds the `X_LEVELDB_*_LOAD` and
+  "Level Database Importer" strings). It adds `0.02` (`0x7d20c8`) to a squared length (`0x449460`) and an argument,
+  and `0x5bd0a0` adds `0.02` again (`0x7d20cc`). **HYPOTHESIS:** a padded bound for a level query, not the sweep.
+- **VERIFIED:** `0x63f0a0` (`ret 0x18`) tests one runtime shape against another. It runs only when the other
+  shape's `+0x125` and this shape's `+0x124` are set (or the reverse when argument 5 is non-zero), the same bytes
+  slot 25 checks. The character reaches it at `0x695022`.
+- **VERIFIED:** `0x649a10` (about 920 instructions, one `fsqrt`, constants `0`, `1` and `4`) is shared by
+  `0x63f0a0`, `0x64ab30`, `0x64abf0`, `0x64ad70`, the AI (`0x4f0b70`) and `0x6d8b00`. `0x64abf0` and `0x64ad70`
+  are called from `0x694ab0`, which runs from game-mode setup (`0x451e70`, string "Character \"%s\" capsule too
+  small for camera sphere", and `0x452410` from the `MaxPayne_GameMode` constructor `0x44f190`).
+  **STRONGLY SUPPORTED:** `0x649a10` is the shared shape-versus-shape distance core; whether level triangles go
+  through it is not read.
 - **VERIFIED:** `0x646430`'s caller starts at `0x6467f7` (234 instructions, no float work). It reads the owner
   through `0x748300` and position through `0x642d40`/`0x642d50`, and also calls `0x5c4450`.
 
 ## Next
 
-1. Read `0x5bd240` and `0x5c4450` (called from both slot 24 and `0x6467f7`); one of them should lead to the
-   capsule-versus-triangle step.
+1. Read `0x649a10` with a decompiler (`rz-ghidra` or Ghidra headless); its size makes `objdump` reading slow.
+   Check whether its inputs can be a level triangle, then find who calls it per frame for the player.
 2. Resolve the virtual calls inside `0x63b410`, `0x5bf8e0` and `0x646f30` (for example `[ebx+0x4c]` in `0x646f30`).
    Identify each receiver's class from how the object is built, then read its vtable, as done above.
 3. Alternatively, trace it at run time: run retail under Wine with a debugger (`winedbg`) and break on `0x647660`
