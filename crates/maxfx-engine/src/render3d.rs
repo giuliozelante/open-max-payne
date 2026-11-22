@@ -721,6 +721,10 @@ pub fn run_3d_walkthrough(
                 last_contact = contact;
             }
             player_pos = step_with_slide(&scene, &room_origins, player_pos, dx, dz);
+            // 0x68d277 runs the drag-down only for a character on the ground.
+            if grounded && vel_y <= 0.0 {
+                player_pos = drag_down(&scene, &room_origins, player_pos, dx.hypot(dz));
+            }
 
             let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
             for text in &stepped.messages {
@@ -2158,6 +2162,27 @@ fn can_stand_at(
 /// `MaxPayne.exe` compares as `dot(up, n) > cos(angle)` at `0x648040`. Steeper faces are walls.
 // shortcut: the retail default, not read from a mod's globalconfig; thread the config through when one changes it.
 const GROUND_NORMAL_Y: f32 = 0.694_658_4;
+/// `tan` of `globalconfig.txt` `MaximumDragDownAngle 60` degrees, taken at `0x647edc`.
+// shortcut: the retail default, not read from a mod's globalconfig; thread the config through when one changes it.
+const DRAG_DOWN_TAN: f32 = 1.732_050_8;
+/// Least drag-down distance, in metres (`0x7d5924`).
+const DRAG_DOWN_MIN: f32 = 0.05;
+
+/// Pull a walking body onto ground just below it, as `0x647df0` does after each move of `moved` metres.
+fn drag_down(
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    pos: [f32; 3],
+    moved: f32,
+) -> [f32; 3] {
+    let reach = (moved * DRAG_DOWN_TAN).max(DRAG_DOWN_MIN);
+    let feet = pos[1] - EYE_HEIGHT;
+    match find_floor_y(scene, rooms, pos[0], pos[1], pos[2]) {
+        Some(y) if y < feet && feet - y <= reach => [pos[0], y + EYE_HEIGHT, pos[2]],
+        _ => pos,
+    }
+}
+
 const STEP_UP: f32 = 0.48;
 
 fn find_floor_y(
@@ -6766,6 +6791,19 @@ mod tests {
             find_floor_y(&ramp(50.0), &rooms, 0.0, EYE_HEIGHT, 0.0),
             None
         );
+    }
+
+    #[test]
+    fn a_walk_down_a_ramp_keeps_the_feet_on_it() {
+        // 0x647df0: pulled down by at least 0.05 m, or |move| * tan(MaximumDragDownAngle 60).
+        let rooms = BTreeMap::new();
+        let scene = ramp(30.0);
+        let ground = -0.1 * 30f32.to_radians().tan();
+        let pos = drag_down(&scene, &rooms, [-0.1, EYE_HEIGHT, 0.0], 0.1);
+        assert!((pos[1] - EYE_HEIGHT - ground).abs() < 1e-4, "{pos:?}");
+        let ledge = floors_at(&[-1.0]);
+        let pos = drag_down(&ledge, &rooms, [0.0, EYE_HEIGHT, 0.0], 0.1);
+        assert_eq!(pos[1], EYE_HEIGHT);
     }
 
     #[test]
