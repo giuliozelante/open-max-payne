@@ -73,9 +73,8 @@ Tutorial.
    segment to each triangle, and a blocked move slides along what it meets. Still to do: floors from the same test,
    the exe's own slide response, and removing the escape rules. The character's per-frame physics step is
    `0x68c960` ([REA](rea/2026-11-08-character-collision.md)); ground now splits from wall at retail's
-   `MaximumSteepnessAngle` (46 degrees). Next: retail's drag-down onto ground below (`0x647df0`, at least 0.05 m,
-   `|move| * tan MaximumDragDownAngle`) in place of the 0.48 m snap, then the no-ground branch of `0x6480a0` for the
-   slide. Retail-gated tests now walk the body at Alley2's trash container and out of the secret room, and
+   `MaximumSteepnessAngle` (46 degrees). A grounded player is dragged down onto ground below as `0x647df0` does (at least 0.05 m, or
+   `|move| * tan MaximumDragDownAngle`). Next: the no-ground branch of `0x6480a0`, for the slide. Retail-gated tests now walk the body at Alley2's trash container and out of the secret room, and
    both hold; what remains for done is the owner's capture of the same two spots.
 2. **Enemies, phase 2** ([spec](specs/2026-11-06-health-and-enemy-ai.md)). Read the range and cone gates before the
    sight ray (`0x4f6700`-`0x4f6b16`) and what feeds the stimulus. Then the interpreter for `StandAndShoot`, aiming at
