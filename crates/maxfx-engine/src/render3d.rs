@@ -2115,7 +2115,7 @@ fn presses_into_wall(
     };
     let static_hit = scene.static_meshes.iter().any(|sm| {
         sm.polys.iter().any(|poly| {
-            poly.normal[1].abs() <= 0.45
+            poly.normal[1].abs() <= GROUND_NORMAL_Y
                 && poly.vertices.len() >= 3
                 && blocks_character(scene, poly.material_id)
                 && presses(&poly_world(&poly.vertices, sm.world_origin), poly.normal)
@@ -2134,7 +2134,7 @@ fn presses_into_wall(
                     .iter()
                     .map(|v| xform_point(xform, origin, v.pos))
                     .collect();
-                n[1].abs() <= 0.45
+                n[1].abs() <= GROUND_NORMAL_Y
                     && world.len() >= 3
                     && blocks_character(scene, poly.material_id)
                     && presses(&world, n)
@@ -2154,6 +2154,10 @@ fn can_stand_at(
 
 /// Highest ledge the feet ride onto. Retail moves a capsule with a round bottom and has no step
 /// value; HYPOTHESIS: its radius, `max_payne.txt` `CapsuleRadius`.
+/// Least up-component of a ground normal: `globalconfig.txt` `MaximumSteepnessAngle 46` degrees, which
+/// `MaxPayne.exe` compares as `dot(up, n) > cos(angle)` at `0x648040`. Steeper faces are walls.
+// shortcut: the retail default, not read from a mod's globalconfig; thread the config through when one changes it.
+const GROUND_NORMAL_Y: f32 = 0.694_658_4;
 const STEP_UP: f32 = 0.48;
 
 fn find_floor_y(
@@ -2170,7 +2174,7 @@ fn find_floor_y(
         let oy = sm.world_origin[1];
         let oz = sm.world_origin[2];
         for poly in &sm.polys {
-            if poly.normal[1] < 0.45 || poly.vertices.len() < 3 {
+            if poly.normal[1] < GROUND_NORMAL_Y || poly.vertices.len() < 3 {
                 continue;
             }
             if !blocks_character(scene, poly.material_id) {
@@ -2212,7 +2216,9 @@ fn find_floor_y(
         let (xform, origin) = dynamic_world(scene, idx, rooms);
         for poly in &dm.polys {
             let n = xform_dir(xform, poly.normal);
-            if n[1] < 0.45 || poly.vertices.len() < 3 || !blocks_character(scene, poly.material_id)
+            if n[1] < GROUND_NORMAL_Y
+                || poly.vertices.len() < 3
+                || !blocks_character(scene, poly.material_id)
             {
                 continue;
             }
@@ -2268,7 +2274,7 @@ fn wall_contact(
         let oy = sm.world_origin[1];
         let oz = sm.world_origin[2];
         for poly in &sm.polys {
-            if poly.normal[1].abs() > 0.45 || poly.vertices.len() < 3 {
+            if poly.normal[1].abs() > GROUND_NORMAL_Y || poly.vertices.len() < 3 {
                 continue;
             }
             if !blocks_character(scene, poly.material_id) {
@@ -2348,7 +2354,7 @@ fn dynamic_wall_hit(
                 min_z = min_z.min(p[2]);
                 max_z = max_z.max(p[2]);
             }
-            if n[1].abs() > 0.45 {
+            if n[1].abs() > GROUND_NORMAL_Y {
                 // A floor or lid the feet cannot ride onto, like a van's load bed.
                 let step = wy - EYE_HEIGHT + STEP_UP;
                 if max_y > step && min_y < body_max_y && xz_gap(&world, wx, wz) < radius {
@@ -6736,6 +6742,32 @@ mod tests {
         scene
     }
 
+    /// One ramp through the origin, `deg` degrees steep, rising along +x.
+    fn ramp(deg: f32) -> LdbScene {
+        let mut scene = floors_at(&[0.0]);
+        let (sin, cos) = deg.to_radians().sin_cos();
+        let poly = &mut scene.static_meshes[0].polys[0];
+        for v in &mut poly.vertices {
+            v.pos[1] = v.pos[0] * sin / cos;
+        }
+        poly.normal = [-sin, cos, 0.0];
+        scene
+    }
+
+    #[test]
+    fn ground_is_no_steeper_than_the_retail_steepness_angle() {
+        // `globalconfig.txt` `MaximumSteepnessAngle 46`, tested at `0x648040`.
+        let rooms = BTreeMap::new();
+        assert_eq!(
+            find_floor_y(&ramp(44.0), &rooms, 0.0, EYE_HEIGHT, 0.0),
+            Some(0.0)
+        );
+        assert_eq!(
+            find_floor_y(&ramp(50.0), &rooms, 0.0, EYE_HEIGHT, 0.0),
+            None
+        );
+    }
+
     #[test]
     fn a_stair_riser_is_stepped_onto() {
         let scene = floors_at(&[0.0, 0.3]);
@@ -7934,7 +7966,7 @@ mod tests {
                 let h = (low + high) / 2.0;
                 let crossed = scene.static_meshes.iter().find_map(|sm| {
                     sm.polys.iter().find(|p| {
-                        p.normal[1].abs() <= 0.45
+                        p.normal[1].abs() <= GROUND_NORMAL_Y
                             && p.vertices.len() >= 3
                             && blocks_character(&scene, p.material_id)
                             && segment_poly_gap(
