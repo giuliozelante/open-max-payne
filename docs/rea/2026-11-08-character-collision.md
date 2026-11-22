@@ -112,10 +112,50 @@ records what is read so far and where the reading goes next.
 - **VERIFIED:** `0x646430`'s caller starts at `0x6467f7` (234 instructions, no float work). It reads the owner
   through `0x748300` and position through `0x642d40`/`0x642d50`, and also calls `0x5c4450`.
 
+## The per-frame character physics update `0x68c960`
+
+- **VERIFIED:** the debug overlay `0x422bc0` prints the player's `vel`, `Grav.vel` and `Anim.vel` (strings `0x869be4`
+  and neighbours) through `0x421ec0`, `0x421ed0` and `0x421ee0`. They forward to `X_Character` getters: velocity is
+  the vector at `+0x41e` (`0x694540`), gravity velocity comes from the member at `+0x404` (`0x694550`, then
+  `0x742840`), animation velocity is at `+0x42a` (`0x694560`).
+- **VERIFIED:** apart from that getter and one store in `0x682ab0`, the velocity fields are written only by
+  `0x68c960` (about 1 750 instructions, `ret 0x8`, 11 uses of `+0x404`). Its one caller is `0x687f20`, called from
+  `0x44c050` in the game mode. **STRONGLY SUPPORTED:** `0x68c960` is the character's per-frame physics step.
+- **VERIFIED:** `0x68c960` moves the character through two routines, not through `0x696f60`:
+  `0x6480a0(up, [0x891b7c], &target, &hit)` at `0x68d20c`, then, when that finds ground and the character is not
+  airborne (`[edi+0x228] <= 0`), `0x647df0(up, 0.05, &target, [0x891b80], [0x891b7c], 0x8b4c10)` at `0x68d277`.
+  `up` is the vector at `+0x50` of the object at `[this+0x60]` (`0x642d60`, `0x74fe10`).
+- **VERIFIED:** `0x891b80` and `0x891b7c` are set once, by `0x695880` and `0x695870`, from arguments 9 and 10 of the
+  `MaxPayne_GameMode` constructor (`0x44f436`, `0x44f43f`).
+
+### Ground test `0x648040`
+
+- **VERIFIED:** `0x648040` returns true when `dot(up, n) > cos(angle * 0.01745329)` (`0x7cfb04`, `fcos`) and
+  `dot(move, n) <= FLT_MIN` (`0x7cefb8`): the contact normal `n` faces up within `angle`, and the move does not lift
+  off it. `0x6480a0` asks the contact list from `0x646710` (records of `0x28` bytes: normal at `+0x4`, object at
+  `+0x24`) for the first contact that passes, and returns that object as the ground. With no such contact it combines
+  the normals (`0x6485e0`) and gives up when `|dot(n, -up)| < 0.03` (`0x7d4ed0`, a double); the rest of that branch
+  (`0x648226`-`0x6485c3`, through `0x64af10` and `0x64c910`) is not read.
+
+### Drag-down `0x647df0`
+
+- **VERIFIED:** `0x647df0` probes straight down from the target. The probe length is `|move| * tan(a4 * 0.01745329)`
+  (`fptan` at `0x647edc`), at least `0.05` m (`0x7d5924`, the clamp at `0x647ef1`). The probe is turned by the
+  shape's 3x3 (`0x74e8e0`) and tested with `0x647b90`. When it hits and `dot(n, up) > cos(a5)` (`0x647fea`), the
+  shape is moved onto the hit with `0x64f100` (after `0x6437e0`), and the routine returns true.
+- **STRONGLY SUPPORTED:** `a4` (`0x891b80`) is `MaximumDragDownAngle` and `a5` (`0x891b7c`) is
+  `MaximumSteepnessAngle`. Retail `globalconfig.txt` sets them to `60` and `46` degrees; the parser stores them at
+  `+0x10` and `+0xc` of its block (`0x50b22b`, `0x50b215`). The use matches the names: a tangent turns the drag-down
+  angle into a distance, a cosine turns the steepness angle into a floor test. The path from the parsed block to the
+  constructor arguments (`0x4171a1`, `0x44bc17`) is not traced.
+- **Consequence for the engine:** a surface is ground when its normal is within 46 degrees of up (`n.y > 0.695`),
+  and a walking character is pulled down onto ground up to `max(0.05, |move| * tan 60)` below it. The engine's
+  `0.45` normal threshold and its step-height snap are not these rules.
+
 ## Next
 
-1. Read `0x649a10` with a decompiler (`rz-ghidra` or Ghidra headless); its size makes `objdump` reading slow.
-   Check whether its inputs can be a level triangle, then find who calls it per frame for the player.
+1. Read the no-ground branch of `0x6480a0` (`0x648226`-`0x6485c3`) and the contact-list builder `0x646710`: that is
+   where the wall slide and the step-up should be. `0x649a10` (the shape distance core) comes after.
 2. Resolve the virtual calls inside `0x63b410`, `0x5bf8e0` and `0x646f30` (for example `[ebx+0x4c]` in `0x646f30`).
    Identify each receiver's class from how the object is built, then read its vtable, as done above.
 3. Alternatively, trace it at run time: run retail under Wine with a debugger (`winedbg`) and break on `0x647660`
