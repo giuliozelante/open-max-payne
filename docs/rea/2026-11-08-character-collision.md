@@ -161,6 +161,11 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
+- **STRONGLY SUPPORTED (ruled out):** `0x645ca0`, the only other routine `0x64af10` alone calls, sorts what was hit
+  by RTTI name (`type_info::name`, `0x7ca34c`) and formats messages (`sprintf`); not the slide. `0x645340` calls
+  itself at `0x645a26` over the children from `+0x24` (`0x411d90`, `0x640dc0`): it carries a moved transform down a
+  hierarchy; not the slide either.
+
 1. Find the slide: read `0x64af10`'s use of the contact list after `0x645340`/`0x645ca0`, where a blocked move
    should lose its component along the contact normal. `0x649a10` (the shape distance core) comes after.
 2. Resolve the virtual calls inside `0x63b410`, `0x5bf8e0` and `0x646f30` (for example `[ebx+0x4c]` in `0x646f30`).
