@@ -135,7 +135,14 @@ records what is read so far and where the reading goes next.
   off it. `0x6480a0` asks the contact list from `0x646710` (records of `0x28` bytes: normal at `+0x4`, object at
   `+0x24`) for the first contact that passes, and returns that object as the ground. With no such contact it combines
   the normals (`0x6485e0`) and gives up when `|dot(n, -up)| < 0.03` (`0x7d4ed0`, a double); the rest of that branch
-  (`0x648226`-`0x6485c3`, through `0x64af10` and `0x64c910`) is not read.
+  (`0x648226`-`0x6485c3`, through `0x64af10` and `0x64c910`) is read below.
+- **VERIFIED:** that branch runs only when the touched normals are all near-horizontal (walls). It saves the shape's
+  transform (`0x74e8e0`, 3x4) and bytes `+0xb0`/`+0x88`, moves the shape `0.05` m (`0x3d4ccccd`) along its own up
+  axis (row `+0xc` of the 3x3) with `0x64af10` (flag `0`, list `0x8b3ae0`), then tests a line `0.1` m straight down
+  from there (`0.05 * 2.0`, `0x40000000`) with `0x64c910`. A hit keeps the best-facing contact as the ground; no hit
+  clears it. `0x642ed0` then restores the saved transform. **STRONGLY SUPPORTED:** this is a probe for a body wedged
+  between walls with its feet over ground, not the wall slide. The slide is still **UNKNOWN**; it is not in
+  `0x6480a0`.
 
 ### Drag-down `0x647df0`
 
@@ -154,8 +161,8 @@ records what is read so far and where the reading goes next.
 
 ## Next
 
-1. Read the no-ground branch of `0x6480a0` (`0x648226`-`0x6485c3`) and the contact-list builder `0x646710`: that is
-   where the wall slide and the step-up should be. `0x649a10` (the shape distance core) comes after.
+1. Find the slide: read `0x64af10`'s use of the contact list after `0x645340`/`0x645ca0`, where a blocked move
+   should lose its component along the contact normal. `0x649a10` (the shape distance core) comes after.
 2. Resolve the virtual calls inside `0x63b410`, `0x5bf8e0` and `0x646f30` (for example `[ebx+0x4c]` in `0x646f30`).
    Identify each receiver's class from how the object is built, then read its vtable, as done above.
 3. Alternatively, trace it at run time: run retail under Wine with a debugger (`winedbg`) and break on `0x647660`
