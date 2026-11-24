@@ -1978,6 +1978,8 @@ pub struct LevelsTxtEntry {
     pub fog: Option<crate::scene::LevelFog>,
     /// `Gravity` (m/s², `#define`s resolved): retail is `( 0, GRAVITY_VALUE , 0 )`, -20.
     pub gravity: Option<[f32; 3]>,
+    /// `[Difficulty]`: what the adaptive difficulty judges this level by.
+    pub difficulty: Option<health::LevelThresholds>,
 }
 
 impl LevelsTxtEntry {
@@ -2062,9 +2064,30 @@ pub fn parse_levels_txt(text: &str) -> Vec<LevelsTxtEntry> {
             ambient: prop_value(body, "AmbientColor").and_then(|v| parse_color3(&v, &defines)),
             fog: level_fog(body, &defines),
             gravity: prop_value(body, "Gravity").and_then(|v| parse_color3(&v, &defines)),
+            difficulty: level_thresholds(body),
         });
     }
     out
+}
+
+/// The `[Difficulty]` part of a level block. Health is written in percent.
+fn level_thresholds(body: &str) -> Option<health::LevelThresholds> {
+    let block = &body[body.to_ascii_lowercase().find("[difficulty]")?..];
+    let value = |key| {
+        let v = prop_value(block, key)?;
+        Some(v.split(';').next()?.trim().to_string())
+    };
+    let number = |key| value(key)?.parse::<f32>().ok();
+    let count = |key| value(key)?.parse::<u32>().ok();
+    let percent = |key| Some(value(key)?.strip_suffix('%')?.trim().parse::<f32>().ok()? / 100.0);
+    Some(health::LevelThresholds {
+        health: [percent("MinimumHealth")?, percent("MaximumHealth")?],
+        deaths: [count("MinimumDeaths")?, count("MaximumDeaths")?],
+        time: [number("MinimumTime")?, number("MaximumTime")?],
+        hardcore_health: percent("HardcoreHealth")?,
+        hardcore_deaths: count("HardcoreDeaths")?,
+        hardcore_time: number("HardcoreTime")?,
+    })
 }
 
 /// `Fogging = TRUE` block fog. Values may carry a trailing `// comment` after the `;`.
@@ -2772,16 +2795,24 @@ pub fn load_player_capsule(game_dir: &Path) -> Option<[f32; 2]> {
     Some([key("capsuleradius")?, key("capsuletop")?])
 }
 
+/// `difficulty.txt`'s `[normal]` rows, for the adaptive difficulty.
+pub fn load_difficulty_rows(game_dir: &Path) -> Option<health::DifficultyRows> {
+    let text = read_game_bytes(game_dir, r"\data\difficulty.txt")?;
+    health::DifficultyRows::parse(&String::from_utf8_lossy(&text))
+}
+
 /// Max at full health, from `max_payne.txt` and the difficulty.
-pub fn load_player_health(game_dir: &Path) -> Option<health::PlayerHealth> {
-    let difficulty = load_difficulty(game_dir)?;
+pub fn load_player_health(
+    game_dir: &Path,
+    difficulty: &health::Difficulty,
+) -> Option<health::PlayerHealth> {
     let skin = read_game_bytes(game_dir, r"\data\database\skins\max_payne.txt")?;
     let ranges = read_game_bytes(game_dir, r"\data\database\ai_ranges.h").unwrap_or_default();
     let max = kf2::skin_max_health(
         &String::from_utf8_lossy(&skin),
         &String::from_utf8_lossy(&ranges),
     )?;
-    Some(health::PlayerHealth::new(max as f32, &difficulty))
+    Some(health::PlayerHealth::new(max as f32, difficulty))
 }
 
 /// `weaponpriority.txt` `[BestWeapons]`, strongest first.
@@ -4495,6 +4526,30 @@ mod tests {
     }
 
     #[test]
+    fn levels_txt_reads_the_level_difficulty_thresholds() {
+        // Retail `part0_level1`, comments included.
+        let txt = "[part0_level1]\n{\n\t[Properties]\n\tDirectory = part0;\n\tLevel = part0_level1.ldb;\n\
+            \tMinimumHealth = 0%; // not this level's\n\
+            \t[Difficulty]\n\tMaximumHealth\t= 90%; // percent of player's maximum health\n\
+            \tMinimumHealth\t= 60%; // percent\n\tMinimumDeaths\t= 1; // number\n\
+            \tMaximumDeaths\t= 1;\n\tMinimumTime\t\t= 90;\n\tMaximumTime\t\t= 180;\n\
+            \tHardcoreHealth\t= 300%;\n\tHardcoreDeaths\t= 0;\n\tHardcoreTime\t= 60;\n\
+            \t[Timedmode]\n\tPlayTime = 60;\n}\n";
+        let entries = parse_levels_txt(txt);
+        assert_eq!(
+            entries[0].difficulty,
+            Some(health::LevelThresholds {
+                health: [0.6, 0.9],
+                deaths: [1, 1],
+                time: [90.0, 180.0],
+                hardcore_health: 3.0,
+                hardcore_deaths: 0,
+                hardcore_time: 60.0,
+            })
+        );
+    }
+
+    #[test]
     fn bgra_video_bytes_become_0rgb_frame_pixels() {
         let bytes = [0x10, 0x20, 0x30, 0xff, 0x01, 0x02, 0x03, 0x00];
         let mut frame = vec![0u32; 2];
@@ -4878,8 +4933,13 @@ mod tests {
         assert_eq!(difficulty.player_health, 1.0);
         assert_eq!(difficulty.regenerate, 0.04);
         assert_eq!(difficulty.gained_immediately, 0.05);
-        let max = load_player_health(&game).expect("max_payne.txt");
+        let max = load_player_health(&game, &difficulty).expect("max_payne.txt");
         assert_eq!(max.max, 60.0);
+        // `IntermediateLevels = 2`: seven rows, a new game on the middle one.
+        let rows = load_difficulty_rows(&game).expect("rows");
+        assert_eq!((rows.rows.len(), rows.row), (7, 3));
+        assert_eq!(rows.current(), difficulty);
+        assert_eq!(rows.painkiller, 0.2);
     }
 
     #[test]

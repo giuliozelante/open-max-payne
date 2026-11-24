@@ -109,6 +109,8 @@ pub fn run_3d_walkthrough(
     player_skin: Option<&str>,
     world_sphere: Option<&str>,
     cinematic: bool,
+    rows: Option<&crate::health::DifficultyRows>,
+    stats: &mut crate::health::LevelStats,
 ) -> Result<LevelEnd, String> {
     screen.set_title(title);
     let (catalog_player, johnny_rig) = load_character_rigs(level_path);
@@ -143,7 +145,13 @@ pub fn run_3d_walkthrough(
     let johnny_index = if bodies.is_empty() { None } else { Some(0) };
     let mut skin_cache: BTreeMap<String, (usize, bool, bool)> = BTreeMap::new();
 
-    let difficulty = crate::load_difficulty(&catalog_root(level_path));
+    // Without a session's rows (a level opened directly), the level starts on `[default]`.
+    let loaded = rows
+        .is_none()
+        .then(|| crate::load_difficulty_rows(&catalog_root(level_path)))
+        .flatten();
+    let rows = rows.or(loaded.as_ref());
+    let difficulty = rows.map(crate::health::DifficultyRows::current);
     let enemy_health = difficulty.map_or(1.0, |difficulty| difficulty.enemy_health);
     let auto_aim_scale = difficulty.map_or([1.0; 2], |difficulty| difficulty.auto_aim);
     // Build active enemies from `scene.characters`, which wait until a script teleports them.
@@ -306,7 +314,9 @@ pub fn run_3d_walkthrough(
     let mut particle_lights = ParticleLights::default();
     let mut particle_sprites = ParticleSprites::default();
     scene.inventory.defs = crate::load_weapon_defs(&game_root);
-    let mut player_health = crate::load_player_health(&game_root);
+    let mut player_health =
+        difficulty.and_then(|difficulty| crate::load_player_health(&game_root, &difficulty));
+    let painkiller_gain = rows.map_or(0.0, |rows| rows.painkiller);
     if let Some(capsule) = crate::load_player_capsule(&game_root) {
         scene.player_capsule = capsule;
     }
@@ -1237,6 +1247,11 @@ pub fn run_3d_walkthrough(
 
         if let Some(max) = player_health.as_mut() {
             max.step(world_dt);
+            let painkillers = scene.inventory.painkillers() as f32;
+            stats.tick(
+                world_dt,
+                max.health + painkillers * painkiller_gain * max.max,
+            );
             if let Some(flash) = damage_flash.and_then(|flash| flash.of(last_health - max.health)) {
                 scene.screen_flash = Some(flash);
             }

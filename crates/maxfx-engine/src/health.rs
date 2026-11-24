@@ -21,16 +21,22 @@ pub struct Difficulty {
     pub auto_aim: [f32; 2],
 }
 
+fn percent(block: &crate::hud::Section, key: &str) -> Option<f32> {
+    let text = block.text(key)?.strip_suffix('%')?;
+    Some(text.trim().parse::<f32>().ok()? / 100.0)
+}
+
 impl Difficulty {
     pub fn parse(text: &str) -> Option<Self> {
         let sections = parse_sections(text);
         let block = sections
             .iter()
             .find(|section| section.path == "difficulty/normal/default")?;
-        let percent = |key: &str| {
-            let text = block.text(key)?.strip_suffix('%')?;
-            Some(text.trim().parse::<f32>().ok()? / 100.0)
-        };
+        Self::from_section(block)
+    }
+
+    fn from_section(block: &crate::hud::Section) -> Option<Self> {
+        let percent = |key: &str| percent(block, key);
         Some(Self {
             enemy_health: block.number("enemyhealthmultiplier")?,
             player_health: block.number("playerhealthmultiplier")?,
@@ -42,6 +48,149 @@ impl Difficulty {
             ]
             .map(|key| block.number(key).unwrap_or(1.0).max(1.0)),
         })
+    }
+}
+
+/// `[normal]`'s rows from easiest to hardest: `[minimum]`, `IntermediateLevels` blends, `[default]`,
+/// as many blends, `[maximum]` (`0x676cba`-`0x676e9e`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DifficultyRows {
+    pub rows: Vec<Difficulty>,
+    /// The row in play; a new game starts on `[default]`.
+    pub row: usize,
+    /// `HealthGainedFromPainkiller`, as a fraction of maximum health.
+    pub painkiller: f32,
+}
+
+impl DifficultyRows {
+    pub fn parse(text: &str) -> Option<Self> {
+        let sections = parse_sections(text);
+        let section = |name: &str| {
+            let path = format!("difficulty/normal/{name}");
+            sections.iter().find(|section| section.path == path)
+        };
+        let properties = section("properties")?;
+        let n = properties
+            .number("intermediatelevels")
+            .unwrap_or(0.0)
+            .max(0.0) as usize;
+        let [min, default, max] = ["minimum", "default", "maximum"]
+            .map(|name| section(name).and_then(Difficulty::from_section));
+        let (min, default, max) = (min?, default?, max?);
+        let steps = (n + 1) as f32;
+        let mut rows = vec![min];
+        rows.extend((1..=n).map(|k| blend(&min, &default, k as f32 / steps)));
+        rows.push(default);
+        rows.extend((1..=n).map(|k| blend(&default, &max, k as f32 / steps)));
+        rows.push(max);
+        Some(Self {
+            rows,
+            row: n + 1,
+            painkiller: percent(properties, "healthgainedfrompainkiller").unwrap_or(0.0),
+        })
+    }
+
+    pub fn current(&self) -> Difficulty {
+        self.rows[self.row]
+    }
+
+    /// One row harder (`0x676230`) or easier (`0x676260`), never past the ends.
+    pub fn step(&mut self, delta: i32) {
+        self.row = match delta {
+            1.. => (self.row + 1).min(self.rows.len() - 1),
+            ..=-1 => self.row.saturating_sub(1),
+            0 => self.row,
+        };
+    }
+}
+
+/// `0x677200`: `(1 - t) * a + t * b` on every field.
+fn blend(a: &Difficulty, b: &Difficulty, t: f32) -> Difficulty {
+    let mix = |a: f32, b: f32| (1.0 - t) * a + t * b;
+    Difficulty {
+        enemy_health: mix(a.enemy_health, b.enemy_health),
+        player_health: mix(a.player_health, b.player_health),
+        regenerate: mix(a.regenerate, b.regenerate),
+        gained_immediately: mix(a.gained_immediately, b.gained_immediately),
+        auto_aim: [0, 1].map(|k| mix(a.auto_aim[k], b.auto_aim[k])),
+    }
+}
+
+/// A level's `levels.txt` `[Difficulty]` block. Health is a fraction of maximum health.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LevelThresholds {
+    /// `MinimumHealth`, `MaximumHealth`.
+    pub health: [f32; 2],
+    /// `MinimumDeaths`, `MaximumDeaths`.
+    pub deaths: [u32; 2],
+    /// `MinimumTime`, `MaximumTime`, in seconds.
+    pub time: [f32; 2],
+    pub hardcore_health: f32,
+    pub hardcore_deaths: u32,
+    pub hardcore_time: f32,
+}
+
+impl LevelThresholds {
+    /// +1 for one row harder, -1 for one easier, 0 to stay (`0x453d1d`-`0x453ebb`).
+    pub fn step(&self, stats: &LevelStats, max_health: f32) -> i32 {
+        // shortcut: retail divides by zero here; a level with no full second of play keeps the row.
+        if stats.seconds <= 0.0 || max_health <= 0.0 {
+            return 0;
+        }
+        let h = stats.health_sum / stats.seconds / max_health;
+        let (deaths, seconds) = (stats.deaths, stats.seconds);
+        let mut up = 0;
+        let mut down = 0;
+        if h > self.health[1] {
+            up += 1;
+        } else if h < self.health[0] {
+            down += 1;
+        }
+        if deaths < self.deaths[0] {
+            up += 1;
+        } else if deaths > self.deaths[1] {
+            down += 1;
+        }
+        if seconds < self.time[0] {
+            up += 1;
+        } else if seconds > self.time[1] {
+            down += 1;
+        }
+        let hardcore = h > self.hardcore_health
+            || deaths < self.hardcore_deaths
+            || seconds < self.hardcore_time;
+        if up >= 2 || hardcore {
+            1
+        } else if down >= 2 {
+            -1
+        } else {
+            0
+        }
+    }
+}
+
+/// What the level-end step measures, kept on the player in retail (`+0x75c`-`+0x768`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LevelStats {
+    pub deaths: u32,
+    /// Whole seconds played.
+    pub seconds: f32,
+    /// One health sample per second, in points, painkillers included.
+    pub health_sum: f32,
+    /// The part of a second not yet sampled.
+    pub carry: f32,
+}
+
+impl LevelStats {
+    /// `0x687843`-`0x6878cc`: `sample` is health plus painkillers times `HealthGainedFromPainkiller`
+    /// times maximum health, taken once per whole second.
+    pub fn tick(&mut self, dt: f32, sample: f32) {
+        self.carry += dt;
+        while self.carry >= 1.0 {
+            self.health_sum += sample;
+            self.seconds += 1.0;
+            self.carry -= 1.0;
+        }
     }
 }
 
@@ -234,6 +383,89 @@ mod tests {
         \t\tHealthRegenerateMultiplier = 4%;\n\t\tHealthGainedImmediately = 5%;\n\
         \t}\n\t[nightmare]\n\t{\n\t\t[default]\n\t\tEnemyHealthMultiplier = 1.2;\n\
         \t\tPlayerHealthMultiplier = 0.4;\n\t}\n}\n";
+
+    fn row(enemy: f32, player: f32, regenerate: &str) -> String {
+        format!(
+            "EnemyHealthMultiplier = {enemy};\nPlayerHealthMultiplier = {player};\n\
+             AutoAimCapsuleRadiusMultiplier = 4.0;\nAutoAimCapsuleHeightMultiplier = 2.0;\n\
+             HealthRegenerateMultiplier = {regenerate};\nHealthGainedImmediately = 5%;\n"
+        )
+    }
+
+    fn rows_text() -> String {
+        format!(
+            "[difficulty]\n{{\n[normal]\n{{\n[properties]\nIntermediateLevels = 1;\n\
+             HealthGainedFromPainkiller = 20%;\n[minimum]\n{}[default]\n{}[maximum]\n{}}}\n}}\n",
+            row(0.25, 2.0, "6%"),
+            row(0.8, 1.0, "4%"),
+            row(1.2, 0.4, "2%"),
+        )
+    }
+
+    #[test]
+    fn intermediate_levels_blend_minimum_default_and_maximum() {
+        let rows = DifficultyRows::parse(&rows_text()).expect("rows");
+        assert_eq!(rows.rows.len(), 5);
+        assert_eq!(rows.row, 2);
+        assert_eq!(rows.current().player_health, 1.0);
+        assert_eq!(rows.rows[1].player_health, 1.5);
+        assert_eq!(rows.rows[3].enemy_health, 1.0);
+        assert_eq!(rows.rows[4].regenerate, 0.02);
+        assert_eq!(rows.painkiller, 0.2);
+    }
+
+    #[test]
+    fn stepping_stays_inside_the_rows() {
+        let mut rows = DifficultyRows::parse(&rows_text()).expect("rows");
+        for _ in 0..5 {
+            rows.step(1);
+        }
+        assert_eq!(rows.row, 4);
+        for _ in 0..9 {
+            rows.step(-1);
+        }
+        assert_eq!(rows.row, 0);
+    }
+
+    /// `part0_level1`'s `[Difficulty]` block.
+    const TUTORIAL: LevelThresholds = LevelThresholds {
+        health: [0.6, 0.9],
+        deaths: [1, 1],
+        time: [90.0, 180.0],
+        hardcore_health: 3.0,
+        hardcore_deaths: 0,
+        hardcore_time: 60.0,
+    };
+
+    fn stats(h: f32, deaths: u32, seconds: f32) -> LevelStats {
+        LevelStats {
+            deaths,
+            seconds,
+            health_sum: h * 100.0 * seconds,
+            carry: 0.0,
+        }
+    }
+
+    #[test]
+    fn two_good_marks_make_it_harder_and_two_bad_ones_easier() {
+        assert_eq!(TUTORIAL.step(&stats(0.95, 0, 100.0), 100.0), 1);
+        assert_eq!(TUTORIAL.step(&stats(0.5, 2, 200.0), 100.0), -1);
+        assert_eq!(TUTORIAL.step(&stats(0.7, 0, 120.0), 100.0), 0);
+    }
+
+    #[test]
+    fn any_hardcore_mark_makes_it_harder() {
+        assert_eq!(TUTORIAL.step(&stats(0.5, 2, 50.0), 100.0), 1);
+    }
+
+    #[test]
+    fn health_is_sampled_once_per_second_of_play() {
+        let mut stats = LevelStats::default();
+        stats.tick(0.6, 50.0);
+        assert_eq!(stats.seconds, 0.0);
+        stats.tick(0.6, 80.0);
+        assert_eq!((stats.seconds, stats.health_sum), (1.0, 80.0));
+    }
 
     const CONFIG: &str = "[character]\nDamageFallingThreshold = 15.0; // velocity\n\
         RelativeFallingDamage = 1%;\nDamageFallingSpeedDeduct = 10.0;\nFallingDamageExponent = 2.1;\n\
