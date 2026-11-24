@@ -479,6 +479,8 @@ fn main() -> ExitCode {
                                     None,
                                     None,
                                     false,
+                                    None,
+                                    &mut Default::default(),
                                 ) {
                                     eprintln!("3D walkthrough error: {e}");
                                     return ExitCode::FAILURE;
@@ -664,11 +666,46 @@ fn launch_startup(game_dir: &Path) -> ExitCode {
         return ExitCode::SUCCESS;
     };
     println!("start level {level_id}");
-    if let Err(e) = play_level(&mut screen, &mut music, game_dir, &level_id, true) {
+    let mut run = Run {
+        rows: maxfx_engine::load_difficulty_rows(game_dir),
+        adaptive: std::env::var("OPENMAXFX_DIFFICULTY").as_deref() != Ok("flat"),
+        stats: Default::default(),
+    };
+    if let Err(e) = play_level(&mut screen, &mut music, game_dir, &level_id, true, &mut run) {
         eprintln!("error: {e}");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// The difficulty a session plays on: retail's adaptive rows, or `[default]` throughout with
+/// `OPENMAXFX_DIFFICULTY=flat` (issue #165).
+struct Run {
+    rows: Option<maxfx_engine::health::DifficultyRows>,
+    adaptive: bool,
+    /// The level in play. Deaths survive its restarts, which retail's reload loses.
+    stats: maxfx_engine::health::LevelStats,
+}
+
+impl Run {
+    /// The level-end step for `level_id`, then fresh counters for the next level.
+    fn finish_level(&mut self, game_dir: &Path, level_id: &str) {
+        let stats = std::mem::take(&mut self.stats);
+        let Some(rows) = self.rows.as_mut().filter(|_| self.adaptive) else {
+            return;
+        };
+        let entry = maxfx_engine::level_entry(game_dir, level_id).ok();
+        let Some(thresholds) = entry.and_then(|entry| entry.difficulty) else {
+            return;
+        };
+        let max =
+            maxfx_engine::load_player_health(game_dir, &rows.current()).map_or(0.0, |h| h.max);
+        rows.step(thresholds.step(&stats, max));
+        println!(
+            "difficulty {level_id}: {} deaths, {} s, row {}",
+            stats.deaths, stats.seconds, rows.row
+        );
+    }
 }
 
 /// One menu level. `startup_level` runs its own intro scripts (cutscene cameras) until they
@@ -679,6 +716,7 @@ fn play_level(
     game_dir: &Path,
     level_id: &str,
     allow_handoff: bool,
+    run: &mut Run,
 ) -> Result<(), String> {
     let (win, bytes) =
         maxfx_engine::load_level_by_id(game_dir, level_id).map_err(|e| e.to_string())?;
@@ -720,9 +758,17 @@ fn play_level(
         player_skin.as_deref(),
         world_sphere.as_deref(),
         handoff.is_some(),
+        run.rows.as_ref(),
+        &mut run.stats,
     )?;
     if end == maxfx_engine::render3d::LevelEnd::Died {
-        return play_level(screen, music, game_dir, level_id, allow_handoff);
+        // Like a reload, the restart drops the time and health counted; the death stays.
+        let deaths = run.stats.deaths + 1;
+        run.stats = maxfx_engine::health::LevelStats {
+            deaths,
+            ..Default::default()
+        };
+        return play_level(screen, music, game_dir, level_id, allow_handoff, run);
     }
     if let Some(hand) = handoff {
         println!(
@@ -733,7 +779,8 @@ fn play_level(
             maxfx_engine::load_novel_session(game_dir, std::slice::from_ref(&hand.novel_page));
         music.play_mode(game_dir, "graphicnovelmode");
         maxfx_engine::menu_ui::show_novel_session(screen, &chrome, &shown);
-        return play_level(screen, music, game_dir, &hand.next_level, false);
+        run.finish_level(game_dir, level_id);
+        return play_level(screen, music, game_dir, &hand.next_level, false, run);
     }
     Ok(())
 }
