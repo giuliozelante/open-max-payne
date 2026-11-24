@@ -111,25 +111,7 @@ impl Bindings {
     /// `Input Settings` from a Wine prefix's `user.reg`, over the defaults; `None` without that
     /// section. Names are `" %d Button%d type"` and `value`, and `" %d Slider type"` (`0x4cb3d0`).
     pub fn from_wine_registry(user_reg: &str) -> Option<Self> {
-        let header = r"[Software\\Remedy Entertainment\\Max Payne\\Input Settings]";
-        let start = user_reg.find(header)?;
-        let body = user_reg[start + header.len()..].lines().skip(1);
-        let mut values: BTreeMap<String, u32> = BTreeMap::new();
-        for line in body {
-            if line.starts_with('[') {
-                break;
-            }
-            let Some((name, value)) = line.split_once('=') else {
-                continue;
-            };
-            let name = name.trim().trim_matches('"').trim();
-            let Some(value) = value.trim().strip_prefix("dword:") else {
-                continue;
-            };
-            if let Ok(value) = u32::from_str_radix(value, 16) {
-                values.insert(name.to_string(), value);
-            }
-        }
+        let values = input_settings(user_reg)?;
         let mut bindings = Self::retail_defaults();
         for (index, slot) in bindings.slots.iter_mut().enumerate() {
             for (k, button_slot) in slot.buttons.iter_mut().enumerate() {
@@ -144,6 +126,106 @@ impl Bindings {
             }
         }
         Some(bindings)
+    }
+}
+
+/// The `dword` values of `user.reg`'s `Input Settings` section, by name.
+fn input_settings(user_reg: &str) -> Option<BTreeMap<String, u32>> {
+    let header = r"[Software\\Remedy Entertainment\\Max Payne\\Input Settings]";
+    let start = user_reg.find(header)?;
+    let body = user_reg[start + header.len()..].lines().skip(1);
+    let mut values: BTreeMap<String, u32> = BTreeMap::new();
+    for line in body {
+        if line.starts_with('[') {
+            break;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let name = name.trim().trim_matches('"').trim();
+        let Some(value) = value.trim().strip_prefix("dword:") else {
+            continue;
+        };
+        if let Ok(value) = u32::from_str_radix(value, 16) {
+            values.insert(name.to_string(), value);
+        }
+    }
+    Some(values)
+}
+
+/// The mouse half of `Input Settings`, as `0x4cb58d`-`0x4cb669` reads it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MouseSettings {
+    /// `Mouse Sensitivity X` and `Y` times 0.0001, 0.5 outside 0 to 1.
+    pub sensitivity: [f32; 2],
+    /// `Invert Mouse`: pushing the mouse forward looks down (`0x5195f6`).
+    pub invert: bool,
+    /// `Invert Mouse Wheel` (`0x5198f5`).
+    pub invert_wheel: bool,
+}
+
+impl Default for MouseSettings {
+    /// `0x4cb30b`-`0x4cb323`.
+    fn default() -> Self {
+        Self {
+            sensitivity: [0.5; 2],
+            invert: false,
+            invert_wheel: false,
+        }
+    }
+}
+
+impl MouseSettings {
+    /// From a Wine prefix's `user.reg`; defaults where a value is missing.
+    pub fn from_wine_registry(user_reg: &str) -> Self {
+        let Some(values) = input_settings(user_reg) else {
+            return Self::default();
+        };
+        let flag = |name: &str| values.get(name).is_some_and(|&value| value != 0);
+        let sensitivity = |name: &str| {
+            let value = values.get(name).map_or(0.5, |&raw| raw as f32 * 0.0001);
+            if (0.0..=1.0).contains(&value) {
+                value
+            } else {
+                0.5
+            }
+        };
+        Self {
+            sensitivity: [
+                sensitivity("Mouse Sensitivity X"),
+                sensitivity("Mouse Sensitivity Y"),
+            ],
+            invert: flag("Invert Mouse"),
+            invert_wheel: flag("Invert Mouse Wheel"),
+        }
+    }
+
+    /// Factor on raw mouse counts per axis, `0x519480`: sensitivity * 1.4 + 0.1.
+    pub fn gain(&self) -> [f32; 2] {
+        self.sensitivity.map(|s| s * 1.4 + 0.1)
+    }
+}
+
+/// Retail's mouse smoothing, `0x519370`: each axis keeps a carry, hands out half of it while the
+/// mouse moves on that axis, and all of it on the first still frame.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MouseSmoothing {
+    carry: [f32; 2],
+}
+
+impl MouseSmoothing {
+    pub fn step(&mut self, input: [f32; 2]) -> [f32; 2] {
+        let mut out = [0.0; 2];
+        for k in 0..2 {
+            self.carry[k] += input[k];
+            out[k] = if input[k] != 0.0 {
+                self.carry[k] * 0.5
+            } else {
+                self.carry[k]
+            };
+            self.carry[k] -= out[k];
+        }
+        out
     }
 }
 
@@ -618,13 +700,23 @@ fn latin1(bytes: Vec<u8>) -> String {
 /// The player's bindings: retail's own from the Wine prefix the launcher uses (`$WINEPREFIX`, else
 /// `<game>/.wine`), else the retail defaults.
 pub fn load_bindings(game_dir: &std::path::Path) -> Bindings {
+    read_user_reg(game_dir)
+        .and_then(|text| Bindings::from_wine_registry(&text))
+        .unwrap_or_else(Bindings::retail_defaults)
+}
+
+/// The player's mouse settings, from the same prefix as [`load_bindings`].
+pub fn load_mouse_settings(game_dir: &std::path::Path) -> MouseSettings {
+    read_user_reg(game_dir).map_or_else(MouseSettings::default, |text| {
+        MouseSettings::from_wine_registry(&text)
+    })
+}
+
+fn read_user_reg(game_dir: &std::path::Path) -> Option<String> {
     let prefix = std::env::var_os("WINEPREFIX")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| game_dir.join(".wine"));
-    std::fs::read(prefix.join("user.reg"))
-        .ok()
-        .and_then(|bytes| Bindings::from_wine_registry(&latin1(bytes)))
-        .unwrap_or_else(Bindings::retail_defaults)
+    std::fs::read(prefix.join("user.reg")).ok().map(latin1)
 }
 
 /// `data/input.txt` and the language's `database/stringdefines.h`.
@@ -653,6 +745,39 @@ mod tests {
 
     fn names() -> KeyNames {
         KeyNames::parse(INPUT, DEFINES)
+    }
+
+    #[test]
+    fn mouse_settings_come_from_the_registry_and_fall_back_when_out_of_range() {
+        let reg = "[Software\\\\Remedy Entertainment\\\\Max Payne\\\\Input Settings] 1\n\
+            #time=1\n\
+            \"Invert Mouse\"=dword:00000001\n\
+            \"Invert Mouse Wheel\"=dword:00000000\n\
+            \"Mouse Sensitivity X\"=dword:00002710\n\
+            \"Mouse Sensitivity Y\"=dword:00004e20\n";
+        let mouse = MouseSettings::from_wine_registry(reg);
+        assert_eq!(
+            mouse,
+            MouseSettings {
+                sensitivity: [1.0, 0.5],
+                invert: true,
+                invert_wheel: false,
+            }
+        );
+        assert_eq!(mouse.gain(), [1.5, 0.8]);
+        assert_eq!(
+            MouseSettings::from_wine_registry(""),
+            MouseSettings::default()
+        );
+    }
+
+    #[test]
+    fn smoothing_hands_out_half_the_carry_while_moving_and_the_rest_when_still() {
+        let mut smoothing = MouseSmoothing::default();
+        assert_eq!(smoothing.step([10.0, -4.0]), [5.0, -2.0]);
+        assert_eq!(smoothing.step([2.0, 0.0]), [3.5, -2.0]);
+        assert_eq!(smoothing.step([0.0, 0.0]), [3.5, 0.0]);
+        assert_eq!(smoothing.step([0.0, 0.0]), [0.0, 0.0]);
     }
 
     use minifb::{Key, KeyRepeat, MouseButton, MouseMode};
