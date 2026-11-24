@@ -26,8 +26,25 @@ fn main() -> ExitCode {
     let mut want_window = env::var("OPENMAXFX_ENGINE_WINDOW").unwrap_or_default() == "1";
     let mut frame_out: Option<String> = None;
     let mut frame_camera: Option<String> = None;
+    let mut skip_startup = false;
     while args.peek().is_some_and(|a| a.starts_with('-')) {
         match args.next().as_deref() {
+            // Retail's switches (`0x40cb90`), so its shortcuts keep working.
+            Some("-skipstartup") => skip_startup = true,
+            Some("-screenshot") => maxfx_engine::render3d::enable_screenshots(true),
+            // The engine always opens a window, and has no launcher dialog, Direct3D preloads
+            // or video memory check.
+            Some("-window" | "-nodialog" | "-disable3dpreloads" | "-novidmemcheck") => {}
+            Some(
+                flag @ ("-developer"
+                | "-developerkeys"
+                | "-profile"
+                | "-showprogress"
+                | "-enableloadingstats"
+                | "-debugmem"
+                | "-savecombinationmaps"
+                | "-showreference"),
+            ) => eprintln!("{flag}: not supported yet, ignored"),
             Some("--window") => want_window = true,
             Some("--frame") => frame_out = args.next(),
             Some("--camera") => frame_camera = args.next(),
@@ -41,7 +58,7 @@ fn main() -> ExitCode {
             },
             Some("-h" | "--help") => {
                 eprintln!(
-                    "usage: maxfx-engine [--window] [--renderer hw|sw] [--frame out.ppm [--camera NAME.DO]] <game-dir|archive.ras|archive.mpm|level.ldb|.ai>"
+                    "usage: maxfx-engine [--window] [--renderer hw|sw] [--frame out.ppm [--camera NAME.DO]] [-skipstartup] [-screenshot] <game-dir|archive.ras|archive.mpm|level.ldb|.ai>"
                 );
                 return ExitCode::SUCCESS;
             }
@@ -567,7 +584,7 @@ fn main() -> ExitCode {
     }
     if p.is_dir() {
         if want_window {
-            return launch_startup(p);
+            return launch_startup(p, skip_startup);
         }
         return match discover_ras_files(p) {
             Ok(files) => {
@@ -633,7 +650,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn launch_startup(game_dir: &Path) -> ExitCode {
+fn launch_startup(game_dir: &Path, skip_startup: bool) -> ExitCode {
     // One window for the whole session: video, menu, comics and levels.
     let mut screen = match maxfx_engine::frontend::Screen::open("Open Max Payne") {
         Ok(screen) => screen,
@@ -642,7 +659,9 @@ fn launch_startup(game_dir: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Some(video) = maxfx_engine::startup_video_path(game_dir) {
+    if skip_startup {
+        println!("startup video: skipped");
+    } else if let Some(video) = maxfx_engine::startup_video_path(game_dir) {
         println!("startup video {}", video.display());
         if let Err(e) = maxfx_engine::play_intro_video(&video, &mut screen) {
             eprintln!("intro: {e} — continuing to the main menu");
