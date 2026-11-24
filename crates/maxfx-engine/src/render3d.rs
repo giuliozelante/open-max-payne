@@ -429,6 +429,7 @@ pub fn run_3d_walkthrough(
     let mut zb = vec![f32::INFINITY; W * H];
     let mut background = vec![0u32; W * H];
     let mut last_frame = std::time::Instant::now();
+    let fps_limit = frame_limit(std::env::var("OPENMAXFX_FPS_LIMIT").ok().as_deref());
 
     screen.set_mouse_captured(true);
     loop {
@@ -1810,6 +1811,9 @@ pub fn run_3d_walkthrough(
                 screen.show(&fb)?
             }
         }
+        if let Some(fps) = fps_limit {
+            std::thread::sleep(limiter_wait(now.elapsed(), fps));
+        }
     }
     screen.set_mouse_captured(false);
     screen.put_gpu(gpu);
@@ -2010,6 +2014,18 @@ fn mouse_look(yaw: f32, pitch: f32, (dx, dy): (f32, f32)) -> (f32, f32) {
         yaw + dx * MOUSE_LOOK,
         (pitch - dy * MOUSE_LOOK).clamp(-1.25, 1.25),
     )
+}
+
+/// `OPENMAXFX_FPS_LIMIT`: at most this many frames a second, held to the 60-240 range the
+/// community patches offer. Anything that is not a number leaves the frame rate free.
+fn frame_limit(value: Option<&str>) -> Option<f32> {
+    let fps = value?.trim().parse::<f32>().ok()?;
+    Some(fps.clamp(60.0, 240.0))
+}
+
+/// What is left of a `1 / fps` frame after `busy`.
+fn limiter_wait(busy: std::time::Duration, fps: f32) -> std::time::Duration {
+    std::time::Duration::from_secs_f64(1.0 / f64::from(fps)).saturating_sub(busy)
 }
 
 /// Longest step one frame may take (a loading stall or a window drag).
@@ -6584,6 +6600,19 @@ mod tests {
         // A railing 1 m up lifted Max onto it at the foot of the house stairs.
         let scene = floors_at(&[0.0, 1.0]);
         assert_eq!(find_floor_y(&scene, 0.0, EYE_HEIGHT, 0.0), Some(0.0));
+    }
+
+    #[test]
+    fn the_frame_limit_waits_out_the_rest_of_each_frame() {
+        assert_eq!(frame_limit(Some("100")), Some(100.0));
+        assert_eq!(frame_limit(Some("1000")), Some(240.0));
+        assert_eq!(frame_limit(Some("off")), None);
+        let busy = std::time::Duration::from_millis(4);
+        assert_eq!(
+            limiter_wait(busy, 100.0),
+            std::time::Duration::from_millis(6)
+        );
+        assert_eq!(limiter_wait(busy * 5, 100.0), std::time::Duration::ZERO);
     }
 
     #[test]

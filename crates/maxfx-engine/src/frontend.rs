@@ -75,6 +75,12 @@ struct InputState {
 }
 
 impl InputState {
+    /// Alt+Enter went down this frame: the windowed / borderless toggle.
+    fn alt_enter(&self) -> bool {
+        let alt = [Key::LeftAlt, Key::RightAlt].map(|key| self.down.contains(&(key as u32)));
+        self.pressed.contains(&(Key::Enter as u32)) && alt.contains(&true)
+    }
+
     fn add_mouse_motion(&mut self, delta: (f64, f64)) {
         self.mouse_motion.0 += delta.0;
         self.mouse_motion.1 += delta.1;
@@ -195,6 +201,11 @@ impl WinitFrontend {
         });
         if std::mem::take(&mut self.input.refocused) && self.mouse_captured {
             self.apply_mouse_capture();
+        }
+        if self.input.alt_enter() {
+            let borderless = self.window.fullscreen().is_none();
+            self.window
+                .set_fullscreen(borderless.then_some(winit::window::Fullscreen::Borderless(None)));
         }
     }
 
@@ -549,6 +560,15 @@ mod tests {
         input.add_mouse_motion((3.0, -1.0));
         input.add_mouse_motion((2.0, -1.0));
         assert_eq!(input.mouse_motion, (5.0, -2.0));
+    }
+
+    #[test]
+    fn alt_enter_asks_for_the_other_window_mode() {
+        let mut input = InputState::default();
+        input.pressed.insert(Key::Enter as u32);
+        assert!(!input.alt_enter());
+        input.down.insert(Key::RightAlt as u32);
+        assert!(input.alt_enter());
     }
 
     #[test]
