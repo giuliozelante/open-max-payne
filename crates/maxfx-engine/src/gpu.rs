@@ -103,6 +103,7 @@ impl GpuSurface {
         renderer: &GpuRenderer,
         surface: wgpu::Surface<'static>,
         format: wgpu::TextureFormat,
+        present_mode: wgpu::PresentMode,
         width: u32,
         height: u32,
     ) -> Self {
@@ -111,7 +112,7 @@ impl GpuSurface {
             format,
             width: width.max(1),
             height: height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode,
             desired_maximum_frame_latency: 2,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
@@ -151,6 +152,18 @@ impl GpuSurface {
         self.config.height = height;
         self.surface.configure(&renderer.device, &self.config);
         (self.color, self.depth, self.color_group) = window_targets(renderer, width, height);
+    }
+}
+
+/// `OPENMAXFX_VSYNC`: unset or `on` waits for the display; `off` never waits and may tear;
+/// `fast` waits without holding the game back (mailbox), or acts as `off` where the surface lacks it.
+fn present_mode(choice: Option<&str>, supported: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    use wgpu::PresentMode::*;
+    match choice {
+        Some("off") => AutoNoVsync,
+        Some("fast") if supported.contains(&Mailbox) => Mailbox,
+        Some("fast") => AutoNoVsync,
+        _ => AutoVsync,
     }
 }
 
@@ -793,7 +806,9 @@ impl GpuRenderer {
             .or_else(|| caps.formats.first().copied())?;
         let renderer = Self::build(device, queue, scene);
         let (w, h) = frontend.size();
-        let surface = GpuSurface::new(&renderer, surface, format, w, h);
+        let vsync = std::env::var("OPENMAXFX_VSYNC").ok();
+        let present_mode = present_mode(vsync.as_deref(), &caps.present_modes);
+        let surface = GpuSurface::new(&renderer, surface, format, present_mode, w, h);
         Some((renderer, surface))
     }
 
@@ -1968,6 +1983,15 @@ fn add_polys(
 mod tests {
     use super::*;
     use crate::scene::{SceneMaterial, ScenePoly, SceneStaticMesh, SceneVertex};
+
+    #[test]
+    fn vsync_choices_pick_a_present_mode_the_surface_has() {
+        use wgpu::PresentMode::*;
+        assert_eq!(present_mode(None, &[Fifo]), AutoVsync);
+        assert_eq!(present_mode(Some("off"), &[Fifo]), AutoNoVsync);
+        assert_eq!(present_mode(Some("fast"), &[Fifo, Mailbox]), Mailbox);
+        assert_eq!(present_mode(Some("fast"), &[Fifo]), AutoNoVsync);
+    }
 
     fn vert(pos: [f32; 3]) -> SceneVertex {
         SceneVertex {
