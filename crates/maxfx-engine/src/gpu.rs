@@ -1296,7 +1296,13 @@ impl GpuRenderer {
         zb: &mut [f32],
     ) {
         let (w, h) = (FRAME_W as u32, FRAME_H as u32);
-        let frame = self.prepare_scene(scene, (pos, right, up, fwd), use_lightmaps, characters);
+        let frame = self.prepare_scene(
+            scene,
+            (pos, right, up, fwd),
+            use_lightmaps,
+            characters,
+            (FRAME_W as f32, FRAME_H as f32),
+        );
         let color_view = self.color.create_view(&Default::default());
         let depth_view = self.depth.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -1409,6 +1415,13 @@ struct SceneFrame {
     characters: Vec<CharacterDraw>,
 }
 
+/// Clip-space scale for a `fov_scale` measured on the `FRAME_H`-tall frame, drawn at `w` x `h`.
+/// The vertical angle stays retail's; a wider target sees more at the sides (Hor+).
+fn projection_scale(fov_scale: f32, w: f32, h: f32) -> [f32; 2] {
+    let y = fov_scale / (FRAME_H as f32 * 0.5);
+    [y * h / w, y]
+}
+
 impl GpuRenderer {
     /// Camera, dynamic mesh transforms and character triangles for this frame.
     fn prepare_scene(
@@ -1417,22 +1430,19 @@ impl GpuRenderer {
         (pos, right, up, fwd): GpuView,
         use_lightmaps: bool,
         characters: &[GpuCharacter],
+        size: (f32, f32),
     ) -> SceneFrame {
         let character_draws = self.prepare_characters(characters);
-        let (w, h) = (FRAME_W as f32, FRAME_H as f32);
-        let fov_scale = crate::render3d::fov_scale(scene.fov_multiplier.value);
+        let (w, h) = size;
+        let [sx, sy] =
+            projection_scale(crate::render3d::fov_scale(scene.fov_multiplier.value), w, h);
         let v4 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
         let camera = CameraUniform {
             pos: v4(pos),
             right: v4(right),
             up: v4(up),
             fwd: v4(fwd),
-            params: [
-                fov_scale / (w * 0.5),
-                fov_scale / (h * 0.5),
-                if use_lightmaps { 1.0 } else { 0.0 },
-                FAR_Z,
-            ],
+            params: [sx, sy, if use_lightmaps { 1.0 } else { 0.0 }, FAR_Z],
             params2: [NEAR_Z, if self.sky.1 { 1.0 } else { 0.0 }, w, h],
             fog: scene.fog.map_or([0.0; 4], |fog| {
                 [
@@ -1547,7 +1557,8 @@ impl GpuRenderer {
         hud: &[u32],
     ) {
         surface.resize(self, window_size.0, window_size.1);
-        let frame = view.map(|v| self.prepare_scene(scene, v, use_lightmaps, characters));
+        let size = (surface.config.width as f32, surface.config.height as f32);
+        let frame = view.map(|v| self.prepare_scene(scene, v, use_lightmaps, characters, size));
         self.upload_layers(background, hud, scene.screen_fade.map(|fade| fade.color()));
         let output = match surface.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -1803,7 +1814,15 @@ impl GpuRenderer {
         background: Option<&[u32]>,
         hud: &[u32],
     ) -> Vec<u32> {
-        let frame = view.map(|v| self.prepare_scene(scene, v, use_lightmaps, characters));
+        let frame = view.map(|v| {
+            self.prepare_scene(
+                scene,
+                v,
+                use_lightmaps,
+                characters,
+                (FRAME_W as f32, FRAME_H as f32),
+            )
+        });
         self.upload_layers(background, hud, scene.screen_fade.map(|fade| fade.color()));
         let color = self.color.create_view(&Default::default());
         let depth = self.depth.create_view(&Default::default());
@@ -1968,6 +1987,17 @@ fn add_polys(
 mod tests {
     use super::*;
     use crate::scene::{SceneMaterial, ScenePoly, SceneStaticMesh, SceneVertex};
+
+    #[test]
+    fn a_wider_window_keeps_the_height_and_sees_more_at_the_sides() {
+        let f = 600.0;
+        assert_eq!(projection_scale(f, 960.0, 600.0), [1.25, 2.0]);
+        // 21:9 at a different height: same vertical angle, no horizontal stretch.
+        assert_eq!(
+            projection_scale(f, 2520.0, 1080.0),
+            [2.0 * 1080.0 / 2520.0, 2.0]
+        );
+    }
 
     fn vert(pos: [f32; 3]) -> SceneVertex {
         SceneVertex {
