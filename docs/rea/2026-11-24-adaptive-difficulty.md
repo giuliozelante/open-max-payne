@@ -18,15 +18,27 @@ current row, and `0x6760e0` returns its address: `table[+0x20] + row * 32`.
 | `0x676260` | row - 1, at least 0 |
 | `0x676280` / `0x676290` | set / get the row |
 
-Row getters read floats at `+0x0` (`0x676370`), `+0x4`, `+0x8`, `+0xc`, `+0x10`, `+0x14`, `+0x18` and `+0x1c`. `0x691c0c` multiplies
-`+0x0` into the player's maximum health, so it is `PlayerHealthMultiplier`. The other fields are not mapped yet.
+**VERIFIED.** `0x6770a0` reads a row's keys; `0x677200` blends two rows field by field, `(1 - t) * a + t * b`.
 
-**STRONGLY SUPPORTED.** The keys `0x676570` describes are `frequentdeathmessages`, `endofgamemessages`, `minimum`,
+| Offset | Key | Note |
+|---|---|---|
+| `+0x0` | `EnemyHealthMultiplier` | `0x691c0c` multiplies it into a character's maximum health when the virtual `+0x8c` check passes |
+| `+0x4` | `AmmoFoundMultiplier` | |
+| `+0x8` | `PlayerHealthMultiplier` | |
+| `+0xc` | `AutoAimCapsuleHeightMultiplier` | raised to 1.0 when below (`0x6771af`) |
+| `+0x10` | `AutoAimCapsuleRadiusMultiplier` | raised to 1.0 when below (`0x6771ca`) |
+| `+0x14` | `HealthRegenerateMultiplier` | |
+| `+0x18` | `HealthGainedImmediately` | |
+| `+0x1c` | `BulletTimeGainedPerKillMultiplier` | |
+
+**VERIFIED.** With `n = IntermediateLevels`, a mode has `2n + 3` rows (`0x676cba`-`0x676cce`) and starts on row `n + 1`.
+Row 0 is `[minimum]`, row `n + 1` is `[default]` and row `2n + 2` is `[maximum]` (`0x676d9c`-`0x676dd9`). Row `k` below the
+default blends minimum and default at `t = k / (n + 1)`; row `k` above blends default and maximum at `t = (k - n - 1) / (n + 1)`
+(`0x676deb`-`0x676e9e`). Since `[minimum]` gives the player more health, a higher row is harder.
+
+**VERIFIED.** The mode keys `0x676570` describes are `frequentdeathmessages`, `endofgamemessages`, `minimum`,
 `default`, `maximum`, `SaveGameLimit`, `IntermediateLevels`, `HealthGainedFromPainkiller`, `DeathFrequency` and
-`FrequentDeaths`, so the rows are steps between `[minimum]`, `[default]` and `[maximum]`.
-
-**UNKNOWN.** How `IntermediateLevels` places the rows, and which row is the easiest. The next read is the loop after
-`0x6767a1`, which allocates `count * 16 + 4` bytes.
+`FrequentDeaths`. **STRONGLY SUPPORTED:** `0x676400` reads the mode's `+0xc`, used as `HealthGainedFromPainkiller` below.
 
 ## What a level measures
 
@@ -69,8 +81,8 @@ Two scores start at 0 (`0x453d1d`-`0x453df4`):
 | otherwise `seconds > MaximumTime` | down + 1 |
 
 A hardcore run is `h > HardcoreHealth`, or `deaths < HardcoreDeaths`, or `seconds < HardcoreTime` (`0x453e1c`-`0x453e7e`).
-Up 2 or more, or a hardcore run, calls `0x676230` and stores +1 in the level's history record. Otherwise down 2 or more calls
-`0x676260` and stores -1 (`0x453e86`-`0x453ebb`). The record (36 bytes, list at `+0x12e4`) also keeps the row, deaths, h and
+Up 2 or more, or a hardcore run, calls `0x676230` (harder) and stores +1 in the level's history record. Otherwise down 2 or more calls
+`0x676260` (easier) and stores -1 (`0x453e86`-`0x453ebb`). The record (36 bytes, list at `+0x12e4`) also keeps the row, deaths, h and
 seconds; `0x456d10` prints the list under `Difficulty   Deaths   Health    Time    Level Name`.
 
 ## Why retail escalates
