@@ -360,6 +360,10 @@ pub fn run_3d_walkthrough(
         .map(|text| crate::hud::parse_string_table(&text))
         .unwrap_or_default();
     let bindings = crate::input::load_bindings(&game_root);
+    let mouse_settings = crate::input::load_mouse_settings(&game_root);
+    // `OPENMAXFX_MOUSE_SMOOTHING=0` turns retail's smoothing off.
+    let mut mouse_smoothing = (std::env::var("OPENMAXFX_MOUSE_SMOOTHING").as_deref() != Ok("0"))
+        .then(crate::input::MouseSmoothing::default);
     let mut actions = crate::input::ActionInput::new(bindings.clone());
     let key_names = crate::input::load_key_names(&game_root);
     let mut print_log = crate::hud::HudPrintLog::default();
@@ -553,6 +557,11 @@ pub fn run_3d_walkthrough(
                 }
             }
             let wheel = window.scroll();
+            let wheel = if mouse_settings.invert_wheel {
+                -wheel
+            } else {
+                wheel
+            };
             if wheel != 0.0 {
                 scene.inventory.step_weapon(wheel.signum() as i32);
             }
@@ -607,6 +616,7 @@ pub fn run_3d_walkthrough(
             } else {
                 1.0
             };
+            let motion = mouse_counts(motion, &mouse_settings, mouse_smoothing.as_mut());
             (yaw, pitch) = mouse_look(yaw, pitch, (motion.0 * slowed, motion.1 * slowed));
         } else if hard_mouse.is_none() && window.get_mouse_down(MouseButton::Left) {
             if let Some((mx, my)) = window.get_mouse_pos(MouseMode::Pass) {
@@ -2002,6 +2012,19 @@ const MOUSE_LOOK: f32 = 0.003;
 /// away for cinematics, and a mouse moved then must not turn Max.
 fn look_motion(motion: Option<(f32, f32)>, controls: bool) -> Option<(f32, f32)> {
     motion.filter(|_| controls)
+}
+
+/// Raw mouse counts through retail's gain, smoothing and inversion. The gain is relative to the
+/// default sensitivity's 0.8, so [`MOUSE_LOOK`] stays the turn per count at default settings.
+fn mouse_counts(
+    (dx, dy): (f32, f32),
+    settings: &crate::input::MouseSettings,
+    smoothing: Option<&mut crate::input::MouseSmoothing>,
+) -> (f32, f32) {
+    let [gx, gy] = settings.gain().map(|gain| gain / 0.8);
+    let counts = [dx * gx, dy * gy];
+    let [x, y] = smoothing.map_or(counts, |smoothing| smoothing.step(counts));
+    (x, if settings.invert { -y } else { y })
 }
 
 /// `(yaw, pitch)` after a mouse move: right turns right, up looks up.
@@ -6584,6 +6607,21 @@ mod tests {
         // A railing 1 m up lifted Max onto it at the foot of the house stairs.
         let scene = floors_at(&[0.0, 1.0]);
         assert_eq!(find_floor_y(&scene, 0.0, EYE_HEIGHT, 0.0), Some(0.0));
+    }
+
+    #[test]
+    fn mouse_counts_follow_the_player_sensitivity_and_inversion() {
+        let settings = crate::input::MouseSettings {
+            sensitivity: [1.0, 0.5],
+            invert: true,
+            invert_wheel: false,
+        };
+        assert_eq!(mouse_counts((8.0, 8.0), &settings, None), (15.0, -8.0));
+        let mut smoothing = crate::input::MouseSmoothing::default();
+        assert_eq!(
+            mouse_counts((8.0, 0.0), &settings, Some(&mut smoothing)),
+            (7.5, 0.0)
+        );
     }
 
     #[test]
