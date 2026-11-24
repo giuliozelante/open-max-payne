@@ -29,6 +29,13 @@ pub fn use_software_renderer(software: bool) {
     SOFTWARE_RENDERER.store(software, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Retail's `-screenshot` (`0x40cbe2`): F10 (`0x4218ea`) saves the frame.
+static SCREENSHOTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn enable_screenshots(on: bool) {
+    SCREENSHOTS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(crate) fn hardware_renderer() -> bool {
     let env_sw = std::env::var("OPENMAXFX_RENDERER").is_ok_and(|v| v.eq_ignore_ascii_case("sw"));
     !(env_sw || SOFTWARE_RENDERER.load(std::sync::atomic::Ordering::Relaxed))
@@ -454,6 +461,8 @@ pub fn run_3d_walkthrough(
         if window.is_key_pressed(Key::V, KeyRepeat::No) {
             third_person = !third_person;
         }
+        let shot = SCREENSHOTS.load(std::sync::atomic::Ordering::Relaxed)
+            && window.is_key_pressed(Key::F10, KeyRepeat::No);
         use crate::input::slot;
         actions.begin_frame(window);
         let bullet_time_pressed = actions.pressed(window, slot::BULLET_TIME, 0);
@@ -1772,7 +1781,7 @@ pub fn run_3d_walkthrough(
         }
         let still = capture.as_mut().and_then(|c| c.due(base_dt));
         let moving = video.as_mut().is_some_and(|v| v.pace.due(base_dt));
-        if still.is_some() || moving {
+        if still.is_some() || moving || shot {
             let mut frame = vec![0u32; W * H];
             match (gpu.as_mut(), scene_view) {
                 (Some((renderer, _)), Some(view)) => {
@@ -1785,6 +1794,9 @@ pub fn run_3d_walkthrough(
             }
             if let Some(video) = video.as_ref().filter(|_| moving) {
                 video.push(&frame);
+            }
+            if shot {
+                save_screenshot(&game_root, &frame);
             }
             if let Some(path) = still {
                 if let Err(error) = write_ppm(&path, W, H, &frame) {
@@ -3435,6 +3447,41 @@ pub fn render_frame(
 }
 
 /// Binary PPM (`P6`) of a `0x00RRGGBB` frame.
+/// Uncompressed 24-bit TGA, rows top-down (descriptor bit 5), the format of retail's
+/// `\\screenshots\\shot%04i.tga` (`0x867e38`).
+fn write_tga(out: &mut impl std::io::Write, w: usize, h: usize, fb: &[u32]) -> std::io::Result<()> {
+    let [w0, w1] = (w as u16).to_le_bytes();
+    let [h0, h1] = (h as u16).to_le_bytes();
+    out.write_all(&[0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, w0, w1, h0, h1, 24, 0x20])?;
+    let pixels: Vec<u8> = fb[..w * h]
+        .iter()
+        .flat_map(|&p| [p as u8, (p >> 8) as u8, (p >> 16) as u8])
+        .collect();
+    out.write_all(&pixels)
+}
+
+/// The first `shotNNNN.tga` not yet in `dir`. Retail leaves the numbering to its driver
+/// (`P_Driver::saveScreenShot`); first free is HYPOTHESIS.
+fn next_screenshot(dir: &Path) -> PathBuf {
+    (0..10_000)
+        .map(|n| dir.join(format!("shot{n:04}.tga")))
+        .find(|path| !path.exists())
+        .unwrap_or_else(|| dir.join("shot9999.tga"))
+}
+
+/// Saves `frame` under `<game>/screenshots`, which retail creates when missing (`0x40e84c`).
+fn save_screenshot(game_root: &Path, frame: &[u32]) {
+    let dir = game_root.join("screenshots");
+    let path = next_screenshot(&dir);
+    let written = std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::File::create(&path))
+        .and_then(|file| write_tga(&mut std::io::BufWriter::new(file), W, H, frame));
+    match written {
+        Ok(()) => println!("screenshot {}", path.display()),
+        Err(error) => eprintln!("screenshot {}: {error}", path.display()),
+    }
+}
+
 pub fn write_ppm(path: &Path, w: usize, h: usize, fb: &[u32]) -> std::io::Result<()> {
     let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
     for px in fb {
@@ -6584,6 +6631,25 @@ mod tests {
         // A railing 1 m up lifted Max onto it at the foot of the house stairs.
         let scene = floors_at(&[0.0, 1.0]);
         assert_eq!(find_floor_y(&scene, 0.0, EYE_HEIGHT, 0.0), Some(0.0));
+    }
+
+    #[test]
+    fn a_screenshot_is_a_top_down_24_bit_tga() {
+        let mut bytes = Vec::new();
+        write_tga(&mut bytes, 2, 1, &[0x00_11_22_33, 0x00_44_55_66]).expect("written");
+        assert_eq!(bytes.len(), 18 + 6);
+        assert_eq!(bytes[2], 2);
+        assert_eq!(&bytes[12..18], &[2, 0, 1, 0, 24, 0x20]);
+        assert_eq!(&bytes[18..], &[0x33, 0x22, 0x11, 0x66, 0x55, 0x44]);
+    }
+
+    #[test]
+    fn screenshots_take_the_first_free_number() {
+        let dir = std::env::temp_dir().join(format!("omp-shots-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(dir.join("shot0000.tga"), b"").expect("file");
+        assert_eq!(next_screenshot(&dir), dir.join("shot0001.tga"));
+        std::fs::remove_dir_all(&dir).expect("cleaned");
     }
 
     #[test]
