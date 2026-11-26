@@ -810,6 +810,8 @@ pub struct QueuedSound {
     pub range: Option<crate::SoundRange>,
     /// World position of a sound with no emitter object, as a bullet hit's.
     pub at: Option<[f32; 3]>,
+    /// `Priority` of the cue: which voice gives up its channel when the mixer is full.
+    pub priority: f32,
 }
 
 /// A colour that fades in, stays and fades out over the screen.
@@ -1484,6 +1486,7 @@ impl LdbScene {
             looping: false,
             range: None,
             at: None,
+            priority: 0.0,
         };
         let catalog_loaded = self
             .sound_catalogs
@@ -1511,6 +1514,7 @@ impl LdbScene {
         sound.filename = crate::story_sound_filename(text, &sound.cue);
         sound.looping = crate::sound_cue_looping(text, &sound.cue);
         sound.range = crate::sound_cue_3d(text, &sound.cue);
+        sound.priority = crate::sound_cue_priority(text, &sound.cue);
         sound.filename.is_some()
     }
 

@@ -132,7 +132,7 @@ impl Music {
             return;
         };
         let looping = crate::sound_cue_looping(&music_txt, cue);
-        self.sound = crate::audio::Sound::play(&wav.into(), looping, 1.0);
+        self.sound = crate::audio::Sound::play(&wav.into(), looping, 1.0, None);
     }
 }
 
@@ -141,7 +141,7 @@ pub(crate) fn start_voice(wav: &[u8]) -> Option<crate::audio::Sound> {
     if wav.len() < 12 || &wav[..4] != b"RIFF" {
         return None;
     }
-    crate::audio::Sound::play(&wav.into(), false, 1.0)
+    crate::audio::Sound::play(&wav.into(), false, 1.0, None)
 }
 
 fn paint_novel_page(buf: &mut [u32], jpeg: &[u8], page: &str, chrome: &[u8]) {

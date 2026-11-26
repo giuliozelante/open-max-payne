@@ -618,13 +618,17 @@ fn latin1(bytes: Vec<u8>) -> String {
 /// The player's bindings: retail's own from the Wine prefix the launcher uses (`$WINEPREFIX`, else
 /// `<game>/.wine`), else the retail defaults.
 pub fn load_bindings(game_dir: &std::path::Path) -> Bindings {
+    wine_user_reg(game_dir)
+        .and_then(|reg| Bindings::from_wine_registry(&reg))
+        .unwrap_or_else(Bindings::retail_defaults)
+}
+
+/// `user.reg` of the Wine prefix the launcher uses: `$WINEPREFIX`, else `<game>/.wine`.
+pub fn wine_user_reg(game_dir: &std::path::Path) -> Option<String> {
     let prefix = std::env::var_os("WINEPREFIX")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| game_dir.join(".wine"));
-    std::fs::read(prefix.join("user.reg"))
-        .ok()
-        .and_then(|bytes| Bindings::from_wine_registry(&latin1(bytes)))
-        .unwrap_or_else(Bindings::retail_defaults)
+    std::fs::read(prefix.join("user.reg")).ok().map(latin1)
 }
 
 /// `data/input.txt` and the language's `database/stringdefines.h`.
