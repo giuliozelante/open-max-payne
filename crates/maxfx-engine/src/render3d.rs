@@ -279,7 +279,13 @@ pub fn run_3d_walkthrough(
             "software"
         }
     );
-    let mut sounds = SoundChannels::default();
+    let mut sounds = SoundChannels {
+        // HYPOTHESIS: with no launcher setting, the top slider position.
+        limit: crate::input::wine_user_reg(&catalog_root(level_path))
+            .and_then(|reg| crate::sound_channels_from_registry(&reg))
+            .unwrap_or(12),
+        voices: Vec::new(),
+    };
     // Level scripts' `A_PlayMusic`; dropped (stopped) when the level ends.
     let mut music = crate::menu_ui::Music::default();
     let camerapaths_txt = crate::read_game_bytes(
@@ -2801,8 +2807,9 @@ fn aim_hit_dynamic(
 }
 
 /// Sound voices, each tagged with its emitter. Dropping it stops them all (end of level).
-#[derive(Default)]
 struct SoundChannels {
+    /// Voices that may play at once: retail's mixer channels (`Sound Channels`).
+    limit: usize,
     voices: Vec<Voice>,
 }
 
@@ -2813,6 +2820,8 @@ struct Voice {
     looping: bool,
     range: Option<crate::SoundRange>,
     at: Option<[f32; 3]>,
+    /// The cue's `Priority`.
+    priority: f32,
     sound: Option<crate::audio::Sound>,
 }
 
@@ -2824,6 +2833,51 @@ impl Voice {
     fn start(&mut self, gain: f32) {
         self.sound = crate::audio::Sound::play(&self.wav, self.looping, gain);
     }
+}
+
+/// `sndmfc.dll`'s default priority formula (`0x1000aa3b`): the cue's priority less its distance
+/// from the listener. A non-positional cue keeps its priority.
+fn voice_rank(priority: f32, distance: Option<f32>) -> f32 {
+    priority - distance.unwrap_or(0.0)
+}
+
+/// The lowest-ranked of the playing voices, the first on a tie: retail sorts them ascending
+/// (`qsort`, comparator `0x1000ad10`) and stops the first (`0x1000ac1b`).
+fn channel_to_steal(ranks: impl IntoIterator<Item = f32>) -> Option<usize> {
+    ranks
+        .into_iter()
+        .enumerate()
+        .fold(None, |best: Option<(usize, f32)>, (i, rank)| match best {
+            Some((_, low)) if low <= rank => best,
+            _ => Some((i, rank)),
+        })
+        .map(|(i, _)| i)
+}
+
+/// Make room for a voice ranked `newcomer` when every channel plays. A new cue always takes the
+/// lowest channel; a loop coming back into range (`newcomer` set) only takes one it outranks, so
+/// two loops do not trade a channel every frame. `false` when no channel is free.
+fn free_channel(
+    voices: &mut [Voice],
+    limit: usize,
+    newcomer: Option<f32>,
+    rank: impl Fn(&Voice) -> f32,
+) -> bool {
+    let playing: Vec<usize> = (0..voices.len())
+        .filter(|&i| voices[i].sound.is_some())
+        .collect();
+    if playing.len() < limit {
+        return true;
+    }
+    let ranks: Vec<f32> = playing.iter().map(|&i| rank(&voices[i])).collect();
+    let Some(k) = channel_to_steal(ranks.iter().copied()) else {
+        return false;
+    };
+    if newcomer.is_some_and(|newcomer| newcomer <= ranks[k]) {
+        return false;
+    }
+    voices[playing[k]].kill();
+    true
 }
 
 /// Linear gain of a positional cue `distance` metres from the listener: full inside the hotspot,
@@ -2877,6 +2931,29 @@ fn resolve_queued_sounds(scene: &mut LdbScene, game_dir: &Path) {
     }
 }
 
+/// Distance from `listener` to a positional voice; `None` for a non-positional cue or an emitter
+/// with no position.
+fn voice_distance(
+    voice: &Voice,
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+    listener: [f32; 3],
+) -> Option<f32> {
+    voice.range?;
+    let pos = voice.at.or_else(|| {
+        let pos = scene.emitter_world_pos(&voice.emitter)?;
+        let room = emitter_room(scene, &voice.emitter);
+        let origin = rooms.get(&room).copied().unwrap_or([0.0; 3]);
+        Some([0, 1, 2].map(|k| origin[k] + pos[k]))
+    })?;
+    Some(
+        (0..3)
+            .map(|k| (pos[k] - listener[k]).powi(2))
+            .sum::<f32>()
+            .sqrt(),
+    )
+}
+
 /// Gain of `voice` heard at `listener`: full for a non-positional cue or an emitter with no position.
 fn voice_gain(
     voice: &Voice,
@@ -2887,20 +2964,10 @@ fn voice_gain(
     let Some(range) = &voice.range else {
         return 1.0;
     };
-    let pos = voice.at.or_else(|| {
-        let pos = scene.emitter_world_pos(&voice.emitter)?;
-        let room = emitter_room(scene, &voice.emitter);
-        let origin = rooms.get(&room).copied().unwrap_or([0.0; 3]);
-        Some([0, 1, 2].map(|k| origin[k] + pos[k]))
-    });
-    let Some(pos) = pos else {
-        return range.volume;
-    };
-    let d = (0..3)
-        .map(|k| (pos[k] - listener[k]).powi(2))
-        .sum::<f32>()
-        .sqrt();
-    sound_gain(d, range)
+    match voice_distance(voice, scene, rooms, listener) {
+        Some(d) => sound_gain(d, range),
+        None => range.volume,
+    }
 }
 
 /// Stop what `A_StopAll3DSounds` asked for, start the queued cues, and keep positional loops at
@@ -2925,12 +2992,28 @@ fn play_queued_sounds(
     sounds.voices.retain(|voice| {
         voice.looping || voice.sound.as_ref().is_some_and(|sound| !sound.finished())
     });
-    for voice in sounds.voices.iter_mut().filter(|voice| voice.looping) {
+    let rank = |voice: &Voice, scene: &LdbScene| {
+        voice_rank(
+            voice.priority,
+            voice_distance(voice, scene, rooms, listener),
+        )
+    };
+    for i in 0..sounds.voices.len() {
+        if !sounds.voices[i].looping {
+            continue;
+        }
+        let voice = &sounds.voices[i];
         let gain = voice_gain(voice, scene, rooms, listener);
         match voice_action(voice.sound.is_some(), gain) {
             VoiceAction::Keep => {}
-            VoiceAction::Stop => voice.kill(),
-            VoiceAction::Start => voice.start(gain),
+            VoiceAction::Stop => sounds.voices[i].kill(),
+            VoiceAction::Start => {
+                let newcomer = Some(rank(voice, scene));
+                let rank = |voice: &Voice| rank(voice, scene);
+                if free_channel(&mut sounds.voices, sounds.limit, newcomer, rank) {
+                    sounds.voices[i].start(gain);
+                }
+            }
             VoiceAction::SetGain => {
                 if let Some(sound) = &voice.sound {
                     sound.set_gain(gain);
@@ -2953,10 +3036,12 @@ fn play_queued_sounds(
             looping: sound.looping,
             range: sound.range,
             at: sound.at,
+            priority: sound.priority,
             sound: None,
         };
         let gain = voice_gain(&voice, scene, rooms, listener);
-        if gain > 0.0 {
+        let rank = |voice: &Voice| rank(voice, scene);
+        if gain > 0.0 && free_channel(&mut sounds.voices, sounds.limit, None, rank) {
             voice.start(gain);
         }
         // A one-shot out of range is never heard; a loop waits for the listener.
@@ -3148,6 +3233,7 @@ impl HitEffects<'_> {
                 looping: false,
                 range: crate::sound_cue_3d(&self.sounds_txt, cue),
                 at: Some(point),
+                priority: crate::sound_cue_priority(&self.sounds_txt, cue),
             });
         }
     }
@@ -4217,6 +4303,8 @@ fn queue_sound(scene: &mut LdbScene, catalog: &str, cue: &str, at: [f32; 3]) {
         looping: false,
         range: None,
         at: Some(at),
+        // Filled from the catalog with the file (`resolve_queued_sounds`).
+        priority: 0.0,
     });
 }
 
@@ -5872,6 +5960,7 @@ mod tests {
                 volume: 0.4,
             }),
             at: Some([100.0, 0.0, 0.0]),
+            priority: 0.0,
             sound: None,
         };
         let (scene, rooms) = (LdbScene::default(), BTreeMap::new());
@@ -6074,6 +6163,15 @@ mod tests {
         assert_eq!(sound_gain(8.0, &range), 0.125);
         assert_eq!(sound_gain(50.0, &range), 0.02);
         assert_eq!(sound_gain(50.5, &range), 0.0);
+    }
+
+    #[test]
+    fn a_full_mixer_gives_the_channel_of_the_lowest_priority_less_distance() {
+        // A door (20) 30 m away ranks below footsteps (1) at 2 m: 20 - 30 < 1 - 2.
+        assert_eq!(voice_rank(20.0, Some(30.0)), -10.0);
+        assert_eq!(voice_rank(5.0, None), 5.0);
+        assert_eq!(channel_to_steal([3.0, -10.0, -1.0, -10.0]), Some(1));
+        assert_eq!(channel_to_steal([]), None);
     }
 
     #[test]
