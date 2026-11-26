@@ -3166,20 +3166,47 @@ pub fn sound_cue_3d(text: &str, cue: &str) -> Option<SoundRange> {
     if !sound_cue_value(text, cue, "3dsound")?.eq_ignore_ascii_case("yes") {
         return None;
     }
-    let number = |key: &str| {
-        let value = sound_cue_value(text, cue, key)?;
-        value.parse::<f32>().ok().or_else(|| {
-            text.lines().find_map(|line| {
-                let mut words = line.trim().strip_prefix("#define")?.split_whitespace();
-                (words.next()? == value).then(|| words.next()?.parse().ok())?
-            })
-        })
-    };
+    let number = |key: &str| sound_cue_number(text, cue, key);
     Some(SoundRange {
         hotspot: number("hotspot")?,
         falloff: number("falloff")?,
         volume: number("volume").unwrap_or(1.0),
     })
+}
+
+/// A number inside `[cue]`, literal or a `#define` of the catalog (with `soundid.h` in front).
+fn sound_cue_number(text: &str, cue: &str, key: &str) -> Option<f32> {
+    let value = sound_cue_value(text, cue, key)?;
+    value.parse::<f32>().ok().or_else(|| {
+        text.lines().find_map(|line| {
+            let mut words = line.trim().strip_prefix("#define")?.split_whitespace();
+            (words.next()? == value).then(|| words.next()?.parse().ok())?
+        })
+    })
+}
+
+/// `Priority` of `[cue]`, handed to `S_Sound::setPriority` (`0x588837`). A cue without one keeps
+/// `SOUND_PRIORITY_DEFAULT`, 0.
+pub fn sound_cue_priority(text: &str, cue: &str) -> f32 {
+    sound_cue_number(text, cue, "priority").unwrap_or(0.0)
+}
+
+/// Mixer channels for the launcher's `Sound Channels` slider in a Wine prefix's `user.reg`: 0, 1
+/// and 2 give 8, 10 and 12 (`0x40c7f6`, passed to `S_Listener::setProperties`). `None` without it.
+pub fn sound_channels_from_registry(user_reg: &str) -> Option<usize> {
+    let header = r"[Software\\Remedy Entertainment\\Max Payne\\Advanced Settings]";
+    let start = user_reg.find(header)? + header.len();
+    let value = user_reg[start..]
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.starts_with('['))
+        .find_map(|line| line.trim().strip_prefix("\"Sound Channels\"=dword:"))?;
+    match u32::from_str_radix(value.trim(), 16).ok()? {
+        0 => Some(8),
+        1 => Some(10),
+        2 => Some(12),
+        _ => None,
+    }
 }
 
 /// `Looping = YES` inside `[cue]` (siren and engine loops in `sounds/dynamic.txt`).
@@ -4752,6 +4779,28 @@ mod tests {
         );
         assert_eq!(sound_cue_3d(text, "flat"), None);
         assert_eq!(sound_cue_3d(text, "missing"), None);
+    }
+
+    #[test]
+    fn sound_cue_priority_resolves_defines_and_defaults_to_zero() {
+        let text = "#define\tID_DOOR_PRIORITY\t\t\t20\t\t\t\n[door]\n{\n[Sound]\nFilename = d.wav;\nPriority = ID_DOOR_PRIORITY;\n}\n[hit]\n{\n[Sound]\nPriority = 5;\n}\n[plain]\n{\n[Sound]\nFilename = p.wav;\n}\n";
+        assert_eq!(sound_cue_priority(text, "door"), 20.0);
+        assert_eq!(sound_cue_priority(text, "hit"), 5.0);
+        assert_eq!(sound_cue_priority(text, "plain"), 0.0);
+    }
+
+    #[test]
+    fn sound_channels_follow_the_advanced_settings_slider() {
+        let reg = |value: u32| {
+            format!("[Software\\\\Remedy Entertainment\\\\Max Payne\\\\Advanced Settings] 1\n\"Sound Channels\"=dword:{value:08x}\n\n[Other]\n")
+        };
+        assert_eq!(sound_channels_from_registry(&reg(0)), Some(8));
+        assert_eq!(sound_channels_from_registry(&reg(1)), Some(10));
+        assert_eq!(sound_channels_from_registry(&reg(2)), Some(12));
+        assert_eq!(
+            sound_channels_from_registry("[Other]\n\"Sound Channels\"=dword:00000000\n"),
+            None
+        );
     }
 
     #[test]
