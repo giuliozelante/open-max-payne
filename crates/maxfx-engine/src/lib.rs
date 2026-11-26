@@ -3462,6 +3462,9 @@ pub fn play_intro_video(path: &Path, screen: &mut frontend::Screen) -> Result<()
 
 struct GameSource {
     game_dir: PathBuf,
+    /// `OPENMAXFX_HIRES_DATA`: a user-supplied folder laid out like `data/` (high-resolution
+    /// textures). Off unless set; never shipped.
+    hires: Option<PathBuf>,
     ras_paths: Vec<PathBuf>,
     opened: Vec<openras::archive::RasIndex>,
     cursor: usize,
@@ -3471,15 +3474,27 @@ impl GameSource {
     fn open(game_dir: &Path) -> Self {
         Self {
             game_dir: game_dir.to_path_buf(),
+            hires: std::env::var_os("OPENMAXFX_HIRES_DATA")
+                .filter(|dir| !dir.is_empty())
+                .map(PathBuf::from),
             ras_paths: ras_candidates(game_dir),
             opened: Vec::new(),
             cursor: 0,
         }
     }
 
-    /// Loose `data/` first, then the archives in order. Archives are indexed, not decoded: a
-    /// lookup reads only the member it returns.
+    /// The high-resolution folder for `\data\…` members, then loose `data/`, then the archives
+    /// in order. Archives are indexed, not decoded: a lookup reads only the member it returns.
     fn read(&mut self, win_path: &str) -> Option<Vec<u8>> {
+        let in_data = win_to_rel(win_path)
+            .strip_prefix("data")
+            .ok()
+            .map(Path::to_path_buf);
+        if let (Some(hires), Some(rel)) = (&self.hires, in_data) {
+            if let Some(bytes) = file_ignoring_case(hires, &rel).and_then(|f| fs::read(f).ok()) {
+                return Some(bytes);
+            }
+        }
         if let Some(bytes) = loose_bytes(&self.game_dir, win_path) {
             return Some(bytes);
         }
@@ -3508,6 +3523,27 @@ fn loose_bytes(game_dir: &Path, win_path: &str) -> Option<Vec<u8>> {
     let rel = win_to_rel(win_path);
     let loose = game_dir.join(&rel);
     loose.is_file().then(|| fs::read(loose).ok())?
+}
+
+/// `root/rel` matched one component at a time without case, as the Windows retail game sees
+/// files. Exact names are tried first, so a correctly cased tree costs no directory scans.
+fn file_ignoring_case(root: &Path, rel: &Path) -> Option<PathBuf> {
+    let mut dir = root.to_path_buf();
+    for part in rel.components() {
+        let part = part.as_os_str();
+        let exact = dir.join(part);
+        dir = if exact.exists() {
+            exact
+        } else {
+            let want = part.to_string_lossy().to_ascii_lowercase();
+            fs::read_dir(&dir)
+                .ok()?
+                .flatten()
+                .find(|ent| ent.file_name().to_string_lossy().to_ascii_lowercase() == want)?
+                .path()
+        };
+    }
+    dir.is_file().then_some(dir)
 }
 
 fn win_to_rel(win_path: &str) -> PathBuf {
@@ -4843,6 +4879,25 @@ mod tests {
         let found = loose_bytes(&game, r"\data\globalconfig.txt");
         fs::remove_dir_all(&game).unwrap();
         assert_eq!(found, None);
+    }
+
+    #[test]
+    fn hires_folder_overrides_data_members_regardless_of_case() {
+        let game = std::env::temp_dir().join(format!("omp-hires-{}", std::process::id()));
+        let hires = game.join("FixPack");
+        fs::create_dir_all(hires.join("database/SharedTextures")).unwrap();
+        fs::write(hires.join("database/SharedTextures/Cardboard.jpg"), "big").unwrap();
+        fs::create_dir_all(game.join("data")).unwrap();
+        fs::write(game.join("data/globalconfig.txt"), "retail").unwrap();
+        let mut source = GameSource::open(&game);
+        source.hires = Some(hires);
+        let texture = source.read(r"\data\database\sharedtextures\cardboard.jpg");
+        let config = source.read(r"\data\globalconfig.txt");
+        let outside = source.read(r"\database\sharedtextures\cardboard.jpg");
+        fs::remove_dir_all(&game).unwrap();
+        assert_eq!(texture.as_deref(), Some(&b"big"[..]));
+        assert_eq!(config.as_deref(), Some(&b"retail"[..]));
+        assert_eq!(outside, None);
     }
 
     #[test]

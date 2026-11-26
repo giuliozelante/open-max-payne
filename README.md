@@ -29,6 +29,7 @@ Current state: [docs/STATUS.md](docs/STATUS.md).
 | **Engine: New Game** | Starts the intro and early levels; the full game has not been played through |
 | **Engine: fixes** | Tracked in issues #162 to #168; widescreen, settings and saves are still open |
 | **Wine fallback** | `maxfx-play` runs the original `MaxPayne.exe`; `OPENMAXFX_PLAY=native` picks the engine |
+| **High-resolution textures** | `OPENMAXFX_HIRES_DATA=<folder>` points the engine at a texture pack laid out like `data/` (such as the FixPack's). Off by default; it sits on top of localized archives. Never shipped |
 | **1.05 patcher** | `maxfx-patcher`: HTTPS and a SHA-256 allowlist; refuses SFX installers |
 | **`openras`** | Complete RASMaker replacement for RAS/MPM archives |
 | **`openpfx`** | Reads and repacks `.rps`; PSE to RPS export is partial |
