@@ -770,6 +770,15 @@ mod tests {
         assert!((many - once).abs() < 1e-3, "{once} vs {many}");
     }
 
+    #[test]
+    fn a_dive_covers_the_same_ground_at_30_60_144_and_240() {
+        let clips = clips();
+        for rate in [30, 60, 144, 240] {
+            let distance = dive_distance(&clips, 1.0 / rate as f32, rate * 3 / 2);
+            assert!((distance - 4.0).abs() < 1e-3, "{rate} fps: {distance}");
+        }
+    }
+
     fn dive_distance(clips: &CharacterClips, dt: f32, steps: i32) -> f32 {
         let mut motion = PlayerMotion::default();
         let c = Controls {
