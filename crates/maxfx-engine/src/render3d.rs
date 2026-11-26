@@ -299,6 +299,7 @@ pub fn run_3d_walkthrough(
     let mut death_cam: Option<(CameraShake, String)> = None;
     // Last frame's eye: the sound listener.
     let mut listener = player_pos;
+    let mut listener_right = [1.0, 0.0, 0.0];
     let game_root = catalog_root(level_path);
     let particles_txt =
         crate::read_game_bytes(&game_root, r"\data\database\particles\particles.txt")
@@ -592,7 +593,7 @@ pub fn run_3d_walkthrough(
                     &catalog_root(level_path),
                     &mut sounds,
                     &room_origins,
-                    listener,
+                    (listener, listener_right),
                 );
             } else if scope_fov.is_some() {
                 scoped = !scoped;
@@ -960,7 +961,7 @@ pub fn run_3d_walkthrough(
                                 &catalog_root(level_path),
                                 &mut sounds,
                                 &room_origins,
-                                listener,
+                                (listener, listener_right),
                             );
                         }
                     }
@@ -1121,7 +1122,7 @@ pub fn run_3d_walkthrough(
             &catalog_root(level_path),
             &mut sounds,
             &room_origins,
-            listener,
+            (listener, listener_right),
         );
 
         let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
@@ -1325,7 +1326,7 @@ pub fn run_3d_walkthrough(
             &catalog_root(level_path),
             &mut sounds,
             &room_origins,
-            listener,
+            (listener, listener_right),
         );
         if let Some(rig) = player_rig.as_ref() {
             let feet = [player_pos[0], player_pos[1] - EYE_HEIGHT, player_pos[2]];
@@ -1427,6 +1428,7 @@ pub fn run_3d_walkthrough(
                 shaken_view((cam_pos, cam_right, cam_up, cam_fwd), delta);
         }
         listener = cam_pos;
+        listener_right = cam_right;
 
         let fov_scale = fov_scale(scene.fov_multiplier.value);
         // World sphere (house = sunset) or the flat ceiling when the level names none.
@@ -2830,8 +2832,8 @@ impl Voice {
         self.sound = None;
     }
 
-    fn start(&mut self, gain: f32) {
-        self.sound = crate::audio::Sound::play(&self.wav, self.looping, gain);
+    fn start(&mut self, gain: f32, side: Option<f32>) {
+        self.sound = crate::audio::Sound::play(&self.wav, self.looping, gain, side);
     }
 }
 
@@ -2931,6 +2933,33 @@ fn resolve_queued_sounds(scene: &mut LdbScene, game_dir: &Path) {
     }
 }
 
+/// World position of a positional voice; `None` for a non-positional cue or an emitter with no
+/// position.
+fn voice_position(
+    voice: &Voice,
+    scene: &LdbScene,
+    rooms: &BTreeMap<i32, [f32; 3]>,
+) -> Option<[f32; 3]> {
+    voice.range?;
+    voice.at.or_else(|| {
+        let pos = scene.emitter_world_pos(&voice.emitter)?;
+        let room = emitter_room(scene, &voice.emitter);
+        let origin = rooms.get(&room).copied().unwrap_or([0.0; 3]);
+        Some([0, 1, 2].map(|k| origin[k] + pos[k]))
+    })
+}
+
+/// How far to the listener's right `pos` lies: the sine of its bearing, -1 to 1, and 0 at the
+/// listener itself.
+fn listener_side(listener: [f32; 3], right: [f32; 3], pos: [f32; 3]) -> f32 {
+    let to = sub3(pos, listener);
+    let length = dot3(to, to).sqrt();
+    if length <= f32::EPSILON {
+        return 0.0;
+    }
+    dot3(to, right) / length
+}
+
 /// Distance from `listener` to a positional voice; `None` for a non-positional cue or an emitter
 /// with no position.
 fn voice_distance(
@@ -2939,13 +2968,7 @@ fn voice_distance(
     rooms: &BTreeMap<i32, [f32; 3]>,
     listener: [f32; 3],
 ) -> Option<f32> {
-    voice.range?;
-    let pos = voice.at.or_else(|| {
-        let pos = scene.emitter_world_pos(&voice.emitter)?;
-        let room = emitter_room(scene, &voice.emitter);
-        let origin = rooms.get(&room).copied().unwrap_or([0.0; 3]);
-        Some([0, 1, 2].map(|k| origin[k] + pos[k]))
-    })?;
+    let pos = voice_position(voice, scene, rooms)?;
     Some(
         (0..3)
             .map(|k| (pos[k] - listener[k]).powi(2))
@@ -2977,8 +3000,11 @@ fn play_queued_sounds(
     game_dir: &Path,
     sounds: &mut SoundChannels,
     rooms: &BTreeMap<i32, [f32; 3]>,
-    listener: [f32; 3],
+    (listener, right): ([f32; 3], [f32; 3]),
 ) {
+    let side = |voice: &Voice, scene: &LdbScene| {
+        voice_position(voice, scene, rooms).map(|pos| listener_side(listener, right, pos))
+    };
     for emitter in std::mem::take(&mut scene.sound_stops) {
         sounds.voices.retain_mut(|voice| {
             if voice.emitter.eq_ignore_ascii_case(&emitter) {
@@ -3010,13 +3036,17 @@ fn play_queued_sounds(
             VoiceAction::Start => {
                 let newcomer = Some(rank(voice, scene));
                 let rank = |voice: &Voice| rank(voice, scene);
+                let side = side(voice, scene);
                 if free_channel(&mut sounds.voices, sounds.limit, newcomer, rank) {
-                    sounds.voices[i].start(gain);
+                    sounds.voices[i].start(gain, side);
                 }
             }
             VoiceAction::SetGain => {
                 if let Some(sound) = &voice.sound {
                     sound.set_gain(gain);
+                    if let Some(side) = side(voice, scene) {
+                        sound.set_side(side);
+                    }
                 }
             }
         }
@@ -3042,7 +3072,7 @@ fn play_queued_sounds(
         let gain = voice_gain(&voice, scene, rooms, listener);
         let rank = |voice: &Voice| rank(voice, scene);
         if gain > 0.0 && free_channel(&mut sounds.voices, sounds.limit, None, rank) {
-            voice.start(gain);
+            voice.start(gain, side(&voice, scene));
         }
         // A one-shot out of range is never heard; a loop waits for the listener.
         if voice.looping || voice.sound.is_some() {
@@ -6163,6 +6193,15 @@ mod tests {
         assert_eq!(sound_gain(8.0, &range), 0.125);
         assert_eq!(sound_gain(50.0, &range), 0.02);
         assert_eq!(sound_gain(50.5, &range), 0.0);
+    }
+
+    #[test]
+    fn a_sound_pans_by_its_side_of_the_listener() {
+        let right = [1.0, 0.0, 0.0];
+        assert_eq!(listener_side([0.0; 3], right, [3.0, 0.0, 0.0]), 1.0);
+        assert_eq!(listener_side([0.0; 3], right, [0.0, 0.0, 5.0]), 0.0);
+        assert!((listener_side([0.0; 3], right, [-1.0, 0.0, 1.0]) + 0.70710677).abs() < 1e-6);
+        assert_eq!(listener_side([2.0; 3], right, [2.0; 3]), 0.0);
     }
 
     #[test]
